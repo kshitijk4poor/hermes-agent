@@ -1,0 +1,55 @@
+skills/email/himalaya/SKILL.md
+  e30421117f2d094d 11-12
+skills/research/duckduckgo-search/SKILL.md
+  e30421117f2d094d 11-12
+skills/apple/imessage/SKILL.md
+  e30421117f2d094d 11-12
+CONTRIBUTING.md
+  e30421117f2d094d 331-335,374-392
+skills/github/codebase-inspection/SKILL.md
+  e30421117f2d094d 11-12
+skills/apple/apple-reminders/SKILL.md
+  e30421117f2d094d 11-12
+skills/smart-home/openhue/SKILL.md
+  e30421117f2d094d 11-12
+skills/mcp/mcporter/SKILL.md
+  e30421117f2d094d 11-12
+tests/agent/test_prompt_builder.py
+  e30421117f2d094d 11,215-286
+skills/productivity/notion/SKILL.md
+  e30421117f2d094d 11-12
+skills/music-creation/songsee/SKILL.md
+  e30421117f2d094d 11-12
+tools/skills_tool.py
+  e30421117f2d094d 37-41,73,127-163,308-311,316-320,688-698
+tests/tools/test_skills_tool.py
+  e30421117f2d094d 14,468-636
+skills/feeds/blogwatcher/SKILL.md
+  e30421117f2d094d 11-12
+skills/apple/apple-notes/SKILL.md
+  e30421117f2d094d 12-13
+agent/prompt_builder.py
+  e30421117f2d094d 173-188,210-212
+skills/gifs/gif-search/SKILL.md
+  e30421117f2d094d 4,7-9,19-28,31-32,38,41,48,55,64
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.1.8",
+  "base_commit_sha": "4c10afa67ba5005d8fc01c9c1cde0839129addfb",
+  "prompts": {
+    "e30421117f2d094d": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "46fe015b-9619-4a41-9342-8d414a40e5c7",
+        "model": "claude-4.6-opus-high-thinking"
+      },
+      "human_author": "kshitij <82637225+kshitijk4poor@users.noreply.github.com>",
+      "messages": [],
+      "total_additions": 395,
+      "total_deletions": 13,
+      "accepted_lines": 392,
+      "overriden_lines": 0
+    }
+  }
+}
