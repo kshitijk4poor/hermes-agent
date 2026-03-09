@@ -105,6 +105,7 @@ Or set the provider permanently in `config.yaml`:
 model:
   provider: "zai"       # or: kimi-coding, minimax, minimax-cn
   default: "glm-4-plus"
+  # max_tokens: 32768     # Optional output budget override
 ```
 
 Base URLs can be overridden with `GLM_BASE_URL`, `KIMI_BASE_URL`, `MINIMAX_BASE_URL`, or `MINIMAX_CN_BASE_URL` environment variables.
@@ -130,6 +131,22 @@ hermes model
 OPENAI_BASE_URL=http://localhost:8000/v1
 OPENAI_API_KEY=your-key-or-dummy
 LLM_MODEL=your-model-name
+```
+
+If your provider has a low default output budget, you can explicitly set `max_tokens`:
+
+```yaml
+model:
+  default: moonshotai/kimi-k2.5
+  provider: custom
+  base_url: https://integrate.api.nvidia.com/v1
+  max_tokens: 32768
+```
+
+Or override per environment:
+
+```bash
+HERMES_MAX_TOKENS=32768
 ```
 
 Everything below follows this same pattern — just change the URL, key, and model name.
