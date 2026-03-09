@@ -274,7 +274,18 @@ BINARY_EXTENSIONS = {
 
 # Image extensions (subset of binary that we can return as base64)
 IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.ico'}
-INLINE_FILE_EXTENSIONS = IMAGE_EXTENSIONS | {'.pdf'}
+
+# MIME types for inline attachment extensions
+MIME_TYPES = {
+    '.png': 'image/png',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.bmp': 'image/bmp',
+    '.ico': 'image/x-icon',
+    '.pdf': 'application/pdf',
+}
 
 # Linters by file extension
 LINTERS = {
@@ -366,19 +377,14 @@ class ShellFileOperations(FileOperations):
         
         return False
     
-    def _is_image(self, path: str) -> bool:
-        """Check if file is an image we can return as base64."""
+    def _classify_attachment(self, path: str) -> Optional[str]:
+        """Return 'image', 'pdf', or None based on file extension."""
         ext = os.path.splitext(path)[1].lower()
-        return ext in IMAGE_EXTENSIONS
-
-    def _is_pdf(self, path: str) -> bool:
-        """Check if file is a PDF we can return as an attachment."""
-        return os.path.splitext(path)[1].lower() == '.pdf'
-
-    def _is_inline_attachment(self, path: str) -> bool:
-        """Check if file is a binary attachment we can inline for multimodal models."""
-        ext = os.path.splitext(path)[1].lower()
-        return ext in INLINE_FILE_EXTENSIONS
+        if ext in IMAGE_EXTENSIONS:
+            return "image"
+        if ext == ".pdf":
+            return "pdf"
+        return None
     
     def _add_line_numbers(self, content: str, start_line: int = 1) -> str:
         """Add line numbers to content in LINE_NUM|CONTENT format."""
@@ -474,8 +480,9 @@ class ShellFileOperations(FileOperations):
             # Still try to read, but warn
             pass
         
-        if self._is_inline_attachment(path):
-            return self._read_inline_attachment(path, file_size)
+        attachment_kind = self._classify_attachment(path)
+        if attachment_kind is not None:
+            return self._read_inline_attachment(path, file_size, attachment_kind)
         
         # Read a sample to check for binary content
         sample_cmd = f"head -c 1000 {self._escape_shell_arg(path)} 2>/dev/null"
@@ -520,10 +527,10 @@ class ShellFileOperations(FileOperations):
     
     MAX_INLINE_ATTACHMENT_BYTES = 512 * 1024  # 512 KB
 
-    def _read_inline_attachment(self, path: str, file_size: int) -> ReadResult:
+    def _read_inline_attachment(self, path: str, file_size: int, attachment_kind: str) -> ReadResult:
         """Read an image or PDF file, returning base64 content when small enough."""
-        is_image = self._is_image(path)
-        is_pdf = self._is_pdf(path)
+        is_image = attachment_kind == "image"
+        is_pdf = attachment_kind == "pdf"
 
         if file_size > self.MAX_INLINE_ATTACHMENT_BYTES:
             noun = "Image" if is_image else "PDF"
@@ -561,17 +568,7 @@ class ShellFileOperations(FileOperations):
                 dimensions = dim_result.stdout.strip()
 
         ext = os.path.splitext(path)[1].lower()
-        mime_types = {
-            '.png': 'image/png',
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.gif': 'image/gif',
-            '.webp': 'image/webp',
-            '.bmp': 'image/bmp',
-            '.ico': 'image/x-icon',
-            '.pdf': 'application/pdf',
-        }
-        mime_type = mime_types.get(ext, 'application/octet-stream')
+        mime_type = MIME_TYPES.get(ext, 'application/octet-stream')
 
         return ReadResult(
             is_image=is_image,

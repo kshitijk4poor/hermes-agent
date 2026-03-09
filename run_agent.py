@@ -293,9 +293,8 @@ class AIAgent:
         # Anthropic prompt caching: auto-enabled for Claude models via OpenRouter.
         # Reduces input costs by ~75% on multi-turn conversations by caching the
         # conversation prefix. Uses system_and_3 strategy (4 breakpoints).
-        is_openrouter = "openrouter" in self.base_url.lower()
         is_claude = "claude" in self.model.lower()
-        self._use_prompt_caching = is_openrouter and is_claude
+        self._use_prompt_caching = self._is_openrouter and is_claude
         self._cache_ttl = "5m"  # Default 5-minute TTL (1.25x write cost)
         
         # Persistent error log -- always writes WARNING+ to ~/.hermes/logs/errors.log
@@ -605,6 +604,11 @@ class AIAgent:
             else:
                 print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
     
+    @property
+    def _is_openrouter(self) -> bool:
+        """Whether the active base URL points to OpenRouter."""
+        return "openrouter" in self.base_url.lower()
+
     def _max_tokens_param(self, value: int) -> dict:
         """Return the correct max tokens kwarg for the current provider.
         
@@ -614,7 +618,7 @@ class AIAgent:
         """
         _is_direct_openai = (
             "api.openai.com" in self.base_url.lower()
-            and "openrouter" not in self.base_url.lower()
+            and not self._is_openrouter
         )
         if _is_direct_openai:
             return {"max_completion_tokens": value}
@@ -875,11 +879,11 @@ class AIAgent:
                 image = part.get("image_url")
                 if isinstance(image, dict):
                     image_url = image.get("url")
-                    if isinstance(image_url, str) and image_url:
-                        item = {"type": "input_image", "image_url": image_url}
+                    if isinstance(image_url, str) and image_url.strip():
+                        item = {"type": "input_image", "image_url": image_url.strip()}
                         detail = image.get("detail")
-                        if isinstance(detail, str) and detail:
-                            item["detail"] = detail
+                        if isinstance(detail, str) and detail.strip():
+                            item["detail"] = detail.strip()
                         parts.append(item)
                 continue
 
@@ -888,12 +892,12 @@ class AIAgent:
                 if isinstance(file_obj, dict):
                     item = {"type": "input_file"}
                     filename = file_obj.get("filename")
-                    if isinstance(filename, str) and filename:
-                        item["filename"] = filename
+                    if isinstance(filename, str) and filename.strip():
+                        item["filename"] = filename.strip()
                     for key in ("file_data", "file_url", "file_id"):
                         value = file_obj.get(key)
-                        if isinstance(value, str) and value:
-                            item[key] = value
+                        if isinstance(value, str) and value.strip():
+                            item[key] = value.strip()
                             break
                     if any(key in item for key in ("file_data", "file_url", "file_id")):
                         parts.append(item)
@@ -905,9 +909,9 @@ class AIAgent:
         if attachment_kind == "image":
             if self.api_mode == "codex_responses":
                 return self.provider == "openai-codex"
-            return self.provider == "openrouter" and "openrouter.ai" in (self.base_url or "").lower()
+            return self._is_openrouter
         if attachment_kind == "pdf":
-            return self.api_mode != "codex_responses" and "openrouter.ai" in (self.base_url or "").lower()
+            return self.api_mode != "codex_responses" and self._is_openrouter
         return False
 
     def _build_tool_result_messages(
@@ -921,7 +925,7 @@ class AIAgent:
         tool_content = function_result
         inline_message = None
 
-        if function_name == "read_file":
+        if function_name == "read_file" and '"base64_content"' in function_result:
             try:
                 parsed = json.loads(function_result)
             except Exception:
@@ -933,7 +937,7 @@ class AIAgent:
                 base64_content = parsed.get("base64_content")
                 path = str(function_args.get("path") or "")
 
-                if attachment_kind and isinstance(mime_type, str) and mime_type and base64_content:
+                if attachment_kind is not None and isinstance(mime_type, str) and mime_type and base64_content:
                     if self._supports_inline_read_file_attachment(attachment_kind):
                         intro = (
                             f"Hermes inline attachment from read_file('{path}'). "
@@ -955,23 +959,21 @@ class AIAgent:
                             )
                         inline_message = {"role": "user", "content": parts}
 
-                parsed = parsed.copy()
-                parsed.pop("base64_content", None)
-                inline_hint = (
-                    "Inline attachment added to conversation context."
-                    if inline_message
-                    else (
-                        "Attachment metadata retained; inline attachment not supported for the current provider/API mode."
-                        if attachment_kind != "pdf"
-                        else "Attachment metadata retained; inline PDF attachment is currently limited to supported OpenRouter chat-completions paths."
-                    )
-                )
-                existing_hint = parsed.get("hint")
-                if isinstance(existing_hint, str) and existing_hint.strip():
-                    parsed["hint"] = f"{existing_hint} {inline_hint}"
-                else:
-                    parsed["hint"] = inline_hint
-                tool_content = json.dumps(parsed, ensure_ascii=False)
+                    # Build hint based on what happened
+                    if inline_message:
+                        inline_hint = "Inline attachment added to conversation context."
+                    elif attachment_kind == "pdf":
+                        inline_hint = "Attachment metadata retained; inline PDF attachment is currently limited to supported OpenRouter chat-completions paths."
+                    else:
+                        inline_hint = "Attachment metadata retained; inline attachment not supported for the current provider/API mode."
+
+                    parsed = {k: v for k, v in parsed.items() if k != "base64_content"}
+                    existing_hint = parsed.get("hint")
+                    if isinstance(existing_hint, str) and existing_hint.strip():
+                        parsed["hint"] = f"{existing_hint} {inline_hint}"
+                    else:
+                        parsed["hint"] = inline_hint
+                    tool_content = json.dumps(parsed, ensure_ascii=False)
 
         messages = [{"role": "tool", "content": tool_content, "tool_call_id": tool_call_id}]
         if inline_message is not None:
@@ -2404,11 +2406,10 @@ class AIAgent:
         if provider_preferences:
             extra_body["provider"] = provider_preferences
 
-        _is_openrouter = "openrouter" in self.base_url.lower()
         _is_nous = "nousresearch" in self.base_url.lower()
 
         _is_mistral = "api.mistral.ai" in self.base_url.lower()
-        if (_is_openrouter or _is_nous) and not _is_mistral:
+        if (self._is_openrouter or _is_nous) and not _is_mistral:
             if self.reasoning_config is not None:
                 extra_body["reasoning"] = self.reasoning_config
             else:
@@ -2888,14 +2889,15 @@ class AIAgent:
             # enough for any reasonable tool output but prevents catastrophic
             # context explosions.
             MAX_TOOL_RESULT_CHARS = 100_000
-            primary_content = tool_messages[0]["content"]
-            if isinstance(primary_content, str) and len(primary_content) > MAX_TOOL_RESULT_CHARS:
-                original_len = len(primary_content)
-                tool_messages[0]["content"] = (
-                    primary_content[:MAX_TOOL_RESULT_CHARS]
-                    + f"\n\n[Truncated: tool response was {original_len:,} chars, "
-                    f"exceeding the {MAX_TOOL_RESULT_CHARS:,} char limit]"
-                )
+            for tool_msg in tool_messages:
+                msg_content = tool_msg["content"]
+                if isinstance(msg_content, str) and len(msg_content) > MAX_TOOL_RESULT_CHARS:
+                    original_len = len(msg_content)
+                    tool_msg["content"] = (
+                        msg_content[:MAX_TOOL_RESULT_CHARS]
+                        + f"\n\n[Truncated: tool response was {original_len:,} chars, "
+                        f"exceeding the {MAX_TOOL_RESULT_CHARS:,} char limit]"
+                    )
 
             for tool_msg in tool_messages:
                 messages.append(tool_msg)
@@ -2956,9 +2958,8 @@ class AIAgent:
                     api_messages.insert(sys_offset + idx, pfm.copy())
 
             summary_extra_body = {}
-            _is_openrouter = "openrouter" in self.base_url.lower()
             _is_nous = "nousresearch" in self.base_url.lower()
-            if _is_openrouter or _is_nous:
+            if self._is_openrouter or _is_nous:
                 if self.reasoning_config is not None:
                     summary_extra_body["reasoning"] = self.reasoning_config
                 else:

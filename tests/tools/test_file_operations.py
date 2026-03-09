@@ -215,12 +215,12 @@ class TestShellFileOpsHelpers:
         # Normal text -> not binary
         assert file_ops._is_likely_binary("unknown", "Hello world\nLine 2\n") is False
 
-    def test_is_image(self, file_ops):
-        assert file_ops._is_image("photo.png") is True
-        assert file_ops._is_image("pic.jpg") is True
-        assert file_ops._is_image("icon.ico") is True
-        assert file_ops._is_image("data.pdf") is False
-        assert file_ops._is_image("code.py") is False
+    def test_classify_attachment(self, file_ops):
+        assert file_ops._classify_attachment("photo.png") == "image"
+        assert file_ops._classify_attachment("pic.jpg") == "image"
+        assert file_ops._classify_attachment("icon.ico") == "image"
+        assert file_ops._classify_attachment("data.pdf") == "pdf"
+        assert file_ops._classify_attachment("code.py") is None
 
     def test_add_line_numbers(self, file_ops):
         content = "line one\nline two\nline three"
