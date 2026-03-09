@@ -162,6 +162,63 @@ def test_runtime_resolution_rebuilds_agent_on_routing_change(monkeypatch):
     assert shell.api_mode == "codex_responses"
 
 
+def test_init_agent_passes_runtime_max_tokens(monkeypatch):
+    cli = _import_cli()
+
+    def _runtime_resolve(**kwargs):
+        return {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "test-key",
+            "max_tokens": 32768,
+            "source": "env/config",
+        }
+
+    class _DummyAgent:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr("hermes_cli.runtime_provider.resolve_runtime_provider", _runtime_resolve)
+    monkeypatch.setattr("hermes_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+    monkeypatch.setattr(cli, "AIAgent", _DummyAgent)
+
+    shell = cli.HermesCLI(model="gpt-5", compact=True, max_turns=1)
+
+    assert shell._init_agent() is True
+    assert shell.max_tokens == 32768
+    assert shell.agent.kwargs["max_tokens"] == 32768
+
+
+def test_runtime_resolution_rebuilds_agent_on_max_tokens_change(monkeypatch):
+    cli = _import_cli()
+
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda **kwargs: {
+            "provider": "openrouter",
+            "api_mode": "chat_completions",
+            "base_url": "https://same-endpoint.example/v1",
+            "api_key": "same-key",
+            "max_tokens": 32768,
+            "source": "env/config",
+        },
+    )
+    monkeypatch.setattr("hermes_cli.runtime_provider.format_runtime_provider_error", lambda exc: str(exc))
+
+    shell = cli.HermesCLI(model="gpt-5", compact=True, max_turns=1)
+    shell.provider = "openrouter"
+    shell.api_mode = "chat_completions"
+    shell.base_url = "https://same-endpoint.example/v1"
+    shell.api_key = "same-key"
+    shell.max_tokens = 1024
+    shell.agent = object()
+
+    assert shell._ensure_runtime_credentials() is True
+    assert shell.agent is None
+    assert shell.max_tokens == 32768
+
+
 def test_codex_provider_replaces_incompatible_default_model(monkeypatch):
     """When provider resolves to openai-codex and no model was explicitly
     chosen, the global config default (e.g. anthropic/claude-opus-4.6) must
