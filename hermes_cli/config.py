@@ -510,8 +510,12 @@ def _set_nested(config: dict, dotted_key: str, value):
     parts = dotted_key.split(".")
     current = config
     for part in parts[:-1]:
-        if part not in current or not isinstance(current.get(part), dict):
-            current[part] = {}
+        existing = current.get(part)
+        if not isinstance(existing, dict):
+            if part == "model" and isinstance(existing, str) and existing.strip():
+                current[part] = {"default": existing.strip()}
+            else:
+                current[part] = {}
         current = current[part]
     current[parts[-1]] = value
 
@@ -1079,8 +1083,12 @@ def set_config_value(key: str, value: str):
     current = user_config
     
     for part in parts[:-1]:
-        if part not in current or not isinstance(current.get(part), dict):
-            current[part] = {}
+        existing = current.get(part)
+        if not isinstance(existing, dict):
+            if part == "model" and isinstance(existing, str) and existing.strip():
+                current[part] = {"default": existing.strip()}
+            else:
+                current[part] = {}
         current = current[part]
     
     # Convert value to appropriate type

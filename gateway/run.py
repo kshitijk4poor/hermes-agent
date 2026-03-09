@@ -179,6 +179,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "base_url": runtime.get("base_url"),
         "provider": runtime.get("provider"),
         "api_mode": runtime.get("api_mode"),
+        "max_tokens": runtime.get("max_tokens"),
     }
 
 

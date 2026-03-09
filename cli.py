@@ -1007,8 +1007,12 @@ def save_config_value(key_path: str, value: any) -> bool:
         keys = key_path.split('.')
         current = config
         for key in keys[:-1]:
-            if key not in current or not isinstance(current[key], dict):
-                current[key] = {}
+            existing = current.get(key)
+            if not isinstance(existing, dict):
+                if key == "model" and isinstance(existing, str) and existing.strip():
+                    current[key] = {"default": existing.strip()}
+                else:
+                    current[key] = {}
             current = current[key]
         current[keys[-1]] = value
         
