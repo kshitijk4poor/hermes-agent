@@ -189,6 +189,30 @@ class SlackAdapter(BasePlatformAdapter):
         """Slack doesn't have a direct typing indicator API for bots."""
         pass
 
+    async def _upload_file(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+    ) -> SendResult:
+        """Upload a local file to Slack (shared by send_image_file and send_voice)."""
+        if not self._app:
+            return SendResult(success=False, error="Not connected")
+
+        # Validate file exists before attempting upload
+        if not os.path.exists(file_path):
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        result = await self._app.client.files_upload_v2(
+            channel=chat_id,
+            file=file_path,
+            filename=os.path.basename(file_path),
+            initial_comment=caption or "",
+            thread_ts=reply_to,
+        )
+        return SendResult(success=True, raw_response=result)
+
     async def send_image_file(
         self,
         chat_id: str,
@@ -197,23 +221,10 @@ class SlackAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
     ) -> SendResult:
         """Send a local image file to Slack by uploading it."""
-        if not self._app:
-            return SendResult(success=False, error="Not connected")
-
         try:
-            import os
-            if not os.path.exists(image_path):
-                return SendResult(success=False, error=f"Image file not found: {image_path}")
-
-            result = await self._app.client.files_upload_v2(
-                channel=chat_id,
-                file=image_path,
-                filename=os.path.basename(image_path),
-                initial_comment=caption or "",
-                thread_ts=reply_to,
-            )
-            return SendResult(success=True, raw_response=result)
-
+            return await self._upload_file(chat_id, image_path, caption, reply_to)
+        except FileNotFoundError:
+            return SendResult(success=False, error=f"Image file not found: {image_path}")
         except Exception as e:
             print(f"[{self.name}] Failed to send local image: {e}")
             return await super().send_image_file(chat_id, image_path, caption, reply_to)
@@ -260,19 +271,8 @@ class SlackAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
     ) -> SendResult:
         """Send an audio file to Slack."""
-        if not self._app:
-            return SendResult(success=False, error="Not connected")
-
         try:
-            result = await self._app.client.files_upload_v2(
-                channel=chat_id,
-                file=audio_path,
-                filename=os.path.basename(audio_path),
-                initial_comment=caption or "",
-                thread_ts=reply_to,
-            )
-            return SendResult(success=True, raw_response=result)
-
+            return await self._upload_file(chat_id, audio_path, caption, reply_to)
         except Exception as e:
             return SendResult(success=False, error=str(e))
 

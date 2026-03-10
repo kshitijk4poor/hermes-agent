@@ -1608,9 +1608,18 @@ def browser_vision(question: str, annotate: bool = False, task_id: Optional[str]
         return json.dumps(error_info, ensure_ascii=False)
 
 
+_last_screenshot_cleanup = 0.0
+
 def _cleanup_old_screenshots(screenshots_dir, max_age_hours=24):
-    """Remove browser screenshots older than max_age_hours to prevent disk bloat."""
-    import time
+    """Remove browser screenshots older than max_age_hours to prevent disk bloat.
+
+    Throttled to run at most once per hour to avoid per-call directory scans.
+    """
+    global _last_screenshot_cleanup
+    now = time.time()
+    if now - _last_screenshot_cleanup < 3600:
+        return
+    _last_screenshot_cleanup = now
     try:
         cutoff = time.time() - (max_age_hours * 3600)
         for f in screenshots_dir.glob("browser_screenshot_*.png"):

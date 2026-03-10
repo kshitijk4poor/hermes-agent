@@ -312,10 +312,6 @@ class TelegramAdapter(BasePlatformAdapter):
             return SendResult(success=False, error="Not connected")
         
         try:
-            import os
-            if not os.path.exists(audio_path):
-                return SendResult(success=False, error=f"Audio file not found: {audio_path}")
-            
             with open(audio_path, "rb") as audio_file:
                 # .ogg files -> send as voice (round playable bubble)
                 if audio_path.endswith(".ogg") or audio_path.endswith(".opus"):
@@ -338,6 +334,8 @@ class TelegramAdapter(BasePlatformAdapter):
                         message_thread_id=int(_audio_thread) if _audio_thread else None,
                     )
             return SendResult(success=True, message_id=str(msg.message_id))
+        except FileNotFoundError:
+            return SendResult(success=False, error=f"Audio file not found: {audio_path}")
         except Exception as e:
             logger.error(
                 "[%s] Failed to send Telegram voice/audio, falling back to base adapter: %s",
@@ -358,12 +356,8 @@ class TelegramAdapter(BasePlatformAdapter):
         """Send a local image file natively as a Telegram photo."""
         if not self._bot:
             return SendResult(success=False, error="Not connected")
-        
+
         try:
-            import os
-            if not os.path.exists(image_path):
-                return SendResult(success=False, error=f"Image file not found: {image_path}")
-            
             with open(image_path, "rb") as image_file:
                 msg = await self._bot.send_photo(
                     chat_id=int(chat_id),
@@ -372,6 +366,8 @@ class TelegramAdapter(BasePlatformAdapter):
                     reply_to_message_id=int(reply_to) if reply_to else None,
                 )
             return SendResult(success=True, message_id=str(msg.message_id))
+        except FileNotFoundError:
+            return SendResult(success=False, error=f"Image file not found: {image_path}")
         except Exception as e:
             logger.error(
                 "[%s] Failed to send Telegram local image, falling back to base adapter: %s",

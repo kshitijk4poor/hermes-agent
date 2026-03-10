@@ -245,6 +245,32 @@ class DiscordAdapter(BasePlatformAdapter):
             logger.error("[%s] Failed to edit Discord message %s: %s", self.name, message_id, e, exc_info=True)
             return SendResult(success=False, error=str(e))
 
+    async def _send_file_attachment(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+    ) -> SendResult:
+        """Send a local file as a Discord attachment (shared by send_voice and send_image_file)."""
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+
+        channel = self._client.get_channel(int(chat_id))
+        if not channel:
+            channel = await self._client.fetch_channel(int(chat_id))
+        if not channel:
+            return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+        # Validate the file exists before constructing discord.File (which
+        # opens lazily and may not raise FileNotFoundError until send time).
+        fh = open(file_path, "rb")
+        file = discord.File(fh, filename=os.path.basename(file_path))
+        msg = await channel.send(
+            content=caption if caption else None,
+            file=file,
+        )
+        return SendResult(success=True, message_id=str(msg.id))
+
     async def send_voice(
         self,
         chat_id: str,
@@ -253,36 +279,14 @@ class DiscordAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
     ) -> SendResult:
         """Send audio as a Discord file attachment."""
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-        
         try:
-            import io
-            
-            channel = self._client.get_channel(int(chat_id))
-            if not channel:
-                channel = await self._client.fetch_channel(int(chat_id))
-            if not channel:
-                return SendResult(success=False, error=f"Channel {chat_id} not found")
-            
-            if not os.path.exists(audio_path):
-                return SendResult(success=False, error=f"Audio file not found: {audio_path}")
-            
-            # Determine filename from path
-            filename = os.path.basename(audio_path)
-            
-            with open(audio_path, "rb") as f:
-                file = discord.File(io.BytesIO(f.read()), filename=filename)
-                msg = await channel.send(
-                    content=caption if caption else None,
-                    file=file,
-                )
-                return SendResult(success=True, message_id=str(msg.id))
-        
-        except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[%s] Failed to send audio, falling back to base adapter: %s", self.name, e, exc_info=True)
+            return await self._send_file_attachment(chat_id, audio_path, caption)
+        except FileNotFoundError:
+            return SendResult(success=False, error=f"Audio file not found: {audio_path}")
+        except Exception as e:
+            print(f"[{self.name}] Failed to send audio: {e}")
             return await super().send_voice(chat_id, audio_path, caption, reply_to)
-    
+
     async def send_image_file(
         self,
         chat_id: str,
@@ -291,33 +295,12 @@ class DiscordAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
     ) -> SendResult:
         """Send a local image file natively as a Discord file attachment."""
-        if not self._client:
-            return SendResult(success=False, error="Not connected")
-        
         try:
-            import io
-            
-            channel = self._client.get_channel(int(chat_id))
-            if not channel:
-                channel = await self._client.fetch_channel(int(chat_id))
-            if not channel:
-                return SendResult(success=False, error=f"Channel {chat_id} not found")
-            
-            if not os.path.exists(image_path):
-                return SendResult(success=False, error=f"Image file not found: {image_path}")
-            
-            filename = os.path.basename(image_path)
-            
-            with open(image_path, "rb") as f:
-                file = discord.File(io.BytesIO(f.read()), filename=filename)
-                msg = await channel.send(
-                    content=caption if caption else None,
-                    file=file,
-                )
-                return SendResult(success=True, message_id=str(msg.id))
-        
-        except Exception as e:  # pragma: no cover - defensive logging
-            logger.error("[%s] Failed to send local image, falling back to base adapter: %s", self.name, e, exc_info=True)
+            return await self._send_file_attachment(chat_id, image_path, caption)
+        except FileNotFoundError:
+            return SendResult(success=False, error=f"Image file not found: {image_path}")
+        except Exception as e:
+            print(f"[{self.name}] Failed to send local image: {e}")
             return await super().send_image_file(chat_id, image_path, caption, reply_to)
 
     async def send_image(
