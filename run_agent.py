@@ -2988,8 +2988,10 @@ class AIAgent:
             and self._doom_loop_count >= DOOM_LOOP_THRESHOLD - 1
         )
 
-    def _record_tool_call_result(self, signature: Optional[tuple[str, str]], is_error_result: bool) -> None:
-        if signature is None or is_error_result:
+    def _record_tool_call_result(
+        self, signature: Optional[tuple[str, str]], _is_error_result: bool
+    ) -> None:
+        if signature is None:
             self._doom_loop_signature = None
             self._doom_loop_count = 0
             return
@@ -3033,8 +3035,6 @@ class AIAgent:
 
         normalized_response = response.lower()
         if "continue" in normalized_response:
-            self._doom_loop_signature = None
-            self._doom_loop_count = 0
             return False
 
         skip_content = (

@@ -725,7 +725,7 @@ class TestExecuteToolCalls:
         assert messages[-1]["role"] == "user"
         assert "same arguments" in messages[-2]["content"].lower()
 
-    def test_doom_loop_resets_after_failure(self, agent):
+    def test_doom_loop_still_triggers_after_failure(self, agent):
         tool_calls = [
             _mock_tool_call(name="web_search", arguments='{"q":"same"}', call_id="c1"),
             _mock_tool_call(name="web_search", arguments='{"q":"same"}', call_id="c2"),
@@ -748,9 +748,10 @@ class TestExecuteToolCalls:
         ) as mock_hfc:
             agent._execute_tool_calls(mock_msg, messages, "task-1")
 
-        assert mock_hfc.call_count == 4
+        assert mock_hfc.call_count == 2
         assert messages[-1]["role"] == "user"
         assert messages[-2]["tool_call_id"] == "c5"
+        assert "try a different approach" in messages[-1]["content"].lower()
 
     def test_doom_loop_exempts_process_polling(self, agent):
         tool_calls = [
@@ -786,6 +787,26 @@ class TestExecuteToolCalls:
         assert mock_hfc.call_count == 4
         assert all(msg["role"] == "tool" for msg in messages)
 
+    def test_doom_loop_triggers_on_repeated_identical_failures(self, agent):
+        tool_calls = [
+            _mock_tool_call(name="patch", arguments='{"path":"a.py"}', call_id="c1"),
+            _mock_tool_call(name="patch", arguments='{"path":"a.py"}', call_id="c2"),
+            _mock_tool_call(name="patch", arguments='{"path":"a.py"}', call_id="c3"),
+        ]
+        mock_msg = _mock_assistant_msg(content="", tool_calls=tool_calls)
+        messages = []
+
+        with patch(
+            "run_agent.handle_function_call", return_value='{"error":"patch failed"}'
+        ) as mock_hfc:
+            agent._execute_tool_calls(mock_msg, messages, "task-1")
+
+        assert mock_hfc.call_count == 2
+        assert messages[-2]["role"] == "tool"
+        assert "doom loop detected" in messages[-2]["content"].lower()
+        assert messages[-1]["role"] == "user"
+        assert "try a different approach" in messages[-1]["content"].lower()
+
     def test_cli_can_continue_after_doom_loop_prompt(self, agent):
         agent.platform = "cli"
         agent.clarify_callback = MagicMock(return_value="Continue anyway")
@@ -802,6 +823,27 @@ class TestExecuteToolCalls:
 
         assert mock_hfc.call_count == 3
         agent.clarify_callback.assert_called_once()
+        assert all(msg["role"] == "tool" for msg in messages)
+
+    def test_continue_anyway_prompts_again_on_next_identical_call(self, agent):
+        agent.platform = "cli"
+        agent.clarify_callback = MagicMock(return_value="Continue anyway")
+        tool_calls = [
+            _mock_tool_call(name="web_search", arguments='{"q":"same"}', call_id="c1"),
+            _mock_tool_call(name="web_search", arguments='{"q":"same"}', call_id="c2"),
+            _mock_tool_call(name="web_search", arguments='{"q":"same"}', call_id="c3"),
+            _mock_tool_call(name="web_search", arguments='{"q":"same"}', call_id="c4"),
+        ]
+        mock_msg = _mock_assistant_msg(content="", tool_calls=tool_calls)
+        messages = []
+
+        with patch(
+            "run_agent.handle_function_call", return_value='{"result":"ok"}'
+        ) as mock_hfc:
+            agent._execute_tool_calls(mock_msg, messages, "task-1")
+
+        assert mock_hfc.call_count == 4
+        assert agent.clarify_callback.call_count == 2
         assert all(msg["role"] == "tool" for msg in messages)
 
     def test_cli_try_different_approach_injects_recovery_message(self, agent):
