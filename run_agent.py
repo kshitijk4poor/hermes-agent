@@ -98,6 +98,8 @@ from agent.trajectory import (
     save_trajectory as _save_trajectory_to_file,
 )
 
+DOOM_LOOP_THRESHOLD = 3
+
 
 class IterationBudget:
     """Thread-safe shared iteration counter for parent and child agents.
@@ -263,6 +265,8 @@ class AIAgent:
         self.clarify_callback = clarify_callback
         self.step_callback = step_callback
         self._last_reported_tool = None  # Track for "new tool" mode
+        self._doom_loop_signature = None
+        self._doom_loop_count = 0
         
         # Interrupt mechanism for breaking out of tool loops
         self._interrupt_requested = False
@@ -2734,6 +2738,16 @@ class AIAgent:
             if not isinstance(function_args, dict):
                 function_args = {}
 
+            doom_loop_signature = self._make_doom_loop_signature(function_name, function_args)
+            if self._should_trigger_doom_loop(doom_loop_signature):
+                if self._handle_doom_loop(
+                    assistant_message=assistant_message,
+                    messages=messages,
+                    tool_call_index=i - 1,
+                    tool_name=function_name,
+                ):
+                    break
+
             if not self.quiet_mode:
                 args_str = json.dumps(function_args, ensure_ascii=False)
                 args_preview = args_str[:self.log_prefix_chars] + "..." if len(args_str) > self.log_prefix_chars else args_str
@@ -2898,6 +2912,7 @@ class AIAgent:
             # Log tool errors to the persistent error log so [error] tags
             # in the UI always have a corresponding detailed entry on disk.
             _is_error_result, _ = _detect_tool_failure(function_name, function_result)
+            self._record_tool_call_result(doom_loop_signature, _is_error_result)
             if _is_error_result:
                 logger.warning("Tool %s returned error (%.2fs): %s", function_name, tool_duration, result_preview)
 
@@ -2945,50 +2960,115 @@ class AIAgent:
             if self.tool_delay > 0 and i < len(assistant_message.tool_calls):
                 time.sleep(self.tool_delay)
 
-        # ── Budget pressure injection ─────────────────────────────────
-        # After all tool calls in this turn are processed, check if we're
-        # approaching max_iterations. If so, inject a warning into the LAST
-        # tool result's JSON so the LLM sees it naturally when reading results.
-        budget_warning = self._get_budget_warning(api_call_count)
-        if budget_warning and messages and messages[-1].get("role") == "tool":
-            last_content = messages[-1]["content"]
-            try:
-                parsed = json.loads(last_content)
-                if isinstance(parsed, dict):
-                    parsed["_budget_warning"] = budget_warning
-                    messages[-1]["content"] = json.dumps(parsed, ensure_ascii=False)
-                else:
-                    messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            except (json.JSONDecodeError, TypeError):
-                messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            if not self.quiet_mode:
-                remaining = self.max_iterations - api_call_count
-                tier = "⚠️  WARNING" if remaining <= self.max_iterations * 0.1 else "💡 CAUTION"
-                print(f"{self.log_prefix}{tier}: {remaining} iterations remaining")
-
-    def _get_budget_warning(self, api_call_count: int) -> Optional[str]:
-        """Return a budget pressure string, or None if not yet needed.
-
-        Two-tier system:
-          - Caution (70%): nudge to consolidate work
-          - Warning (90%): urgent, must respond now
-        """
-        if not self._budget_pressure_enabled or self.max_iterations <= 0:
+    def _make_doom_loop_signature(self, tool_name: str, function_args: dict) -> Optional[tuple[str, str]]:
+        if self._is_doom_loop_exempt(tool_name, function_args):
             return None
-        progress = api_call_count / self.max_iterations
-        remaining = self.max_iterations - api_call_count
-        if progress >= self._budget_warning_threshold:
-            return (
-                f"[BUDGET WARNING: Iteration {api_call_count}/{self.max_iterations}. "
-                f"Only {remaining} iteration(s) left. "
-                "Provide your final response NOW. No more tool calls unless absolutely critical.]"
+
+        normalized_args = json.dumps(
+            function_args,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        args_hash = hashlib.md5(normalized_args.encode("utf-8")).hexdigest()
+        return tool_name, args_hash
+
+    @staticmethod
+    def _is_doom_loop_exempt(tool_name: str, function_args: dict) -> bool:
+        if tool_name != "process":
+            return False
+
+        action = str(function_args.get("action", "")).lower()
+        return action in {"poll", "wait", "log"}
+
+    def _should_trigger_doom_loop(self, signature: Optional[tuple[str, str]]) -> bool:
+        return (
+            signature is not None
+            and self._doom_loop_signature == signature
+            and self._doom_loop_count >= DOOM_LOOP_THRESHOLD - 1
+        )
+
+    def _record_tool_call_result(self, signature: Optional[tuple[str, str]], is_error_result: bool) -> None:
+        if signature is None or is_error_result:
+            self._doom_loop_signature = None
+            self._doom_loop_count = 0
+            return
+
+        if self._doom_loop_signature == signature:
+            self._doom_loop_count += 1
+            return
+
+        self._doom_loop_signature = signature
+        self._doom_loop_count = 1
+
+    def _handle_doom_loop(
+        self,
+        assistant_message,
+        messages: list,
+        tool_call_index: int,
+        tool_name: str,
+    ) -> bool:
+        logger.warning(
+            "Doom loop detected for %s after %s identical calls",
+            tool_name,
+            DOOM_LOOP_THRESHOLD,
+        )
+
+        question = (
+            f"Hermes detected a doom loop: the agent has tried the same '{tool_name}' "
+            f"tool call with the same arguments {DOOM_LOOP_THRESHOLD} times in a row. "
+            "What should it do?"
+        )
+        response = ""
+        if self.platform == "cli" and self.clarify_callback is not None:
+            try:
+                response = str(
+                    self.clarify_callback(
+                        question,
+                        ["Continue anyway", "Try different approach", "Stop and summarize"],
+                    )
+                ).strip()
+            except Exception as exc:
+                logging.warning(f"Doom loop clarify callback failed: {exc}")
+
+        normalized_response = response.lower()
+        if "continue" in normalized_response:
+            self._doom_loop_signature = None
+            self._doom_loop_count = 0
+            return False
+
+        skip_content = (
+            f"[Tool execution skipped - doom loop detected: '{tool_name}' was about to be called "
+            f"{DOOM_LOOP_THRESHOLD} times in a row with the same arguments]"
+        )
+        for skipped_tc in assistant_message.tool_calls[tool_call_index:]:
+            skip_msg = {
+                "role": "tool",
+                "content": skip_content,
+                "tool_call_id": skipped_tc.id,
+            }
+            messages.append(skip_msg)
+            self._log_msg_to_db(skip_msg)
+
+        if "stop" in normalized_response:
+            recovery_msg = (
+                f"A doom loop was detected on the '{tool_name}' tool, and the user chose to stop. "
+                "Do not call more tools. Provide a final response summarizing what you found so far."
             )
-        if progress >= self._budget_caution_threshold:
-            return (
-                f"[BUDGET: Iteration {api_call_count}/{self.max_iterations}. "
-                f"{remaining} iterations left. Start consolidating your work.]"
+        else:
+            recovery_msg = (
+                f"A doom loop was detected on the '{tool_name}' tool: you attempted the same call "
+                f"with the same arguments {DOOM_LOOP_THRESHOLD} times in a row. "
+                "Do NOT repeat that exact tool call again. Try a different approach, use different "
+                "arguments, use another tool, or provide a final response if you are blocked."
             )
-        return None
+
+        recovery_dict = {"role": "user", "content": recovery_msg}
+        messages.append(recovery_dict)
+        self._log_msg_to_db(recovery_dict)
+        self._doom_loop_signature = None
+        self._doom_loop_count = 0
+        return True
 
     def _handle_max_iterations(self, messages: list, api_call_count: int) -> str:
         """Request a summary when max iterations are reached. Returns the final response text."""
@@ -3147,8 +3227,8 @@ class AIAgent:
         self._invalid_tool_retries = 0
         self._invalid_json_retries = 0
         self._empty_content_retries = 0
-        self._incomplete_scratchpad_retries = 0
-        self._codex_incomplete_retries = 0
+        self._doom_loop_signature = None
+        self._doom_loop_count = 0
         self._last_content_with_tools = None
         self._turns_since_memory = 0
         self._iters_since_skill = 0
