@@ -67,6 +67,9 @@ from agent.auxiliary_client import get_vision_auxiliary_client, get_text_auxilia
 
 logger = logging.getLogger(__name__)
 
+# Standard PATH entries for environments with minimal PATH (e.g. systemd services)
+_SANE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -869,7 +872,6 @@ def _run_browser_command(
         
         browser_env = {**os.environ}
         # Ensure PATH includes standard dirs (systemd services may have minimal PATH)
-        _SANE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
         if "/usr/bin" not in browser_env.get("PATH", "").split(":"):
             browser_env["PATH"] = f"{browser_env.get('PATH', '')}:{_SANE_PATH}"
         browser_env["AGENT_BROWSER_SOCKET_DIR"] = task_socket_dir
