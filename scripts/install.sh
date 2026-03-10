@@ -903,12 +903,27 @@ run_setup_wizard() {
 
     cd "$INSTALL_DIR"
 
+    SETUP_ARGS=()
+    OPENCLAW_DIR="$HOME/.openclaw"
+    if [ -d "$OPENCLAW_DIR" ]; then
+        echo ""
+        log_info "Detected OpenClaw installation at ~/.openclaw/"
+        log_info "Hermes can import your API keys, platform configs, command allowlists, memories, and skills."
+        read -p "Import from OpenClaw during setup? [Y/n] " -n 1 -r < /dev/tty
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
+            SETUP_ARGS+=(--migrate-from openclaw)
+        else
+            SETUP_ARGS+=(--skip-migration-prompt)
+        fi
+    fi
+
     # Run hermes setup using the venv Python directly (no activation needed).
     # Redirect stdin from /dev/tty so interactive prompts work when piped from curl.
     if [ "$USE_VENV" = true ]; then
-        "$INSTALL_DIR/venv/bin/python" -m hermes_cli.main setup < /dev/tty
+        "$INSTALL_DIR/venv/bin/python" -m hermes_cli.main setup "${SETUP_ARGS[@]}" < /dev/tty
     else
-        python -m hermes_cli.main setup < /dev/tty
+        python -m hermes_cli.main setup "${SETUP_ARGS[@]}" < /dev/tty
     fi
 }
 

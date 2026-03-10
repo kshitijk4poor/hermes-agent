@@ -759,14 +759,28 @@ function Invoke-SetupWizard {
     Write-Host ""
     Write-Info "Starting setup wizard..."
     Write-Host ""
+
+    $setupArgs = @("setup")
+    $openClawDir = Join-Path $HOME ".openclaw"
+    if (Test-Path $openClawDir) {
+        Write-Host ""
+        Write-Info "Detected OpenClaw installation at ~/.openclaw/"
+        Write-Info "Hermes can import your API keys, platform configs, command allowlists, memories, and skills."
+        $reply = Read-Host "Import from OpenClaw during setup? [Y/n]"
+        if ([string]::IsNullOrWhiteSpace($reply) -or $reply.Trim().ToLower() -in @("y", "yes")) {
+            $setupArgs += @("--migrate-from", "openclaw")
+        } else {
+            $setupArgs += "--skip-migration-prompt"
+        }
+    }
     
     Push-Location $InstallDir
     
     # Run hermes setup using the venv Python directly (no activation needed)
     if (-not $NoVenv) {
-        & ".\venv\Scripts\python.exe" -m hermes_cli.main setup
+        & ".\venv\Scripts\python.exe" -m hermes_cli.main @setupArgs
     } else {
-        python -m hermes_cli.main setup
+        python -m hermes_cli.main @setupArgs
     }
     
     Pop-Location
