@@ -1771,6 +1771,108 @@ def setup_tools(config: dict, first_install: bool = False):
     tools_command(first_install=first_install, config=config)
 
 
+def detect_migration_sources() -> list[str]:
+    from hermes_cli.openclaw_migration import get_openclaw_source_root
+
+    detected_sources: list[str] = []
+    if get_openclaw_source_root().exists():
+        detected_sources.append("openclaw")
+    return detected_sources
+
+
+def run_openclaw_migration(hermes_home: Path) -> Dict[str, Any]:
+    from hermes_cli.openclaw_migration import (
+        get_openclaw_source_root,
+        run_openclaw_migration as run_openclaw_import,
+    )
+
+    source_root = get_openclaw_source_root()
+    if not source_root.exists():
+        raise FileNotFoundError(f"OpenClaw directory not found at {source_root}")
+
+    config_path = get_config_path()
+    if not config_path.exists():
+        save_config(load_config())
+
+    print()
+    print_header("Importing from OpenClaw")
+    print_info(f"Source: {source_root}")
+    print_info(
+        "Importing API keys, platform settings, command allowlists, memories, and skills."
+    )
+
+    report = run_openclaw_import(
+        source_root=source_root,
+        target_root=hermes_home,
+        workspace_target=None,
+        execute=True,
+        overwrite=False,
+        migrate_secrets=True,
+        preset="full",
+    )
+
+    summary = report.get("summary", {})
+    migrated = summary.get("migrated", 0)
+    conflicts = summary.get("conflict", 0)
+    skipped = summary.get("skipped", 0)
+    errors = summary.get("error", 0)
+
+    if migrated:
+        print_success(f"Imported {migrated} OpenClaw item(s).")
+    if conflicts:
+        print_warning(
+            f"Skipped {conflicts} conflicting item(s) already configured in Hermes."
+        )
+    if skipped:
+        print_info(f"Skipped {skipped} non-importable or unchanged item(s).")
+    if errors:
+        print_warning(
+            f"Migration reported {errors} error item(s). Review the report before relying on everything."
+        )
+
+    output_dir = report.get("output_dir")
+    if output_dir:
+        print_info(f"Migration report: {output_dir}")
+
+    return report
+
+
+def maybe_run_detected_migration(args, hermes_home: Path) -> bool:
+    if getattr(args, "skip_migration_prompt", False):
+        return False
+
+    detected_sources = detect_migration_sources()
+    if "openclaw" not in detected_sources:
+        return False
+
+    print()
+    print_info("Detected OpenClaw installation at ~/.openclaw/")
+    print_info(
+        "Hermes can import your API keys, platform configs, command allowlists, memories, and skills."
+    )
+    if not prompt_yes_no("Import settings from OpenClaw now?", True):
+        return False
+
+    run_openclaw_migration(hermes_home)
+    return True
+
+
+def maybe_run_requested_migration(args, hermes_home: Path) -> bool:
+    migrate_from = (getattr(args, "migrate_from", "") or "").strip().lower()
+    if not migrate_from:
+        return False
+
+    if migrate_from == "openclaw":
+        try:
+            run_openclaw_migration(hermes_home)
+        except FileNotFoundError as exc:
+            print_warning(str(exc))
+            return False
+        return True
+
+    return False
+
+
 # =============================================================================
 # Main Wizard Orchestrator
 # =============================================================================
@@ -1799,6 +1901,10 @@ def run_setup_wizard(args):
     
     config = load_config()
     hermes_home = get_hermes_home()
+
+    migration_ran = maybe_run_requested_migration(args, hermes_home)
+    if migration_ran:
+        config = load_config()
     
     # Check if a specific section was requested
     section = getattr(args, 'section', None)
@@ -1884,6 +1990,12 @@ def run_setup_wizard(args):
             return
     else:
         # ── First-Time Setup ──
+        if not migration_ran and maybe_run_detected_migration(args, hermes_home):
+            config = load_config()
+            print_success("Migration complete! Continuing with setup...")
+        elif migration_ran:
+            print_success("Migration complete! Continuing with setup...")
+
         print()
         print_info("We'll walk you through:")
         print_info("  1. Model & Provider — choose your AI provider and model")
