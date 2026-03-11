@@ -176,7 +176,6 @@ class AIAgent:
         session_id: str = None,
         tool_progress_callback: callable = None,
         thinking_callback: callable = None,
-        reasoning_callback: callable = None,
         clarify_callback: callable = None,
         step_callback: callable = None,
         max_tokens: int = None,
@@ -264,7 +263,6 @@ class AIAgent:
 
         self.tool_progress_callback = tool_progress_callback
         self.thinking_callback = thinking_callback
-        self.reasoning_callback = reasoning_callback
         self.clarify_callback = clarify_callback
         self.step_callback = step_callback
         self._last_reported_tool = None  # Track for "new tool" mode
@@ -1786,7 +1784,6 @@ class AIAgent:
         allowed_keys = {
             "model", "instructions", "input", "tools", "store",
             "reasoning", "include", "max_output_tokens", "temperature",
-            "tool_choice", "parallel_tool_calls", "prompt_cache_key",
         }
         normalized: Dict[str, Any] = {
             "model": model,
@@ -1811,12 +1808,6 @@ class AIAgent:
         temperature = api_kwargs.get("temperature")
         if isinstance(temperature, (int, float)):
             normalized["temperature"] = float(temperature)
-
-        # Pass through tool_choice, parallel_tool_calls, prompt_cache_key
-        for passthrough_key in ("tool_choice", "parallel_tool_calls", "prompt_cache_key"):
-            val = api_kwargs.get(passthrough_key)
-            if val is not None:
-                normalized[passthrough_key] = val
 
         if allow_stream:
             stream = api_kwargs.get("stream")
@@ -2354,10 +2345,7 @@ class AIAgent:
                 "instructions": instructions,
                 "input": self._chat_messages_to_responses_input(payload_messages),
                 "tools": self._responses_tools(),
-                "tool_choice": "auto",
-                "parallel_tool_calls": True,
                 "store": False,
-                "prompt_cache_key": self.session_id,
             }
 
             if reasoning_enabled:
@@ -2433,12 +2421,6 @@ class AIAgent:
         if reasoning_text and self.verbose_logging:
             preview = reasoning_text[:100] + "..." if len(reasoning_text) > 100 else reasoning_text
             logging.debug(f"Captured reasoning ({len(reasoning_text)} chars): {preview}")
-
-        if reasoning_text and self.reasoning_callback:
-            try:
-                self.reasoning_callback(reasoning_text)
-            except Exception:
-                pass
 
         msg = {
             "role": "assistant",
@@ -3597,7 +3579,7 @@ class AIAgent:
             
             api_start_time = time.time()
             retry_count = 0
-            max_retries = 3
+            max_retries = 6  # Increased to allow longer backoff periods
             compression_attempts = 0
             max_compression_attempts = 3
             codex_auth_retry_attempted = False
@@ -4067,11 +4049,8 @@ class AIAgent:
                     # These indicate a problem with the request itself (bad model ID,
                     # invalid API key, forbidden, etc.) and will never succeed on retry.
                     # Note: 413 and context-length errors are excluded — handled above.
-                    # Also catch local validation errors (ValueError, TypeError) — these
-                    # are programming bugs, not transient failures.
-                    is_local_validation_error = isinstance(api_error, (ValueError, TypeError))
                     is_client_status_error = isinstance(status_code, int) and 400 <= status_code < 500 and status_code != 413
-                    is_client_error = (is_local_validation_error or is_client_status_error or any(phrase in error_msg for phrase in [
+                    is_client_error = (is_client_status_error or any(phrase in error_msg for phrase in [
                         'error code: 401', 'error code: 403',
                         'error code: 404', 'error code: 422',
                         'is not a valid model', 'invalid model', 'model not found',
@@ -4616,17 +4595,9 @@ class AIAgent:
         if final_response and not interrupted:
             self._honcho_sync(original_user_message, final_response)
 
-        # Extract reasoning from the last assistant message (if any)
-        last_reasoning = None
-        for msg in reversed(messages):
-            if msg.get("role") == "assistant" and msg.get("reasoning"):
-                last_reasoning = msg["reasoning"]
-                break
-
         # Build result with interrupt info if applicable
         result = {
             "final_response": final_response,
-            "last_reasoning": last_reasoning,
             "messages": messages,
             "api_calls": api_call_count,
             "completed": completed,
