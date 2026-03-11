@@ -75,6 +75,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -174,6 +175,91 @@ def _sanitize_error(text: str) -> str:
     accidental credential exposure in tool error responses.
     """
     return _CREDENTIAL_PATTERN.sub("[REDACTED]", text)
+
+
+def _resolve_stdio_command(command: str, env: dict) -> tuple[str, dict]:
+    resolved_command = os.path.expanduser(str(command).strip())
+    resolved_env = dict(env or {})
+
+    if os.sep not in resolved_command:
+        path_arg = resolved_env["PATH"] if "PATH" in resolved_env else None
+        which_hit = shutil.which(resolved_command, path=path_arg)
+        if which_hit:
+            resolved_command = which_hit
+        elif resolved_command in {"npx", "npm", "node"}:
+            hermes_home = os.path.expanduser(
+                os.getenv(
+                    "HERMES_HOME", os.path.join(os.path.expanduser("~"), ".hermes")
+                )
+            )
+            candidates = [
+                os.path.join(hermes_home, "node", "bin", resolved_command),
+                os.path.join(
+                    os.path.expanduser("~"), ".local", "bin", resolved_command
+                ),
+            ]
+            for candidate in candidates:
+                if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                    resolved_command = candidate
+                    break
+
+    command_dir = os.path.dirname(resolved_command)
+    if command_dir:
+        parts = [p for p in (resolved_env.get("PATH") or "").split(os.pathsep) if p]
+        resolved_env["PATH"] = (
+            os.pathsep.join(parts)
+            if command_dir in parts
+            else os.pathsep.join([command_dir, *parts]) if parts else command_dir
+        )
+
+    return resolved_command, resolved_env
+
+
+def _format_connect_error(exc: BaseException) -> str:
+    def _find_missing(current: BaseException) -> Optional[str]:
+        nested = getattr(current, "exceptions", None)
+        if nested:
+            for child in nested:
+                missing = _find_missing(child)
+                if missing:
+                    return missing
+            return None
+        if isinstance(current, FileNotFoundError):
+            if getattr(current, "filename", None):
+                return str(current.filename)
+            message = str(current)
+            match = re.search(r"No such file or directory: '([^']+)'", message)
+            if match:
+                return match.group(1)
+        return None
+
+    def _flatten_messages(current: BaseException) -> List[str]:
+        nested = getattr(current, "exceptions", None)
+        if nested:
+            flattened: List[str] = []
+            for child in nested:
+                flattened.extend(_flatten_messages(child))
+            return flattened
+        text = str(current).strip()
+        return [text or current.__class__.__name__]
+
+    missing = _find_missing(exc)
+    if missing:
+        message = f"missing executable '{missing}'"
+        if os.path.basename(missing) in {"npx", "npm", "node"}:
+            message += (
+                " (ensure Node.js is installed and PATH includes its bin directory, "
+                "or set mcp_servers.<name>.command to an absolute path and include "
+                "that directory in mcp_servers.<name>.env.PATH)"
+            )
+        return _sanitize_error(message)
+
+    messages = _flatten_messages(exc)
+    deduped: List[str] = []
+    for item in messages:
+        if item not in deduped:
+            deduped.append(item)
+    return _sanitize_error("; ".join(deduped[:3]))
 
 
 # ---------------------------------------------------------------------------
@@ -612,6 +698,7 @@ class MCPServerTask:
             )
 
         safe_env = _build_safe_env(user_env)
+        command, safe_env = _resolve_stdio_command(command, safe_env)
         server_params = StdioServerParameters(
             command=command,
             args=args,
@@ -1344,9 +1431,12 @@ def discover_mcp_tools() -> List[str]:
         for name, result in zip(server_names, results):
             if isinstance(result, Exception):
                 failed_count += 1
+                command = new_servers.get(name, {}).get("command")
                 logger.warning(
-                    "Failed to connect to MCP server '%s': %s",
-                    name, result,
+                    "Failed to connect to MCP server '%s'%s: %s",
+                    name,
+                    f" (command={command})" if command else "",
+                    _format_connect_error(result),
                 )
             elif isinstance(result, list):
                 all_tools.extend(result)
