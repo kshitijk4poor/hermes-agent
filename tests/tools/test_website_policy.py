@@ -254,6 +254,30 @@ def test_check_website_access_uses_dynamic_hermes_home(monkeypatch, tmp_path):
     assert blocked["rule"] == "dynamic.example"
 
 
+def test_check_website_access_blocks_scheme_less_urls(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "security": {
+                    "website_blocklist": {
+                        "enabled": True,
+                        "domains": ["blocked.test"],
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    blocked = check_website_access("www.blocked.test/path", config_path=config_path)
+
+    assert blocked is not None
+    assert blocked["host"] == "www.blocked.test"
+    assert blocked["rule"] == "blocked.test"
+
+
 def test_browser_navigate_returns_policy_block(monkeypatch):
     from tools import browser_tool
 
@@ -306,6 +330,35 @@ def test_browser_navigate_returns_clean_policy_error_for_missing_shared_file(mon
     assert "Website policy error" in result["error"]
 
 
+def test_browser_navigate_blocks_redirected_final_url(monkeypatch):
+    from tools import browser_tool
+
+    def fake_check(url):
+        if url == "https://allowed.test":
+            return None
+        if url == "https://blocked.test/final":
+            return {
+                "host": "blocked.test",
+                "rule": "blocked.test",
+                "source": "config",
+                "message": "Blocked by website policy",
+            }
+        pytest.fail(f"unexpected URL checked: {url}")
+
+    monkeypatch.setattr(browser_tool, "check_website_access", fake_check)
+    monkeypatch.setattr(browser_tool, "_get_session_info", lambda task_id: {"_first_nav": False})
+    monkeypatch.setattr(browser_tool, "_run_browser_command", lambda *args, **kwargs: {
+        "success": True,
+        "data": {"title": "Redirected", "url": "https://blocked.test/final"},
+    })
+
+    result = json.loads(browser_tool.browser_navigate("https://allowed.test"))
+
+    assert result["success"] is False
+    assert result["url"] == "https://blocked.test/final"
+    assert result["blocked_by_policy"]["rule"] == "blocked.test"
+
+
 @pytest.mark.asyncio
 async def test_web_extract_short_circuits_blocked_url(monkeypatch):
     from tools import web_tools
@@ -347,3 +400,40 @@ async def test_web_extract_returns_clean_policy_error_for_malformed_config(monke
 
     assert result["results"][0]["url"] == "https://allowed.test"
     assert "Website policy error" in result["results"][0]["error"]
+
+
+@pytest.mark.asyncio
+async def test_web_extract_blocks_redirected_final_url(monkeypatch):
+    from tools import web_tools
+
+    def fake_check(url):
+        if url == "https://allowed.test":
+            return None
+        if url == "https://blocked.test/final":
+            return {
+                "host": "blocked.test",
+                "rule": "blocked.test",
+                "source": "config",
+                "message": "Blocked by website policy",
+            }
+        pytest.fail(f"unexpected URL checked: {url}")
+
+    class FakeFirecrawlClient:
+        def scrape(self, url, formats):
+            return {
+                "markdown": "secret content",
+                "metadata": {
+                    "title": "Redirected",
+                    "sourceURL": "https://blocked.test/final",
+                },
+            }
+
+    monkeypatch.setattr(web_tools, "check_website_access", fake_check)
+    monkeypatch.setattr(web_tools, "_get_firecrawl_client", lambda: FakeFirecrawlClient())
+    monkeypatch.setattr("tools.interrupt.is_interrupted", lambda: False)
+
+    result = json.loads(await web_tools.web_extract_tool(["https://allowed.test"], use_llm_processing=False))
+
+    assert result["results"][0]["url"] == "https://blocked.test/final"
+    assert result["results"][0]["content"] == ""
+    assert result["results"][0]["blocked_by_policy"]["rule"] == "blocked.test"

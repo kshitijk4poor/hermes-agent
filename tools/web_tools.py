@@ -699,12 +699,45 @@ async def web_extract_tool(
                 
                 # Get title from metadata
                 title = metadata.get("title", "")
+                final_url = metadata.get("sourceURL", url)
+
+                try:
+                    final_blocked = check_website_access(final_url)
+                except WebsitePolicyError as policy_err:
+                    error_msg = f"Website policy error: {policy_err}"
+                    logger.warning("%s", error_msg)
+                    results.append({
+                        "url": final_url,
+                        "title": title,
+                        "content": "",
+                        "raw_content": "",
+                        "metadata": metadata,
+                        "error": error_msg,
+                    })
+                    continue
+
+                if final_blocked:
+                    logger.info("Blocked redirected web_extract for %s by rule %s", final_blocked["host"], final_blocked["rule"])
+                    results.append({
+                        "url": final_url,
+                        "title": title,
+                        "content": "",
+                        "raw_content": "",
+                        "metadata": metadata,
+                        "error": final_blocked["message"],
+                        "blocked_by_policy": {
+                            "host": final_blocked["host"],
+                            "rule": final_blocked["rule"],
+                            "source": final_blocked["source"],
+                        },
+                    })
+                    continue
                 
                 # Choose content based on requested format
                 chosen_content = content_markdown if (format == "markdown" or (format is None and content_markdown)) else content_html or content_markdown or ""
                 
                 results.append({
-                    "url": metadata.get("sourceURL", url),
+                    "url": final_url,
                     "title": title,
                     "content": chosen_content,
                     "raw_content": chosen_content,
@@ -809,6 +842,7 @@ async def web_extract_tool(
                 "title": r.get("title", ""),
                 "content": r.get("content", ""),
                 "error": r.get("error"),
+                **({"blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
             for r in response.get("results", [])
         ]

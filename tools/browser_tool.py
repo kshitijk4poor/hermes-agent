@@ -1027,6 +1027,27 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         data = result.get("data", {})
         title = data.get("title", "")
         final_url = data.get("url", url)
+
+        try:
+            final_blocked = check_website_access(final_url)
+        except WebsitePolicyError as policy_err:
+            return json.dumps({
+                "success": False,
+                "url": final_url,
+                "error": f"Website policy error: {policy_err}"
+            }, ensure_ascii=False)
+
+        if final_blocked:
+            return json.dumps({
+                "success": False,
+                "url": final_url,
+                "error": final_blocked["message"],
+                "blocked_by_policy": {
+                    "host": final_blocked["host"],
+                    "rule": final_blocked["rule"],
+                    "source": final_blocked["source"],
+                },
+            }, ensure_ascii=False)
         
         response = {
             "success": True,

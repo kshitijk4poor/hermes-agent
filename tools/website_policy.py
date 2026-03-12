@@ -153,9 +153,23 @@ def _match_host_against_rule(host: str, pattern: str) -> bool:
     return host == pattern or host.endswith(f".{pattern}")
 
 
-def check_website_access(url: str, config_path: Optional[Path] = None) -> Optional[Dict[str, str]]:
+def _extract_host_from_urlish(url: str) -> str:
     parsed = urlparse(url)
     host = _normalize_host(parsed.hostname or parsed.netloc)
+    if host:
+        return host
+
+    if "://" not in url:
+        schemeless = urlparse(f"//{url}")
+        host = _normalize_host(schemeless.hostname or schemeless.netloc)
+        if host:
+            return host
+
+    return ""
+
+
+def check_website_access(url: str, config_path: Optional[Path] = None) -> Optional[Dict[str, str]]:
+    host = _extract_host_from_urlish(url)
     if not host:
         return None
 
