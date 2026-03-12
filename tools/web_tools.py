@@ -49,6 +49,7 @@ from typing import List, Dict, Any, Optional
 from firecrawl import Firecrawl
 from agent.auxiliary_client import async_call_llm
 from tools.debug_helpers import DebugSession
+from tools.website_policy import WebsitePolicyError, check_website_access
 
 logger = logging.getLogger(__name__)
 
@@ -614,6 +615,36 @@ async def web_extract_tool(
         for url in urls:
             if _is_interrupted():
                 results.append({"url": url, "error": "Interrupted", "title": ""})
+                continue
+
+            try:
+                blocked = check_website_access(url)
+            except WebsitePolicyError as policy_err:
+                error_msg = f"Website policy error: {policy_err}"
+                logger.warning("%s", error_msg)
+                results.append({
+                    "url": url,
+                    "title": "",
+                    "content": "",
+                    "raw_content": "",
+                    "error": error_msg,
+                })
+                continue
+
+            if blocked:
+                logger.info("Blocked web_extract for %s by rule %s", blocked["host"], blocked["rule"])
+                results.append({
+                    "url": url,
+                    "title": "",
+                    "content": "",
+                    "raw_content": "",
+                    "error": blocked["message"],
+                    "blocked_by_policy": {
+                        "host": blocked["host"],
+                        "rule": blocked["rule"],
+                        "source": blocked["source"],
+                    },
+                })
                 continue
 
             try:

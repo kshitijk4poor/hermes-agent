@@ -64,6 +64,7 @@ import requests
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from agent.auxiliary_client import call_llm
+from tools.website_policy import WebsitePolicyError, check_website_access
 
 logger = logging.getLogger(__name__)
 
@@ -989,6 +990,25 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     Returns:
         JSON string with navigation result (includes stealth features info on first nav)
     """
+    try:
+        blocked = check_website_access(url)
+    except WebsitePolicyError as policy_err:
+        return json.dumps({
+            "success": False,
+            "error": f"Website policy error: {policy_err}"
+        }, ensure_ascii=False)
+
+    if blocked:
+        return json.dumps({
+            "success": False,
+            "error": blocked["message"],
+            "blocked_by_policy": {
+                "host": blocked["host"],
+                "rule": blocked["rule"],
+                "source": blocked["source"],
+            },
+        }, ensure_ascii=False)
+
     effective_task_id = task_id or "default"
     
     # Get session info to check if this is a new session

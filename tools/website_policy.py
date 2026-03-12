@@ -1,0 +1,142 @@
+"""Website access policy helpers for URL-capable tools.
+
+This module loads a user-managed website blocklist from ~/.hermes/config.yaml
+and optional shared list files. It is intentionally lightweight so web/browser
+tools can enforce URL policy without pulling in the heavier CLI config stack.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+import fnmatch
+import os
+
+import yaml
+
+
+_DEFAULT_HERMES_HOME = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+_DEFAULT_CONFIG_PATH = _DEFAULT_HERMES_HOME / "config.yaml"
+
+
+class WebsitePolicyError(Exception):
+    """Raised when a website policy file is malformed."""
+
+
+def _normalize_host(host: str) -> str:
+    host = (host or "").strip().lower().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    return host
+
+
+def _normalize_rule(rule: Any) -> Optional[str]:
+    if not isinstance(rule, str):
+        return None
+    value = rule.strip().lower()
+    if not value or value.startswith("#"):
+        return None
+    if "://" in value:
+        parsed = urlparse(value)
+        value = parsed.netloc or parsed.path
+    value = value.split("/", 1)[0].strip().rstrip(".")
+    if value.startswith("www."):
+        value = value[4:]
+    return value or None
+
+
+def _iter_blocklist_file_rules(path: Path) -> List[str]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise WebsitePolicyError(f"Shared blocklist file not found: {path}")
+
+    rules: List[str] = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        normalized = _normalize_rule(stripped)
+        if normalized:
+            rules.append(normalized)
+    return rules
+
+
+def _load_policy_config(config_path: Path = _DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
+    if not config_path.exists():
+        return {}
+    with open(config_path, encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    security = config.get("security", {})
+    if not isinstance(security, dict):
+        return {}
+    website_blocklist = security.get("website_blocklist", {})
+    if not isinstance(website_blocklist, dict):
+        return {}
+    return website_blocklist
+
+
+def load_website_blocklist(config_path: Path = _DEFAULT_CONFIG_PATH) -> Dict[str, Any]:
+    policy = _load_policy_config(config_path)
+    if not policy:
+        return {"enabled": False, "rules": []}
+
+    enabled = bool(policy.get("enabled", True))
+    rules: List[Dict[str, str]] = []
+    seen: set[Tuple[str, str]] = set()
+
+    for raw_rule in policy.get("domains", []) or []:
+        normalized = _normalize_rule(raw_rule)
+        if normalized and ("config", normalized) not in seen:
+            rules.append({"pattern": normalized, "source": "config"})
+            seen.add(("config", normalized))
+
+    for shared_file in policy.get("shared_files", []) or []:
+        if not isinstance(shared_file, str) or not shared_file.strip():
+            continue
+        path = Path(shared_file).expanduser()
+        if not path.is_absolute():
+            path = (_DEFAULT_HERMES_HOME / path).resolve()
+        for normalized in _iter_blocklist_file_rules(path):
+            key = (str(path), normalized)
+            if key in seen:
+                continue
+            rules.append({"pattern": normalized, "source": str(path)})
+            seen.add(key)
+
+    return {"enabled": enabled, "rules": rules}
+
+
+def _match_host_against_rule(host: str, pattern: str) -> bool:
+    if not host or not pattern:
+        return False
+    if pattern.startswith("*."):
+        return fnmatch.fnmatch(host, pattern)
+    return host == pattern or host.endswith(f".{pattern}")
+
+
+def check_website_access(url: str, config_path: Path = _DEFAULT_CONFIG_PATH) -> Optional[Dict[str, str]]:
+    parsed = urlparse(url)
+    host = _normalize_host(parsed.hostname or parsed.netloc)
+    if not host:
+        return None
+
+    policy = load_website_blocklist(config_path)
+    if not policy.get("enabled"):
+        return None
+
+    for rule in policy.get("rules", []):
+        pattern = rule.get("pattern", "")
+        if _match_host_against_rule(host, pattern):
+            return {
+                "url": url,
+                "host": host,
+                "rule": pattern,
+                "source": rule.get("source", "config"),
+                "message": (
+                    f"Blocked by website policy: '{host}' matched rule '{pattern}'"
+                    f" from {rule.get('source', 'config')}"
+                ),
+            }
+    return None
