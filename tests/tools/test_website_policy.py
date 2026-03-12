@@ -363,6 +363,93 @@ def test_browser_navigate_blocks_redirected_final_url(monkeypatch):
     assert cleanup_calls == ["default"]
 
 
+def test_browser_click_blocks_redirected_final_url(monkeypatch):
+    from tools import browser_tool
+
+    def fake_check(url):
+        if url == "https://blocked.test/after-click":
+            return {
+                "host": "blocked.test",
+                "rule": "blocked.test",
+                "source": "config",
+                "message": "Blocked by website policy",
+            }
+        return None
+
+    cleanup_calls = []
+
+    monkeypatch.setattr(browser_tool, "check_website_access", fake_check)
+    monkeypatch.setattr(browser_tool, "cleanup_browser", lambda task_id=None: cleanup_calls.append(task_id))
+    monkeypatch.setattr(browser_tool, "_run_browser_command", lambda *args, **kwargs: {
+        "success": True,
+        "data": {"url": "https://blocked.test/after-click"},
+    })
+
+    result = json.loads(browser_tool.browser_click("@e5"))
+
+    assert result["success"] is False
+    assert result["blocked_by_policy"]["rule"] == "blocked.test"
+    assert cleanup_calls == ["default"]
+
+
+def test_browser_back_blocks_redirected_final_url(monkeypatch):
+    from tools import browser_tool
+
+    def fake_check(url):
+        if url == "https://blocked.test/from-history":
+            return {
+                "host": "blocked.test",
+                "rule": "blocked.test",
+                "source": "config",
+                "message": "Blocked by website policy",
+            }
+        return None
+
+    cleanup_calls = []
+
+    monkeypatch.setattr(browser_tool, "check_website_access", fake_check)
+    monkeypatch.setattr(browser_tool, "cleanup_browser", lambda task_id=None: cleanup_calls.append(task_id))
+    monkeypatch.setattr(browser_tool, "_run_browser_command", lambda *args, **kwargs: {
+        "success": True,
+        "data": {"url": "https://blocked.test/from-history"},
+    })
+
+    result = json.loads(browser_tool.browser_back())
+
+    assert result["success"] is False
+    assert result["blocked_by_policy"]["rule"] == "blocked.test"
+    assert cleanup_calls == ["default"]
+
+
+def test_browser_press_blocks_redirected_final_url(monkeypatch):
+    from tools import browser_tool
+
+    def fake_check(url):
+        if url == "https://blocked.test/from-press":
+            return {
+                "host": "blocked.test",
+                "rule": "blocked.test",
+                "source": "config",
+                "message": "Blocked by website policy",
+            }
+        return None
+
+    cleanup_calls = []
+
+    monkeypatch.setattr(browser_tool, "check_website_access", fake_check)
+    monkeypatch.setattr(browser_tool, "cleanup_browser", lambda task_id=None: cleanup_calls.append(task_id))
+    monkeypatch.setattr(browser_tool, "_run_browser_command", lambda *args, **kwargs: {
+        "success": True,
+        "data": {"url": "https://blocked.test/from-press"},
+    })
+
+    result = json.loads(browser_tool.browser_press("Enter"))
+
+    assert result["success"] is False
+    assert result["blocked_by_policy"]["rule"] == "blocked.test"
+    assert cleanup_calls == ["default"]
+
+
 @pytest.mark.asyncio
 async def test_web_extract_short_circuits_blocked_url(monkeypatch):
     from tools import web_tools

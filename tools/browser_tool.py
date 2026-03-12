@@ -979,6 +979,53 @@ def _truncate_snapshot(snapshot_text: str, max_chars: int = 8000) -> str:
 # Browser Tool Functions
 # ============================================================================
 
+def _blocked_browser_response(blocked: Dict[str, str], url: Optional[str] = None) -> str:
+    response: Dict[str, Any] = {
+        "success": False,
+        "error": blocked["message"],
+        "blocked_by_policy": {
+            "host": blocked["host"],
+            "rule": blocked["rule"],
+            "source": blocked["source"],
+        },
+    }
+    if url:
+        response["url"] = url
+    return json.dumps(response, ensure_ascii=False)
+
+
+def _enforce_post_action_policy(result: Dict[str, Any], task_id: str) -> Optional[str]:
+    if not result.get("success"):
+        return None
+
+    data = result.get("data", {}) or {}
+    current_url = data.get("url")
+    if not current_url:
+        return None
+
+    try:
+        blocked = check_website_access(current_url)
+    except WebsitePolicyError as policy_err:
+        try:
+            cleanup_browser(task_id)
+        except Exception as cleanup_err:
+            logger.warning("Failed to clean up browser session after policy error for task %s: %s", task_id, cleanup_err)
+        return json.dumps({
+            "success": False,
+            "url": current_url,
+            "error": f"Website policy error: {policy_err}"
+        }, ensure_ascii=False)
+
+    if blocked:
+        try:
+            cleanup_browser(task_id)
+        except Exception as cleanup_err:
+            logger.warning("Failed to clean up blocked browser session for task %s: %s", task_id, cleanup_err)
+        return _blocked_browser_response(blocked, current_url)
+
+    return None
+
+
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """
     Navigate to a URL in the browser.
@@ -1028,30 +1075,9 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
         title = data.get("title", "")
         final_url = data.get("url", url)
 
-        try:
-            final_blocked = check_website_access(final_url)
-        except WebsitePolicyError as policy_err:
-            return json.dumps({
-                "success": False,
-                "url": final_url,
-                "error": f"Website policy error: {policy_err}"
-            }, ensure_ascii=False)
-
-        if final_blocked:
-            try:
-                cleanup_browser(effective_task_id)
-            except Exception as cleanup_err:
-                logger.warning("Failed to clean up blocked browser session for task %s: %s", effective_task_id, cleanup_err)
-            return json.dumps({
-                "success": False,
-                "url": final_url,
-                "error": final_blocked["message"],
-                "blocked_by_policy": {
-                    "host": final_blocked["host"],
-                    "rule": final_blocked["rule"],
-                    "source": final_blocked["source"],
-                },
-            }, ensure_ascii=False)
+        post_action_error = _enforce_post_action_policy(result, effective_task_id)
+        if post_action_error:
+            return post_action_error
         
         response = {
             "success": True,
@@ -1164,6 +1190,10 @@ def browser_click(ref: str, task_id: Optional[str] = None) -> str:
         ref = f"@{ref}"
     
     result = _run_browser_command(effective_task_id, "click", [ref])
+
+    post_action_error = _enforce_post_action_policy(result, effective_task_id)
+    if post_action_error:
+        return post_action_error
     
     if result.get("success"):
         return json.dumps({
@@ -1257,6 +1287,10 @@ def browser_back(task_id: Optional[str] = None) -> str:
     """
     effective_task_id = task_id or "default"
     result = _run_browser_command(effective_task_id, "back", [])
+
+    post_action_error = _enforce_post_action_policy(result, effective_task_id)
+    if post_action_error:
+        return post_action_error
     
     if result.get("success"):
         data = result.get("data", {})
@@ -1284,6 +1318,10 @@ def browser_press(key: str, task_id: Optional[str] = None) -> str:
     """
     effective_task_id = task_id or "default"
     result = _run_browser_command(effective_task_id, "press", [key])
+
+    post_action_error = _enforce_post_action_policy(result, effective_task_id)
+    if post_action_error:
+        return post_action_error
     
     if result.get("success"):
         return json.dumps({
