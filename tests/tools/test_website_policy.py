@@ -145,6 +145,14 @@ def test_load_website_blocklist_raises_clean_error_for_invalid_shared_files_type
         load_website_blocklist(config_path)
 
 
+def test_load_website_blocklist_raises_clean_error_for_invalid_top_level_config_type(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(["not", "a", "mapping"], sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(WebsitePolicyError, match="config root must be a mapping"):
+        load_website_blocklist(config_path)
+
+
 def test_load_website_blocklist_raises_clean_error_for_invalid_security_type(tmp_path):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump({"security": []}, sort_keys=False), encoding="utf-8")
