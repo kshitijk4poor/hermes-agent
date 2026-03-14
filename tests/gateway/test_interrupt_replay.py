@@ -109,3 +109,74 @@ async def test_handle_message_replays_pending_command_event_after_interrupt(monk
     runner._handle_status_command.assert_awaited_once()
     runner._run_agent.assert_awaited_once()
 
+
+@pytest.mark.asyncio
+async def test_handle_message_replays_plain_followup_after_interrupt(monkeypatch):
+    """Plain (non-command) follow-up messages should also be replayed after interrupt."""
+    runner = _make_runner(monkeypatch)
+    initial_event = _make_event("keep working")
+    pending_event = _make_event("what about option B?")
+
+    call_count = 0
+
+    async def fake_run_agent(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # First call: interrupted, return pending event for replay
+            return {
+                "final_response": "",
+                "messages": [{"role": "assistant", "content": "partial"}],
+                "history_offset": 0,
+                "tools": [],
+                "_pending_event": pending_event,
+                "_resume_history": [{"role": "user", "content": "keep working"}, {"role": "assistant", "content": "partial"}],
+            }
+        # Second call (replay): complete normally
+        return {
+            "final_response": "here is the answer",
+            "messages": [{"role": "assistant", "content": "here is the answer"}],
+            "history_offset": 0,
+            "tools": [],
+        }
+
+    runner._run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    result = await runner._handle_message(initial_event)
+
+    # The pending plain follow-up should have been replayed through _handle_message,
+    # which calls _run_agent a second time with the pending event.
+    assert runner._run_agent.await_count == 2
+    second_call_kwargs = runner._run_agent.call_args_list[1].kwargs
+    assert second_call_kwargs["message"] == "what about option B?"
+    assert second_call_kwargs["history"] == [{"role": "user", "content": "keep working"}, {"role": "assistant", "content": "partial"}]
+
+
+@pytest.mark.asyncio
+async def test_handle_message_respects_replay_depth_limit(monkeypatch):
+    """Replay recursion should be capped to prevent unbounded recursion."""
+    runner = _make_runner(monkeypatch)
+    event = _make_event("trigger interrupt")
+
+    call_count = 0
+
+    async def fake_run_agent(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 10:
+            return {
+                "final_response": "",
+                "messages": [],
+                "_pending_event": _make_event(f"followup-{call_count}"),
+                "_resume_history": [],
+            }
+        return {"final_response": "done", "messages": []}
+
+    runner._run_agent = AsyncMock(side_effect=fake_run_agent)
+
+    result = await runner._handle_message(event)
+
+    # Should have been called at most _MAX_INTERRUPT_REPLAY_DEPTH + 1 times
+    # (initial call + up to 5 replays)
+    assert runner._run_agent.await_count <= runner._MAX_INTERRUPT_REPLAY_DEPTH + 1
+

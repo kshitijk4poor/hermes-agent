@@ -354,6 +354,7 @@ class BasePlatformAdapter(ABC):
         self._active_sessions: Dict[str, asyncio.Event] = {}
         self._pending_messages: Dict[str, deque[MessageEvent]] = {}
         self._pending_interrupt_messages: Dict[str, deque[MessageEvent]] = {}
+        self._MAX_PENDING_MESSAGES = 50
         # Chats where auto-TTS on voice input is disabled (set by /voice off)
         self._auto_tts_disabled_chats: set = set()
     
@@ -690,8 +691,12 @@ class BasePlatformAdapter(ABC):
                 print(f"[{self.name}] ⚡ Stop requested for active session {session_key}")
                 self._active_sessions[session_key].set()
             else:
+                q = self._pending_messages.setdefault(session_key, deque())
+                if len(q) >= self._MAX_PENDING_MESSAGES:
+                    print(f"[{self.name}] ⚠️ Queue full for session {session_key}, dropping oldest")
+                    q.popleft()
                 print(f"[{self.name}] 📨 Queued follow-up for active session {session_key}")
-                self._pending_messages.setdefault(session_key, deque()).append(event)
+                q.append(event)
             return  # Don't process now - will be handled after current task finishes
         
         # Spawn background task to process this message

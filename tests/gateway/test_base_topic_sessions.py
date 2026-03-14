@@ -204,3 +204,43 @@ class TestBasePlatformTopicSessions:
         assert len(adapter.sent) == 41
         assert adapter.sent[0]["content"] == "ack:msg-0"
         assert adapter.sent[-1]["content"] == "ack:msg-40"
+
+    @pytest.mark.asyncio
+    async def test_pending_queue_drops_oldest_when_full(self, monkeypatch):
+        """When the pending queue hits _MAX_PENDING_MESSAGES, oldest entries are dropped."""
+        adapter = DummyTelegramAdapter()
+        adapter.set_message_handler(lambda event: asyncio.sleep(0, result=None))
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-1001",
+            chat_type="group",
+            thread_id="10",
+        )
+        session_key = build_session_key(source)
+        adapter._active_sessions[session_key] = asyncio.Event()
+
+        scheduled = []
+
+        def fake_create_task(coro):
+            scheduled.append(coro)
+            coro.close()
+            return SimpleNamespace()
+
+        monkeypatch.setattr(asyncio, "create_task", fake_create_task)
+
+        # Fill the queue to capacity + 2 extra
+        cap = adapter._MAX_PENDING_MESSAGES
+        for idx in range(cap + 2):
+            event = MessageEvent(
+                text=f"msg-{idx}",
+                source=source,
+                message_id=str(idx + 100),
+            )
+            await adapter.handle_message(event)
+
+        queue = adapter._pending_messages[session_key]
+        assert len(queue) == cap
+        # The first two messages (msg-0, msg-1) should have been dropped
+        assert queue[0].text == "msg-2"
+        assert queue[-1].text == f"msg-{cap + 1}"

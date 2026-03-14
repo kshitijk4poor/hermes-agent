@@ -939,16 +939,19 @@ class GatewayRunner:
             check_ids.add(user_id.split("@")[0])
         return bool(check_ids & allowed_ids)
     
+    _MAX_INTERRUPT_REPLAY_DEPTH = 5
+
     async def _handle_message(
         self,
         event: MessageEvent,
         *,
         history_override: Optional[List[Dict[str, Any]]] = None,
         bypass_running_agent_check: bool = False,
+        _replay_depth: int = 0,
     ) -> Optional[str]:
         """
         Handle an incoming message from any platform.
-        
+
         This is the core message processing pipeline:
         1. Check user authorization
         2. Check for commands (/new, /reset, etc.)
@@ -957,6 +960,10 @@ class GatewayRunner:
         5. Build context for agent
         6. Run agent conversation
         7. Return response
+
+        _replay_depth tracks recursive calls made to replay queued events
+        after an interrupt. Guarded by _MAX_INTERRUPT_REPLAY_DEPTH to
+        prevent unbounded recursion from rapid-fire interrupts.
         """
         source = event.source
 
@@ -1665,11 +1672,19 @@ class GatewayRunner:
 
             pending_event = agent_result.get("_pending_event")
             if pending_event:
-                return await self._handle_message(
-                    pending_event,
-                    history_override=agent_result.get("_resume_history", agent_messages),
-                    bypass_running_agent_check=True,
-                )
+                if _replay_depth >= self._MAX_INTERRUPT_REPLAY_DEPTH:
+                    logger.warning(
+                        "Interrupt replay depth limit (%d) reached for session %s, "
+                        "dropping queued event to prevent unbounded recursion",
+                        self._MAX_INTERRUPT_REPLAY_DEPTH, session_key,
+                    )
+                else:
+                    return await self._handle_message(
+                        pending_event,
+                        history_override=agent_result.get("_resume_history", agent_messages),
+                        bypass_running_agent_check=True,
+                        _replay_depth=_replay_depth + 1,
+                    )
 
             # Auto voice reply: send TTS audio before the text response
             if self._should_send_voice_reply(event, response, agent_messages):
@@ -3580,13 +3595,22 @@ class GatewayRunner:
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
-        
+
         Returns the full result dict from run_conversation, including:
           - "final_response": str (the text to send back)
           - "messages": list (full conversation including tool calls)
           - "api_calls": int
           - "completed": bool
-        
+
+        When interrupted, two additional keys may be present:
+          - "_pending_event": MessageEvent | None — a queued gateway event
+            that should be replayed through _handle_message after the interrupt.
+          - "_resume_history": list — conversation history to pass as
+            history_override when replaying the pending event.
+
+        Callers should check for "_pending_event" and, if present, recurse
+        into _handle_message rather than processing the response normally.
+
         This is run in a thread pool to not block the event loop.
         Supports interruption via new messages.
         """
