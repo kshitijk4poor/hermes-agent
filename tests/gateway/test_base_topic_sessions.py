@@ -130,8 +130,6 @@ class TestBasePlatformTopicSessions:
 
         assert scheduled == []
         assert adapter.has_pending_interrupt(session_key) is True
-        queued_interrupt = adapter.get_pending_interrupt_message(session_key)
-        assert queued_interrupt is None
 
     @pytest.mark.asyncio
     async def test_process_message_background_replies_in_same_topic(self):

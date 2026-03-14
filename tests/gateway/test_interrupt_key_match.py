@@ -137,5 +137,3 @@ class TestInterruptKeyConsistency:
         await adapter.handle_message(event)
 
         assert adapter.has_pending_interrupt(session_key) is True
-        pending = adapter.get_pending_interrupt_message(session_key)
-        assert pending is None

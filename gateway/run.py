@@ -4134,10 +4134,8 @@ class GatewayRunner:
                 if hasattr(adapter, 'has_pending_interrupt') and adapter.has_pending_interrupt(session_key):
                     agent = agent_holder[0]
                     if agent:
-                        pending_event = adapter.get_pending_interrupt_message(session_key)
-                        pending_text = pending_event.text if pending_event and pending_event.text else None
                         logger.debug("Interrupt detected from adapter, signaling agent...")
-                        agent.interrupt(pending_text)
+                        agent.interrupt()
                         break
         
         interrupt_monitor = asyncio.create_task(monitor_for_interrupt())

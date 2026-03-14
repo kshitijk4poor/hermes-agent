@@ -353,7 +353,6 @@ class BasePlatformAdapter(ABC):
         # Explicit /stop messages wake the runner without a follow-up payload.
         self._active_sessions: Dict[str, asyncio.Event] = {}
         self._pending_messages: Dict[str, deque[MessageEvent]] = {}
-        self._pending_interrupt_messages: Dict[str, deque[MessageEvent]] = {}
         self._MAX_PENDING_MESSAGES = 50
         # Chats where auto-TTS on voice input is disabled (set by /voice off)
         self._auto_tts_disabled_chats: set = set()
@@ -910,10 +909,6 @@ class BasePlatformAdapter(ABC):
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Get and clear any pending message for a session."""
         return self._pop_pending_event(self._pending_messages, session_key)
-
-    def get_pending_interrupt_message(self, session_key: str) -> Optional[MessageEvent]:
-        """Get and clear the next explicit interrupt message for a session."""
-        return self._pop_pending_event(self._pending_interrupt_messages, session_key)
 
     @staticmethod
     def _pop_pending_event(

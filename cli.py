@@ -1391,7 +1391,7 @@ class HermesCLI:
 
         lines = ["Queued follow-up messages"]
         lines.extend(f"{idx}. {item}" for idx, item in enumerate(queued, start=1))
-        lines.append("Esc interrupts now; Enter keeps queuing.")
+        lines.append("Esc or /stop interrupts now; Enter keeps queuing.")
         return lines
 
     def _normalize_model_for_provider(self, resolved_provider: str) -> bool:
@@ -4328,48 +4328,14 @@ class HermesCLI:
             agent_thread = threading.Thread(target=run_agent)
             agent_thread.start()
 
-            # Monitor the dedicated interrupt queue while the agent runs.
-            # _interrupt_queue is separate from _pending_input, so process_loop
-            # and chat() never compete for the same queue.
-            # When a clarify question is active, user input is handled entirely
-            # by the Enter key binding (routed to the clarify response queue),
-            # so we skip interrupt processing to avoid stealing that input.
-            interrupt_msg = None
-            while agent_thread.is_alive():
-                if hasattr(self, '_interrupt_queue'):
-                    try:
-                        interrupt_msg = self._interrupt_queue.get(timeout=0.1)
-                        if interrupt_msg:
-                            # If clarify is active, the Enter handler routes
-                            # input directly; this queue shouldn't have anything.
-                            # But if it does (race condition), don't interrupt.
-                            if self._clarify_state or self._clarify_freetext:
-                                continue
-                            _cprint("\n⚡ New message detected, interrupting...")
-                            # Signal TTS to stop on interrupt
-                            if stop_event is not None:
-                                stop_event.set()
-                            self.agent.interrupt(interrupt_msg or None)
-                            # Debug: log to file (stdout may be devnull from redirect_stdout)
-                            try:
-                                _dbg = _hermes_home / "interrupt_debug.log"
-                                with open(_dbg, "a") as _f:
-                                    import time as _t
-                                    _f.write(f"{_t.strftime('%H:%M:%S')} interrupt fired: msg={str(interrupt_msg)[:60]!r}, "
-                                             f"children={len(self.agent._active_children)}, "
-                                             f"parent._interrupt={self.agent._interrupt_requested}\n")
-                                    for _ci, _ch in enumerate(self.agent._active_children):
-                                        _f.write(f"  child[{_ci}]._interrupt={_ch._interrupt_requested}\n")
-                            except Exception:
-                                pass
-                            break
-                    except queue.Empty:
-                        pass  # Queue empty or timeout, continue waiting
-                else:
-                    # Fallback for non-interactive mode (e.g., single-query)
-                    agent_thread.join(0.1)
-
-            agent_thread.join()  # Ensure agent thread completes
+            # Store TTS stop event so Esc handler can signal it.
+            # Interrupts now fire directly via Esc → agent.interrupt();
+            # we just wait for the agent thread to finish.
+            self._tts_stop_event = stop_event
+            try:
+                agent_thread.join()
+            finally:
+                self._tts_stop_event = None
 
             # Signal end-of-text to TTS consumer and wait for it to finish
             if use_streaming_tts and text_queue is not None:
@@ -4406,7 +4372,7 @@ class HermesCLI:
             # Handle interrupt - check if we were interrupted
             pending_message = None
             if result and result.get("interrupted"):
-                pending_message = result.get("interrupt_message") or interrupt_msg
+                pending_message = result.get("interrupt_message")
                 # Add indicator that we were interrupted
                 if response and pending_message:
                     response = response + "\n\n---\n_[Interrupted - processing new message]_"
@@ -4478,21 +4444,8 @@ class HermesCLI:
                 ).start()
 
 
-            # Combine all interrupt messages (user may have typed multiple while waiting)
-            # and re-queue as one prompt for process_loop
-            if pending_message and hasattr(self, '_pending_input'):
-                all_parts = [pending_message]
-                while not self._interrupt_queue.empty():
-                    try:
-                        extra = self._interrupt_queue.get_nowait()
-                        if extra:
-                            all_parts.append(extra)
-                    except queue.Empty:
-                        break
-                combined = "\n".join(all_parts)
-                _cprint(f"\n📨 Queued: '{combined[:50]}{'...' if len(combined) > 50 else ''}'")
-                self._pending_input.put(combined)
-            
+            # On interrupt, follow-ups are already in _pending_input
+            # (queued by handle_enter while agent was running).
             return response
             
         except Exception as e:
@@ -4811,6 +4764,15 @@ class HermesCLI:
                 event.app.invalidate()
                 # Bundle text + images as a tuple when images are present
                 payload = (text, images) if images else text
+                # /stop while agent is running: interrupt immediately (like Esc)
+                if self._agent_running and text and text.strip() == "/stop":
+                    _cprint("\n⚡ Interrupting agent...")
+                    if self._tts_stop_event is not None:
+                        self._tts_stop_event.set()
+                    self.agent.interrupt()
+                    event.app.current_buffer.reset(append_to_history=True)
+                    event.app.invalidate()
+                    return
                 if self._agent_running:
                     self._enqueue_visible_followup(payload)
                 self._pending_input.put(payload)
@@ -4829,6 +4791,9 @@ class HermesCLI:
                 self._sudo_state or self._secret_state or self._approval_state or self._clarify_state
             ):
                 _cprint("\n⚡ Interrupting agent...")
+                # Signal streaming TTS to stop
+                if self._tts_stop_event is not None:
+                    self._tts_stop_event.set()
                 self.agent.interrupt()
                 event.app.invalidate()
 
@@ -5207,7 +5172,7 @@ class HermesCLI:
                 status = cli_ref._command_status or "Processing command..."
                 return f"{frame} {status}"
             if cli_ref._agent_running:
-                return "Enter queues follow-up, Esc preempts, Ctrl+C cancels"
+                return "Enter queues follow-up, Esc or /stop preempts, Ctrl+C cancels"
             if cli_ref._voice_mode:
                 return "type or Ctrl+B to record"
             return ""
@@ -5756,13 +5721,13 @@ class HermesCLI:
                         _cprint(f"  {_DIM}📎 {n} image{'s' if n > 1 else ''} attached{_RST}")
 
                     # Regular chat - run agent
-                    self._consume_visible_followup()
                     self._agent_running = True
                     app.invalidate()  # Refresh status line
 
                     try:
                         self.chat(user_input, images=submit_images or None)
                     finally:
+                        self._consume_visible_followup()
                         self._agent_running = False
                         self._spinner_text = ""
                         app.invalidate()  # Refresh status line
