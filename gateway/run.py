@@ -249,8 +249,6 @@ class GatewayRunner:
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
-        self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
-        
         # Track pending exec approvals per session
         # Key: session_key, Value: {"command": str, "pattern_key": str, ...}
         self._pending_approvals: Dict[str, Dict[str, Any]] = {}
@@ -992,7 +990,6 @@ class GatewayRunner:
         if _quick_key in self._running_agents:
             command = event.get_command()
             if command != "stop":
-                self._pending_messages[_quick_key] = event.text
                 return None
 
             running_agent = self._running_agents[_quick_key]
