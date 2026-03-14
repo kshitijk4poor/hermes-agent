@@ -18,6 +18,7 @@ Usage:
     hermes cron list           # List cron jobs
     hermes cron status         # Check if cron scheduler is running
     hermes doctor              # Check configuration and dependencies
+    hermes blocklist list      # Show web/browser blocklists and subscriptions
     hermes honcho setup                    # Configure Honcho AI memory integration
     hermes honcho status                   # Show Honcho config and connection status
     hermes honcho sessions                 # List directory → session name mappings
@@ -1819,6 +1820,12 @@ def cmd_config(args):
     config_command(args)
 
 
+def cmd_blocklist(args):
+    """Manage web/browser URL blocklists."""
+    from hermes_cli.blocklist import blocklist_command
+    blocklist_command(args)
+
+
 def cmd_version(args):
     """Show version."""
     print(f"Hermes Agent v{__version__} ({__release_date__})")
@@ -2143,7 +2150,7 @@ def _coalesce_session_name_args(argv: list) -> list:
     """
     _SUBCOMMANDS = {
         "chat", "model", "gateway", "setup", "whatsapp", "login", "logout",
-        "status", "cron", "doctor", "config", "pairing", "skills", "tools",
+        "status", "cron", "doctor", "config", "blocklist", "pairing", "skills", "tools",
         "sessions", "insights", "version", "update", "uninstall",
     }
     _SESSION_FLAGS = {"-c", "--continue", "-r", "--resume"}
@@ -2187,6 +2194,7 @@ Examples:
     hermes config                 View configuration
     hermes config edit            Edit config in $EDITOR
     hermes config set model gpt-4 Set a config value
+    hermes blocklist list         Show URL blocklists and subscriptions
     hermes gateway                Run messaging gateway
     hermes -w                     Start in isolated git worktree
     hermes gateway install        Install as system service
@@ -2567,6 +2575,44 @@ For more help on a command:
     config_migrate = config_subparsers.add_parser("migrate", help="Update config with new options")
     
     config_parser.set_defaults(func=cmd_config)
+
+    # =========================================================================
+    # blocklist command
+    # =========================================================================
+    blocklist_parser = subparsers.add_parser(
+        "blocklist",
+        help="Manage browser/web URL blocklists",
+        description="Manage local URL blocks, subscribed domain lists, and policy inspection",
+    )
+    blocklist_subparsers = blocklist_parser.add_subparsers(dest="blocklist_action")
+
+    blocklist_add = blocklist_subparsers.add_parser("add", help="Add a local blocked host")
+    blocklist_add.add_argument("host", help="Host or domain to block")
+
+    blocklist_remove = blocklist_subparsers.add_parser("remove", help="Remove a local blocked host")
+    blocklist_remove.add_argument("host", help="Host or domain to remove")
+
+    blocklist_subscribe = blocklist_subparsers.add_parser(
+        "subscribe",
+        help="Subscribe to a remote or local policy registry list",
+    )
+    blocklist_subscribe.add_argument("source", help="Registry URL or local path")
+    blocklist_subscribe.add_argument("list_id", help="List ID within the registry")
+
+    blocklist_unsubscribe = blocklist_subparsers.add_parser(
+        "unsubscribe",
+        help="Remove a subscribed policy list",
+    )
+    blocklist_unsubscribe.add_argument("source", help="Registry URL or local path")
+    blocklist_unsubscribe.add_argument("list_id", help="List ID within the registry")
+
+    blocklist_why = blocklist_subparsers.add_parser("why", help="Explain how a URL is classified")
+    blocklist_why.add_argument("url", help="URL to evaluate")
+
+    blocklist_subparsers.add_parser("update", help="Refresh subscribed policy lists")
+    blocklist_subparsers.add_parser("list", help="Show current local blocks and subscriptions")
+
+    blocklist_parser.set_defaults(func=cmd_blocklist)
     
     # =========================================================================
     # pairing command

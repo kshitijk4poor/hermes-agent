@@ -114,6 +114,15 @@ DEFAULT_CONFIG = {
         "record_sessions": False,  # Auto-record browser sessions as WebM videos
     },
 
+    # Browser/web URL policy for local blocks, exceptions, and subscribed lists.
+    "web_policy": {
+        "enabled": True,
+        "local_blocks": [],
+        "local_exceptions": [],
+        "subscriptions": [],
+        "audit_blocked_attempts": False,
+    },
+
     # Filesystem checkpoints — automatic snapshots before destructive file ops.
     # When enabled, the agent takes a snapshot of the working directory once per
     # conversation turn (on first write_file/patch call).  Use /rollback to restore.
@@ -256,7 +265,7 @@ DEFAULT_CONFIG = {
     "personalities": {},
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 7,
+    "_config_version": 8,
 }
 
 # =============================================================================
