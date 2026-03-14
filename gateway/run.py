@@ -939,7 +939,13 @@ class GatewayRunner:
             check_ids.add(user_id.split("@")[0])
         return bool(check_ids & allowed_ids)
     
-    async def _handle_message(self, event: MessageEvent) -> Optional[str]:
+    async def _handle_message(
+        self,
+        event: MessageEvent,
+        *,
+        history_override: Optional[List[Dict[str, Any]]] = None,
+        bypass_running_agent_check: bool = False,
+    ) -> Optional[str]:
         """
         Handle an incoming message from any platform.
         
@@ -987,7 +993,7 @@ class GatewayRunner:
         # reaches the running agent quickly. Plain follow-ups are queued by the
         # platform adapter and should not preempt by default.
         _quick_key = build_session_key(source)
-        if _quick_key in self._running_agents:
+        if not bypass_running_agent_check and _quick_key in self._running_agents:
             command = event.get_command()
             if command != "stop":
                 return None
@@ -1192,7 +1198,7 @@ class GatewayRunner:
             session_entry.was_auto_reset = False
         
         # Load conversation history from transcript
-        history = self.session_store.load_transcript(session_entry.session_id)
+        history = history_override if history_override is not None else self.session_store.load_transcript(session_entry.session_id)
         
         # -----------------------------------------------------------------
         # Session hygiene: auto-compress pathologically large transcripts
@@ -1656,6 +1662,14 @@ class GatewayRunner:
                 last_prompt_tokens=agent_result.get("last_prompt_tokens", 0),
                 model=agent_result.get("model"),
             )
+
+            pending_event = agent_result.get("_pending_event")
+            if pending_event:
+                return await self._handle_message(
+                    pending_event,
+                    history_override=agent_result.get("_resume_history", agent_messages),
+                    bypass_running_agent_check=True,
+                )
 
             # Auto voice reply: send TTS audio before the text response
             if self._should_send_voice_reply(event, response, agent_messages):
@@ -4116,6 +4130,7 @@ class GatewayRunner:
             # Get pending message from adapter if interrupted.
             # Use session_key (not source.chat_id) to match adapter's storage keys.
             pending = None
+            pending_event = None
             if result and result.get("interrupted") and adapter:
                 pending_event = adapter.get_pending_message(session_key) if session_key else None
                 if pending_event:
@@ -4136,8 +4151,13 @@ class GatewayRunner:
                 # like "Operation interrupted." They already know they sent a new
                 # message, so go straight to processing it.
                 
-                # Now process the pending message with updated history
                 updated_history = result.get("messages", history)
+                response["_pending_event"] = pending_event
+                response["_resume_history"] = updated_history
+                if pending_event:
+                    return response
+
+                # Fallback for interrupt sources that only provided plain text.
                 return await self._run_agent(
                     message=pending,
                     context_prompt=context_prompt,

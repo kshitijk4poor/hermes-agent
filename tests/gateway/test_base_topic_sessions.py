@@ -1,6 +1,8 @@
 """Tests for BasePlatformAdapter topic-aware session handling."""
 
 import asyncio
+from collections import deque
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -164,3 +166,41 @@ class TestBasePlatformTopicSessions:
                 "metadata": {"thread_id": "17585"},
             }
         ]
+
+    @pytest.mark.asyncio
+    async def test_process_message_background_drains_large_pending_queue_iteratively(self):
+        adapter = DummyTelegramAdapter()
+
+        async def handler(event):
+            await asyncio.sleep(0)
+            return f"ack:{event.text}"
+
+        async def hold_typing(_chat_id, interval=2.0, metadata=None):
+            await asyncio.Event().wait()
+
+        adapter.set_message_handler(handler)
+        adapter._keep_typing = hold_typing
+
+        source = SessionSource(
+            platform=Platform.TELEGRAM,
+            chat_id="-1001",
+            chat_type="group",
+            thread_id="17585",
+        )
+        session_key = build_session_key(source)
+        first_event = MessageEvent(text="msg-0", source=source, message_id="0")
+        adapter._pending_messages[session_key] = deque(
+            MessageEvent(text=f"msg-{idx}", source=source, message_id=str(idx))
+            for idx in range(1, 41)
+        )
+
+        old_limit = sys.getrecursionlimit()
+        sys.setrecursionlimit(60)
+        try:
+            await adapter._process_message_background(first_event, session_key)
+        finally:
+            sys.setrecursionlimit(old_limit)
+
+        assert len(adapter.sent) == 41
+        assert adapter.sent[0]["content"] == "ack:msg-0"
+        assert adapter.sent[-1]["content"] == "ack:msg-40"

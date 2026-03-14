@@ -4345,7 +4345,7 @@ class HermesCLI:
                             # But if it does (race condition), don't interrupt.
                             if self._clarify_state or self._clarify_freetext:
                                 continue
-                            print(f"\n⚡ New message detected, interrupting...")
+                            _cprint("\n⚡ New message detected, interrupting...")
                             # Signal TTS to stop on interrupt
                             if stop_event is not None:
                                 stop_event.set()
@@ -4490,7 +4490,7 @@ class HermesCLI:
                     except queue.Empty:
                         break
                 combined = "\n".join(all_parts)
-                print(f"\n📨 Queued: '{combined[:50]}{'...' if len(combined) > 50 else ''}'")
+                _cprint(f"\n📨 Queued: '{combined[:50]}{'...' if len(combined) > 50 else ''}'")
                 self._pending_input.put(combined)
             
             return response
@@ -4828,7 +4828,7 @@ class HermesCLI:
             if self._agent_running and self.agent and not (
                 self._sudo_state or self._secret_state or self._approval_state or self._clarify_state
             ):
-                print("\n⚡ Interrupting agent...")
+                _cprint("\n⚡ Interrupting agent...")
                 self.agent.interrupt()
                 event.app.invalidate()
 
@@ -5705,8 +5705,6 @@ class HermesCLI:
                     if not user_input:
                         continue
 
-                    self._consume_visible_followup()
-
                     # Unpack image payload: (text, [Path, ...]) or plain str
                     submit_images = []
                     if isinstance(user_input, tuple):
@@ -5720,6 +5718,7 @@ class HermesCLI:
                             # Schedule app exit
                             if app.is_running:
                                 app.exit()
+                        self._consume_visible_followup()
                         continue
                     
                     # Expand paste references back to full content
@@ -5757,6 +5756,7 @@ class HermesCLI:
                         _cprint(f"  {_DIM}📎 {n} image{'s' if n > 1 else ''} attached{_RST}")
 
                     # Regular chat - run agent
+                    self._consume_visible_followup()
                     self._agent_running = True
                     app.invalidate()  # Refresh status line
 
