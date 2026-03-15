@@ -23,6 +23,8 @@ const sidebars: SidebarsConfig = {
         'guides/team-telegram-assistant',
         'guides/python-library',
         'guides/use-mcp-with-hermes',
+        'guides/use-soul-with-hermes',
+        'guides/use-voice-mode-with-hermes',
       ],
     },
     {
@@ -74,6 +76,7 @@ const sidebars: SidebarsConfig = {
           type: 'category',
           label: 'Web & Media',
           items: [
+            'user-guide/features/voice-mode',
             'user-guide/features/browser',
             'user-guide/features/vision',
             'user-guide/features/image-generation',
@@ -107,6 +110,7 @@ const sidebars: SidebarsConfig = {
         'developer-guide/architecture',
         'developer-guide/agent-loop',
         'developer-guide/provider-runtime',
+        'developer-guide/adding-providers',
         'developer-guide/prompt-assembly',
         'developer-guide/context-compression-and-caching',
         'developer-guide/gateway-internals',

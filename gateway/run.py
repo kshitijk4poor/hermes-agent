@@ -100,24 +100,40 @@ if _config_path.exists():
             for _cfg_key, _env_var in _compression_env_map.items():
                 if _cfg_key in _compression_cfg:
                     os.environ[_env_var] = str(_compression_cfg[_cfg_key])
-        # Auxiliary model overrides (vision, web_extract).
-        # Each task has provider + model; bridge non-default values to env vars.
+        # Auxiliary model/direct-endpoint overrides (vision, web_extract).
+        # Each task has provider/model/base_url/api_key; bridge non-default values to env vars.
         _auxiliary_cfg = _cfg.get("auxiliary", {})
         if _auxiliary_cfg and isinstance(_auxiliary_cfg, dict):
             _aux_task_env = {
-                "vision":      ("AUXILIARY_VISION_PROVIDER",      "AUXILIARY_VISION_MODEL"),
-                "web_extract": ("AUXILIARY_WEB_EXTRACT_PROVIDER",  "AUXILIARY_WEB_EXTRACT_MODEL"),
+                "vision": {
+                    "provider": "AUXILIARY_VISION_PROVIDER",
+                    "model": "AUXILIARY_VISION_MODEL",
+                    "base_url": "AUXILIARY_VISION_BASE_URL",
+                    "api_key": "AUXILIARY_VISION_API_KEY",
+                },
+                "web_extract": {
+                    "provider": "AUXILIARY_WEB_EXTRACT_PROVIDER",
+                    "model": "AUXILIARY_WEB_EXTRACT_MODEL",
+                    "base_url": "AUXILIARY_WEB_EXTRACT_BASE_URL",
+                    "api_key": "AUXILIARY_WEB_EXTRACT_API_KEY",
+                },
             }
-            for _task_key, (_prov_env, _model_env) in _aux_task_env.items():
+            for _task_key, _env_map in _aux_task_env.items():
                 _task_cfg = _auxiliary_cfg.get(_task_key, {})
                 if not isinstance(_task_cfg, dict):
                     continue
                 _prov = str(_task_cfg.get("provider", "")).strip()
                 _model = str(_task_cfg.get("model", "")).strip()
+                _base_url = str(_task_cfg.get("base_url", "")).strip()
+                _api_key = str(_task_cfg.get("api_key", "")).strip()
                 if _prov and _prov != "auto":
-                    os.environ[_prov_env] = _prov
+                    os.environ[_env_map["provider"]] = _prov
                 if _model:
-                    os.environ[_model_env] = _model
+                    os.environ[_env_map["model"]] = _model
+                if _base_url:
+                    os.environ[_env_map["base_url"]] = _base_url
+                if _api_key:
+                    os.environ[_env_map["api_key"]] = _api_key
         _agent_cfg = _cfg.get("agent", {})
         if _agent_cfg and isinstance(_agent_cfg, dict):
             if "max_turns" in _agent_cfg:
@@ -215,6 +231,33 @@ def _resolve_gateway_model() -> str:
     return model
 
 
+def _resolve_hermes_bin() -> Optional[list[str]]:
+    """Resolve the Hermes update command as argv parts.
+
+    Tries in order:
+    1. ``shutil.which("hermes")`` — standard PATH lookup
+    2. ``sys.executable -m hermes_cli.main`` — fallback when Hermes is running
+       from a venv/module invocation and the ``hermes`` shim is not on PATH
+
+    Returns argv parts ready for quoting/joining, or ``None`` if neither works.
+    """
+    import shutil
+
+    hermes_bin = shutil.which("hermes")
+    if hermes_bin:
+        return [hermes_bin]
+
+    try:
+        import importlib.util
+
+        if importlib.util.find_spec("hermes_cli") is not None:
+            return [sys.executable, "-m", "hermes_cli.main"]
+    except Exception:
+        pass
+
+    return None
+
+
 class GatewayRunner:
     """
     Main gateway controller.
@@ -245,6 +288,8 @@ class GatewayRunner:
         self.delivery_router = DeliveryRouter(self.config)
         self._running = False
         self._shutdown_event = asyncio.Event()
+        self._exit_cleanly = False
+        self._exit_reason: Optional[str] = None
         
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
@@ -461,6 +506,41 @@ class GatewayRunner:
         """Run the sync memory flush in a thread pool so it won't block the event loop."""
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, self._flush_memories_for_session, old_session_id)
+
+    @property
+    def should_exit_cleanly(self) -> bool:
+        return self._exit_cleanly
+
+    @property
+    def exit_reason(self) -> Optional[str]:
+        return self._exit_reason
+
+    async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
+        """React to a non-retryable adapter failure after startup."""
+        logger.error(
+            "Fatal %s adapter error (%s): %s",
+            adapter.platform.value,
+            adapter.fatal_error_code or "unknown",
+            adapter.fatal_error_message or "unknown error",
+        )
+
+        existing = self.adapters.get(adapter.platform)
+        if existing is adapter:
+            try:
+                await adapter.disconnect()
+            finally:
+                self.adapters.pop(adapter.platform, None)
+                self.delivery_router.adapters = self.adapters
+
+        if not self.adapters:
+            self._exit_reason = adapter.fatal_error_message or "All messaging adapters disconnected"
+            logger.error("No connected messaging platforms remain. Shutting down gateway cleanly.")
+            await self.stop()
+
+    def _request_clean_exit(self, reason: str) -> None:
+        self._exit_cleanly = True
+        self._exit_reason = reason
+        self._shutdown_event.set()
     
     @staticmethod
     def _load_prefill_messages() -> List[Dict[str, Any]]:
@@ -645,6 +725,11 @@ class GatewayRunner:
         """
         logger.info("Starting Hermes Gateway...")
         logger.info("Session storage: %s", self.config.sessions_dir)
+        try:
+            from gateway.status import write_runtime_status
+            write_runtime_status(gateway_state="starting", exit_reason=None)
+        except Exception:
+            pass
         
         # Warn if no user allowlists are configured and open access is not opted in
         _any_allowlist = any(
@@ -674,6 +759,7 @@ class GatewayRunner:
             logger.warning("Process checkpoint recovery: %s", e)
         
         connected_count = 0
+        startup_nonretryable_errors: list[str] = []
         
         # Initialize and connect each configured platform
         for platform, platform_config in self.config.platforms.items():
@@ -685,8 +771,9 @@ class GatewayRunner:
                 logger.warning("No adapter available for %s", platform.value)
                 continue
             
-            # Set up message handler
+            # Set up message + fatal error handlers
             adapter.set_message_handler(self._handle_message)
+            adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
             
             # Try to connect
             logger.info("Connecting to %s...", platform.value)
@@ -699,10 +786,24 @@ class GatewayRunner:
                     logger.info("✓ %s connected", platform.value)
                 else:
                     logger.warning("✗ %s failed to connect", platform.value)
+                    if adapter.has_fatal_error and not adapter.fatal_error_retryable:
+                        startup_nonretryable_errors.append(
+                            f"{platform.value}: {adapter.fatal_error_message}"
+                        )
             except Exception as e:
                 logger.error("✗ %s error: %s", platform.value, e)
         
         if connected_count == 0:
+            if startup_nonretryable_errors:
+                reason = "; ".join(startup_nonretryable_errors)
+                logger.error("Gateway hit a non-retryable startup conflict: %s", reason)
+                try:
+                    from gateway.status import write_runtime_status
+                    write_runtime_status(gateway_state="startup_failed", exit_reason=reason)
+                except Exception:
+                    pass
+                self._request_clean_exit(reason)
+                return True
             logger.warning("No messaging platforms connected.")
             logger.info("Gateway will continue running for cron job execution.")
         
@@ -710,6 +811,11 @@ class GatewayRunner:
         self.delivery_router.adapters = self.adapters
         
         self._running = True
+        try:
+            from gateway.status import write_runtime_status
+            write_runtime_status(gateway_state="running", exit_reason=None)
+        except Exception:
+            pass
         
         # Emit gateway:startup hook
         hook_count = len(self.hooks.loaded_hooks)
@@ -804,8 +910,12 @@ class GatewayRunner:
         self._shutdown_all_gateway_honcho()
         self._shutdown_event.set()
         
-        from gateway.status import remove_pid_file
+        from gateway.status import remove_pid_file, write_runtime_status
         remove_pid_file()
+        try:
+            write_runtime_status(gateway_state="stopped", exit_reason=self._exit_reason)
+        except Exception:
+            pass
         
         logger.info("Gateway stopped")
     
@@ -1015,7 +1125,7 @@ class GatewayRunner:
         
         # Emit command:* hook for any recognized slash command
         _known_commands = {"new", "reset", "help", "status", "stop", "model", "reasoning",
-                          "personality", "retry", "undo", "sethome", "set-home",
+                          "personality", "plan", "retry", "undo", "sethome", "set-home",
                           "compress", "usage", "insights", "reload-mcp", "reload_mcp",
                           "update", "title", "resume", "provider", "rollback",
                           "background", "reasoning", "voice"}
@@ -1050,6 +1160,28 @@ class GatewayRunner:
         
         if command == "personality":
             return await self._handle_personality_command(event)
+
+        if command == "plan":
+            try:
+                from agent.skill_commands import build_plan_path, build_skill_invocation_message
+
+                user_instruction = event.get_command_args().strip()
+                plan_path = build_plan_path(user_instruction)
+                event.text = build_skill_invocation_message(
+                    "/plan",
+                    user_instruction,
+                    task_id=_quick_key,
+                    runtime_note=(
+                        "Save the markdown plan with write_file to this exact relative path "
+                        f"inside the active workspace/backend cwd: {plan_path}"
+                    ),
+                )
+                if not event.text:
+                    return "Failed to load the bundled /plan skill."
+                command = None
+            except Exception as e:
+                logger.exception("Failed to prepare /plan command")
+                return f"Failed to enter plan mode: {e}"
         
         if command == "retry":
             return await self._handle_retry_command(event)
@@ -3182,9 +3314,14 @@ class GatewayRunner:
         if not git_dir.exists():
             return "✗ Not a git repository — cannot update."
 
-        hermes_bin = shutil.which("hermes")
-        if not hermes_bin:
-            return "✗ `hermes` command not found on PATH."
+        hermes_cmd = _resolve_hermes_bin()
+        if not hermes_cmd:
+            return (
+                "✗ Could not locate the `hermes` command. "
+                "Hermes is running, but the update command could not find the "
+                "executable on PATH or via the current Python interpreter. "
+                "Try running `hermes update` manually in your terminal."
+            )
 
         pending_path = _hermes_home / ".update_pending.json"
         output_path = _hermes_home / ".update_output.txt"
@@ -3200,8 +3337,9 @@ class GatewayRunner:
 
         # Spawn `hermes update` in a separate cgroup so it survives gateway
         # restart. systemd-run --user --scope creates a transient scope unit.
+        hermes_cmd_str = " ".join(shlex.quote(part) for part in hermes_cmd)
         update_cmd = (
-            f"{shlex.quote(hermes_bin)} update > {shlex.quote(str(output_path))} 2>&1; "
+            f"{hermes_cmd_str} update > {shlex.quote(str(output_path))} 2>&1; "
             f"status=$?; printf '%s' \"$status\" > {shlex.quote(str(exit_code_path))}"
         )
         try:
@@ -3439,7 +3577,7 @@ class GatewayRunner:
         audio_paths: List[str],
     ) -> str:
         """
-        Auto-transcribe user voice/audio messages using OpenAI Whisper API
+        Auto-transcribe user voice/audio messages using the configured STT provider
         and prepend the transcript to the message text.
 
         Args:
@@ -3449,6 +3587,12 @@ class GatewayRunner:
         Returns:
             The enriched message string with transcriptions prepended.
         """
+        if not getattr(self.config, "stt_enabled", True):
+            disabled_note = "[The user sent voice message(s), but transcription is disabled in config.]"
+            if user_text:
+                return f"{disabled_note}\n\n{user_text}"
+            return disabled_note
+
         from tools.transcription_tools import transcribe_audio, get_stt_model_from_config
         import asyncio
 
@@ -3730,9 +3874,7 @@ class GatewayRunner:
                 "memory": "🧠",
                 "session_search": "🔍",
                 "send_message": "📨",
-                "schedule_cronjob": "⏰",
-                "list_cronjobs": "⏰",
-                "remove_cronjob": "⏰",
+                "cronjob": "⏰",
                 "execute_code": "🐍",
                 "delegate_task": "🔀",
                 "clarify": "❓",
@@ -4380,6 +4522,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     success = await runner.start()
     if not success:
         return False
+    if runner.should_exit_cleanly:
+        if runner.exit_reason:
+            logger.error("Gateway exiting cleanly: %s", runner.exit_reason)
+        return True
     
     # Write PID file so CLI can detect gateway is running
     import atexit
