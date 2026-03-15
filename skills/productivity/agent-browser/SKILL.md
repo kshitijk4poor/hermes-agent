@@ -1,7 +1,7 @@
 ---
 name: agent-browser
 description: Browser automation via Vercel's agent-browser CLI — native Rust, 50+ commands, ref-based snapshots, diffing, multi-engine support (Chrome/Lightpanda), multi-session isolation, dogfood QA mode, Electron app automation, Slack automation without API tokens, and auth import from any Chromium browser.
-version: 1.1.0
+version: 0.20.10
 metadata:
   hermes:
     tags: [browser, automation, cdp, vercel, local, scraping, agent-browser, dogfood, electron, slack, qa]
