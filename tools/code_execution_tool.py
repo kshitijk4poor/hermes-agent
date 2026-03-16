@@ -226,6 +226,7 @@ def _rpc_server_loop(
     tool_call_counter: list,   # mutable [int] so the thread can increment
     max_tool_calls: int,
     allowed_tools: frozenset,
+    platform: Optional[str] = None,
 ):
     """
     Accept one client connection and dispatch tool-call requests until
@@ -419,6 +420,7 @@ def execute_code(
             args=(
                 server_sock, task_id, tool_call_log,
                 tool_call_counter, max_tool_calls, sandbox_tools,
+                platform,
             ),
             daemon=True,
         )

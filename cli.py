@@ -231,6 +231,23 @@ def load_cli_config() -> Dict[str, Any]:
             "base_url": "",    # Direct OpenAI-compatible endpoint for subagents
             "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
         },
+        "access_control": {
+            "enabled": True,
+            "default_scope": "full",
+            "platform_profiles": {
+                "cli": "full",
+                "cron": "read-only",
+                "telegram": "read-only",
+                "discord": "read-only",
+                "slack": "read-only",
+                "whatsapp": "read-only",
+                "signal": "read-only",
+                "email": "read-only",
+                "acp": "full",
+            },
+            "services": {},
+            "accounts": {},
+        },
     }
     
     # Track whether the config file explicitly set terminal config.

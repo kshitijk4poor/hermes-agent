@@ -125,3 +125,164 @@ def test_handle_function_call_returns_scope_violation_without_running_handler(mo
         assert called["value"] is False
     finally:
         registry._tools = original
+
+
+def test_send_message_access_denied_on_read_only_platform(monkeypatch):
+    """send_message access_fn derives operation from target arg; deny on read-only platform."""
+    from tools.send_message_tool import _send_message_access
+
+    monkeypatch.setattr(
+        "tools.access_control._get_access_control_config",
+        lambda config=None: {
+            "enabled": True,
+            "default_scope": "full",
+            "platform_profiles": {"telegram": "read-only"},
+        },
+    )
+
+    decision = evaluate_access(
+        "send_message",
+        _send_message_access({"target": "telegram:12345"}),
+        platform="telegram",
+    )
+
+    assert decision.allowed is False
+    assert decision.service == "messaging"
+    assert decision.operation == "write"
+    assert decision.scope == "read-only"
+
+
+def test_send_message_access_allowed_on_full_platform(monkeypatch):
+    """send_message should be allowed when platform has full scope."""
+    from tools.send_message_tool import _send_message_access
+
+    monkeypatch.setattr(
+        "tools.access_control._get_access_control_config",
+        lambda config=None: {
+            "enabled": True,
+            "default_scope": "full",
+            "platform_profiles": {"cli": "full"},
+        },
+    )
+
+    decision = evaluate_access(
+        "send_message",
+        _send_message_access({"target": "cli"}),
+        platform="cli",
+    )
+
+    assert decision.allowed is True
+
+
+def test_send_message_not_hidden_from_schema_without_access_static(monkeypatch):
+    """send_message has access_fn but not access_static, so it stays visible in schemas."""
+    from tools.send_message_tool import _send_message_access
+
+    # Register a temp tool mimicking send_message (access_fn without access_static)
+    tool_name = "test_send_msg_dynamic"
+    original = registry._tools.copy()
+    try:
+        registry.register(
+            name=tool_name,
+            toolset="testing",
+            schema={
+                "name": tool_name,
+                "description": "dynamic access tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+            handler=lambda args, **kwargs: json.dumps({"ok": True}),
+            access_fn=_send_message_access,
+            # access_static=False (default) — schema check skipped
+        )
+        monkeypatch.setattr(
+            "tools.access_control._get_access_control_config",
+            lambda config=None: {
+                "enabled": True,
+                "default_scope": "full",
+                "platform_profiles": {"telegram": "read-only"},
+            },
+        )
+
+        # Should appear in schema even on read-only platform (no access_static)
+        shown = registry.get_definitions({tool_name}, quiet=True, platform="telegram")
+        assert len(shown) == 1
+        assert shown[0]["function"]["name"] == tool_name
+    finally:
+        registry._tools = original
+
+
+def test_sandbox_tool_calls_inherit_platform_access(monkeypatch):
+    """Tools dispatched via execute_code sandbox should receive the originating platform."""
+    from tools.access_control import evaluate_access, _get_access_control_config
+
+    monkeypatch.setattr(
+        "tools.access_control._get_access_control_config",
+        lambda config=None: {
+            "enabled": True,
+            "default_scope": "full",
+            "platform_profiles": {"cron": "read-only"},
+        },
+    )
+
+    # Simulate what the sandbox RPC loop does: evaluate with the platform string
+    decision = evaluate_access(
+        "ha_call_service",
+        {"service": "homeassistant", "account": "homeassistant", "operation": "write"},
+        platform="cron",
+    )
+
+    assert decision.allowed is False
+    assert decision.platform == "cron"
+
+    # But same call from CLI should pass
+    decision_cli = evaluate_access(
+        "ha_call_service",
+        {"service": "homeassistant", "account": "homeassistant", "operation": "write"},
+        platform="cli",
+    )
+    assert decision_cli.allowed is True
+
+
+def test_access_control_disabled_allows_everything(monkeypatch):
+    """When enabled=False, all tools should be allowed regardless of scope."""
+    monkeypatch.setattr(
+        "tools.access_control._get_access_control_config",
+        lambda config=None: {
+            "enabled": False,
+            "default_scope": "read-only",
+            "platform_profiles": {},
+        },
+    )
+
+    decision = evaluate_access(
+        "ha_call_service",
+        {"service": "homeassistant", "account": "homeassistant", "operation": "write"},
+        platform="telegram",
+    )
+
+    assert decision.allowed is True
+    assert "disabled" in decision.reason.lower()
+
+
+def test_service_level_scope_override(monkeypatch):
+    """Service-level scope should override platform profile."""
+    monkeypatch.setattr(
+        "tools.access_control._get_access_control_config",
+        lambda config=None: {
+            "enabled": True,
+            "default_scope": "full",
+            "platform_profiles": {"telegram": "read-only"},
+            "services": {
+                "homeassistant": {"scope": "full"},
+            },
+        },
+    )
+
+    decision = evaluate_access(
+        "ha_call_service",
+        {"service": "homeassistant", "account": "homeassistant", "operation": "write"},
+        platform="telegram",
+    )
+
+    assert decision.allowed is True
+    assert decision.scope == "full"
