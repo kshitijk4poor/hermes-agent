@@ -151,12 +151,12 @@ TOOL_CATEGORIES = {
     "web": {
         "name": "Web Search & Extract",
         "setup_title": "Select Search Provider",
-        "setup_note": "A free DuckDuckGo search skill is also included, and Tavily-based skills/integrations can be configured here too.",
+        "setup_note": "A free DuckDuckGo search skill is also included if you do not need the built-in web_search/web_extract tools.",
         "icon": "🔍",
         "providers": [
             {
                 "name": "Tavily",
-                "tag": "Search-first research for Tavily-based skills and integrations",
+                "tag": "Hosted web search, extraction, and crawling",
                 "env_vars": [
                     {"key": "TAVILY_API_KEY", "prompt": "Tavily API key", "url": "https://app.tavily.com/home"},
                 ],

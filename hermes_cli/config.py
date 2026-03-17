@@ -558,10 +558,10 @@ OPTIONAL_ENV_VARS = {
         "category": "tool",
     },
     "TAVILY_API_KEY": {
-        "description": "Tavily API key for Tavily-based research skills and integrations",
+        "description": "Tavily API key for web search, extraction, and crawling",
         "prompt": "Tavily API key",
         "url": "https://app.tavily.com/home",
-        "tools": ["tavily skills", "research integrations"],
+        "tools": ["web_search", "web_extract"],
         "password": True,
         "category": "tool",
     },

@@ -354,5 +354,5 @@ class TestOptionalToolKeys:
         tavily = OPTIONAL_ENV_VARS["TAVILY_API_KEY"]
         assert tavily["prompt"] == "Tavily API key"
         assert tavily["category"] == "tool"
-        assert "research" in tavily["description"].lower()
+        assert "search" in tavily["description"].lower()
         assert "TAVILY_API_KEY" in ENV_VARS_BY_VERSION[7]
