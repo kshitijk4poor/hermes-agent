@@ -3,6 +3,7 @@
 Coverage:
   _get_firecrawl_client() — configuration matrix, singleton caching,
   constructor failure recovery, return value verification, edge cases.
+  _get_active_web_backend() / check_firecrawl_api_key() — backend selection.
 """
 
 import os
@@ -17,14 +18,14 @@ class TestFirecrawlClientConfig:
         """Reset client and env vars before each test."""
         import tools.web_tools
         tools.web_tools._firecrawl_client = None
-        for key in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"):
+        for key in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY"):
             os.environ.pop(key, None)
 
     def teardown_method(self):
         """Reset client after each test."""
         import tools.web_tools
         tools.web_tools._firecrawl_client = None
-        for key in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"):
+        for key in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY"):
             os.environ.pop(key, None)
 
     # ── Configuration matrix ─────────────────────────────────────────
@@ -117,3 +118,33 @@ class TestFirecrawlClientConfig:
                 from tools.web_tools import _get_firecrawl_client
                 with pytest.raises(ValueError):
                     _get_firecrawl_client()
+
+
+class TestWebBackendSelection:
+    def setup_method(self):
+        for key in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY"):
+            os.environ.pop(key, None)
+
+    def teardown_method(self):
+        for key in ("FIRECRAWL_API_KEY", "FIRECRAWL_API_URL", "TAVILY_API_KEY"):
+            os.environ.pop(key, None)
+
+    def test_prefers_firecrawl_when_both_backends_are_configured(self):
+        with patch.dict(os.environ, {"FIRECRAWL_API_KEY": "fc-test", "TAVILY_API_KEY": "tvly-test"}):
+            from tools.web_tools import _get_active_web_backend
+
+            assert _get_active_web_backend() == "firecrawl"
+
+    def test_uses_tavily_when_firecrawl_missing(self):
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}):
+            from tools.web_tools import _get_active_web_backend, check_firecrawl_api_key
+
+            assert _get_active_web_backend() == "tavily"
+            assert check_firecrawl_api_key() is True
+
+    def test_no_backend_config_raises_helpful_error(self):
+        from tools.web_tools import _get_active_web_backend, check_firecrawl_api_key
+
+        with pytest.raises(ValueError, match="TAVILY_API_KEY"):
+            _get_active_web_backend()
+        assert check_firecrawl_api_key() is False

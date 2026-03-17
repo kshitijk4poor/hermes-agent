@@ -13,6 +13,7 @@ Available tools:
 
 Backend compatibility:
 - Firecrawl: https://docs.firecrawl.dev/introduction
+- Tavily: https://docs.tavily.com/
 
 LLM Processing:
 - Uses OpenRouter API with Gemini 3 Flash Preview for intelligent content extraction
@@ -46,6 +47,8 @@ import os
 import re
 import asyncio
 from typing import List, Dict, Any, Optional
+
+import httpx
 from firecrawl import Firecrawl
 from agent.auxiliary_client import async_call_llm
 from tools.debug_helpers import DebugSession
@@ -54,6 +57,56 @@ from tools.website_policy import WebsitePolicyError, check_website_access
 logger = logging.getLogger(__name__)
 
 _firecrawl_client = None
+
+
+def _has_firecrawl_config() -> bool:
+    return bool(os.getenv("FIRECRAWL_API_KEY") or os.getenv("FIRECRAWL_API_URL"))
+
+
+def _has_tavily_config() -> bool:
+    return bool(os.getenv("TAVILY_API_KEY"))
+
+
+def _get_active_web_backend() -> str:
+    """Prefer Firecrawl when configured, otherwise fall back to Tavily."""
+    if _has_firecrawl_config():
+        return "firecrawl"
+    if _has_tavily_config():
+        return "tavily"
+    raise ValueError(
+        "No web backend configured. Set FIRECRAWL_API_KEY or FIRECRAWL_API_URL "
+        "for Firecrawl, or set TAVILY_API_KEY for Tavily."
+    )
+
+
+def _get_tavily_base_url() -> str:
+    return (os.getenv("TAVILY_API_URL") or "https://api.tavily.com").rstrip("/")
+
+
+def _tavily_request(endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        raise ValueError("TAVILY_API_KEY environment variable not set.")
+
+    response = httpx.post(
+        f"{_get_tavily_base_url()}/{endpoint.lstrip('/')}",
+        json={"api_key": api_key, **payload},
+        timeout=60,
+    )
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    if response.is_error:
+        detail = data.get("detail") or data.get("error") or response.text
+        raise RuntimeError(f"Tavily API error ({response.status_code}): {detail}")
+
+    if isinstance(data, dict) and (data.get("error") or data.get("detail")):
+        detail = data.get("error") or data.get("detail")
+        raise RuntimeError(f"Tavily API error: {detail}")
+
+    return data if isinstance(data, dict) else {}
 
 def _get_firecrawl_client():
     """Get or create the Firecrawl client (lazy initialization).
@@ -80,6 +133,99 @@ def _get_firecrawl_client():
             kwargs["api_url"] = api_url
         _firecrawl_client = Firecrawl(**kwargs)
     return _firecrawl_client
+
+
+def _to_dict(value: Any) -> Dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        dumped = value.model_dump()
+        return dumped if isinstance(dumped, dict) else {}
+    if hasattr(value, "__dict__"):
+        return dict(value.__dict__)
+    if isinstance(value, dict):
+        return value
+    return {}
+
+
+def _normalize_firecrawl_search_results(response: Any) -> List[Dict[str, Any]]:
+    web_results: List[Dict[str, Any]] = []
+    if hasattr(response, "web"):
+        for result in response.web or []:
+            result_dict = _to_dict(result)
+            if result_dict:
+                web_results.append(result_dict)
+    elif hasattr(response, "model_dump"):
+        response_dict = response.model_dump()
+        if response_dict.get("web"):
+            web_results = list(response_dict["web"])
+    elif isinstance(response, dict) and response.get("web"):
+        web_results = list(response["web"])
+    return web_results
+
+
+def _normalize_tavily_search_results(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    web_results: List[Dict[str, Any]] = []
+    for index, result in enumerate(response.get("results") or [], start=1):
+        result_dict = _to_dict(result)
+        web_results.append(
+            {
+                "title": result_dict.get("title", ""),
+                "url": result_dict.get("url", ""),
+                "description": result_dict.get("content", ""),
+                "position": index,
+                **({"score": result_dict["score"]} if "score" in result_dict else {}),
+            }
+        )
+    return web_results
+
+
+def _normalize_tavily_documents(response: Dict[str, Any], fallback_url: str = "") -> List[Dict[str, Any]]:
+    documents: List[Dict[str, Any]] = []
+
+    for item in response.get("results") or []:
+        result_dict = _to_dict(item)
+        metadata = result_dict.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        final_url = (
+            result_dict.get("url")
+            or result_dict.get("source_url")
+            or metadata.get("sourceURL")
+            or fallback_url
+        )
+        content = (
+            result_dict.get("raw_content")
+            or result_dict.get("content")
+            or result_dict.get("markdown")
+            or result_dict.get("text")
+            or ""
+        )
+        documents.append(
+            {
+                "url": final_url,
+                "title": result_dict.get("title") or metadata.get("title", ""),
+                "content": content,
+                "raw_content": content,
+                "metadata": metadata,
+            }
+        )
+
+    failed_results = response.get("failed_results") or response.get("failed_urls") or []
+    for item in failed_results:
+        result_dict = _to_dict(item)
+        failed_url = result_dict.get("url") or result_dict.get("source_url") or item
+        error = result_dict.get("error") or result_dict.get("reason") or "Extraction failed"
+        documents.append(
+            {
+                "url": failed_url or fallback_url,
+                "title": "",
+                "content": "",
+                "raw_content": "",
+                "error": str(error),
+            }
+        )
+
+    return documents
 
 DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
 
@@ -467,6 +613,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             "query": query,
             "limit": limit
         },
+        "backend": None,
         "error": None,
         "results_count": 0,
         "original_response_size": 0,
@@ -479,41 +626,25 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             return json.dumps({"error": "Interrupted", "success": False})
 
         logger.info("Searching the web for: '%s' (limit: %d)", query, limit)
-        
-        response = _get_firecrawl_client().search(
-            query=query,
-            limit=limit
-        )
-        
-        # The response is a SearchData object with web, news, and images attributes
-        # When not scraping, the results are directly in these attributes
-        web_results = []
-        
-        # Check if response has web attribute (SearchData object)
-        if hasattr(response, 'web'):
-            # Response is a SearchData object with web attribute
-            if response.web:
-                # Convert each SearchResultWeb object to dict
-                for result in response.web:
-                    if hasattr(result, 'model_dump'):
-                        # Pydantic model - use model_dump
-                        web_results.append(result.model_dump())
-                    elif hasattr(result, '__dict__'):
-                        # Regular object - use __dict__
-                        web_results.append(result.__dict__)
-                    elif isinstance(result, dict):
-                        # Already a dict
-                        web_results.append(result)
-        elif hasattr(response, 'model_dump'):
-            # Response has model_dump method - use it to get dict
-            response_dict = response.model_dump()
-            if 'web' in response_dict and response_dict['web']:
-                web_results = response_dict['web']
-        elif isinstance(response, dict):
-            # Response is already a dictionary
-            if 'web' in response and response['web']:
-                web_results = response['web']
-        
+
+        backend = _get_active_web_backend()
+        debug_call_data["backend"] = backend
+
+        if backend == "firecrawl":
+            response = _get_firecrawl_client().search(query=query, limit=limit)
+            web_results = _normalize_firecrawl_search_results(response)
+        else:
+            response = _tavily_request(
+                "/search",
+                {
+                    "query": query,
+                    "max_results": limit,
+                    "include_raw_content": False,
+                    "include_images": False,
+                },
+            )
+            web_results = _normalize_tavily_search_results(response)
+
         results_count = len(web_results)
         logger.info("Found %d search results", results_count)
         
@@ -585,6 +716,7 @@ async def web_extract_tool(
             "model": model,
             "min_length": min_length
         },
+        "backend": None,
         "error": None,
         "pages_extracted": 0,
         "pages_processed_with_llm": 0,
@@ -596,6 +728,7 @@ async def web_extract_tool(
     
     try:
         logger.info("Extracting content from %d URL(s)", len(urls))
+        backend: Optional[str] = None
         
         # Determine requested formats for Firecrawl v2
         formats: List[str] = []
@@ -633,83 +766,66 @@ async def web_extract_tool(
                 continue
 
             try:
+                if backend is None:
+                    backend = _get_active_web_backend()
+                    debug_call_data["backend"] = backend
                 logger.info("Scraping: %s", url)
-                scrape_result = _get_firecrawl_client().scrape(
-                    url=url,
-                    formats=formats
-                )
-                
-                # Process the result - properly handle object serialization
-                metadata = {}
-                title = ""
-                content_markdown = None
-                content_html = None
-                
-                # Extract data from the scrape result
-                if hasattr(scrape_result, 'model_dump'):
-                    # Pydantic model - use model_dump to get dict
-                    result_dict = scrape_result.model_dump()
-                    content_markdown = result_dict.get('markdown')
-                    content_html = result_dict.get('html')
-                    metadata = result_dict.get('metadata', {})
-                elif hasattr(scrape_result, '__dict__'):
-                    # Regular object with attributes
-                    content_markdown = getattr(scrape_result, 'markdown', None)
-                    content_html = getattr(scrape_result, 'html', None)
-                    
-                    # Handle metadata - convert to dict if it's an object
-                    metadata_obj = getattr(scrape_result, 'metadata', {})
-                    if hasattr(metadata_obj, 'model_dump'):
-                        metadata = metadata_obj.model_dump()
-                    elif hasattr(metadata_obj, '__dict__'):
-                        metadata = metadata_obj.__dict__
-                    elif isinstance(metadata_obj, dict):
-                        metadata = metadata_obj
-                    else:
-                        metadata = {}
-                elif isinstance(scrape_result, dict):
-                    # Already a dictionary
-                    content_markdown = scrape_result.get('markdown')
-                    content_html = scrape_result.get('html')
-                    metadata = scrape_result.get('metadata', {})
-                
-                # Ensure metadata is a dict (not an object)
-                if not isinstance(metadata, dict):
-                    if hasattr(metadata, 'model_dump'):
-                        metadata = metadata.model_dump()
-                    elif hasattr(metadata, '__dict__'):
-                        metadata = metadata.__dict__
-                    else:
-                        metadata = {}
-                
-                # Get title from metadata
-                title = metadata.get("title", "")
-                
-                # Re-check final URL after redirect
-                final_url = metadata.get("sourceURL", url)
-                try:
-                    final_blocked = check_website_access(final_url)
-                except WebsitePolicyError:
-                    final_blocked = None
-                if final_blocked:
-                    logger.info("Blocked redirected web_extract for %s by rule %s", final_blocked["host"], final_blocked["rule"])
-                    results.append({
-                        "url": final_url, "title": title, "content": "", "raw_content": "",
-                        "error": final_blocked["message"],
-                        "blocked_by_policy": {"host": final_blocked["host"], "rule": final_blocked["rule"], "source": final_blocked["source"]},
-                    })
-                    continue
 
-                # Choose content based on requested format
-                chosen_content = content_markdown if (format == "markdown" or (format is None and content_markdown)) else content_html or content_markdown or ""
-                
-                results.append({
-                    "url": final_url,
-                    "title": title,
-                    "content": chosen_content,
-                    "raw_content": chosen_content,
-                    "metadata": metadata  # Now guaranteed to be a dict
-                })
+                if backend == "firecrawl":
+                    scrape_result = _get_firecrawl_client().scrape(url=url, formats=formats)
+                    result_dict = _to_dict(scrape_result)
+                    metadata = result_dict.get("metadata", {})
+                    if not isinstance(metadata, dict):
+                        metadata = _to_dict(metadata)
+                    title = metadata.get("title", "")
+                    content_markdown = result_dict.get("markdown")
+                    content_html = result_dict.get("html")
+                    normalized_results = [
+                        {
+                            "url": metadata.get("sourceURL", url),
+                            "title": title,
+                            "content": content_markdown if (format == "markdown" or (format is None and content_markdown)) else content_html or content_markdown or "",
+                            "raw_content": content_markdown if (format == "markdown" or (format is None and content_markdown)) else content_html or content_markdown or "",
+                            "metadata": metadata,
+                        }
+                    ]
+                else:
+                    extract_result = _tavily_request(
+                        "/extract",
+                        {
+                            "urls": [url],
+                            "include_images": False,
+                        },
+                    )
+                    normalized_results = _normalize_tavily_documents(extract_result, fallback_url=url)
+                    if not normalized_results:
+                        normalized_results = [{
+                            "url": url,
+                            "title": "",
+                            "content": "",
+                            "raw_content": "",
+                            "error": "No content returned",
+                        }]
+
+                for normalized in normalized_results:
+                    final_url = normalized.get("url", url)
+                    title = normalized.get("title", "")
+                    try:
+                        final_blocked = check_website_access(final_url)
+                    except WebsitePolicyError:
+                        final_blocked = None
+                    if final_blocked:
+                        logger.info("Blocked redirected web_extract for %s by rule %s", final_blocked["host"], final_blocked["rule"])
+                        results.append({
+                            "url": final_url,
+                            "title": title,
+                            "content": "",
+                            "raw_content": "",
+                            "error": final_blocked["message"],
+                            "blocked_by_policy": {"host": final_blocked["host"], "rule": final_blocked["rule"], "source": final_blocked["source"]},
+                        })
+                        continue
+                    results.append(normalized)
                 
             except Exception as scrape_err:
                 logger.debug("Scrape failed for %s: %s", url, scrape_err)
@@ -884,6 +1000,7 @@ async def web_crawl_tool(
             "model": model,
             "min_length": min_length
         },
+        "backend": None,
         "error": None,
         "pages_crawled": 0,
         "pages_processed_with_llm": 0,
@@ -912,135 +1029,106 @@ async def web_crawl_tool(
             return json.dumps({"results": [{"url": url, "title": "", "content": "", "error": blocked["message"],
                 "blocked_by_policy": {"host": blocked["host"], "rule": blocked["rule"], "source": blocked["source"]}}]}, ensure_ascii=False)
 
-        # Use Firecrawl's v2 crawl functionality
-        # Docs: https://docs.firecrawl.dev/features/crawl
-        # The crawl() method automatically waits for completion and returns all data
-        
-        # Build crawl parameters - keep it simple
-        crawl_params = {
-            "limit": 20,  # Limit number of pages to crawl
-            "scrape_options": {
-                "formats": ["markdown"]  # Just markdown for simplicity
-            }
-        }
-        
-        # Note: The 'prompt' parameter is not documented for crawl
-        # Instructions are typically used with the Extract endpoint, not Crawl
-        if instructions:
-            logger.info("Instructions parameter ignored (not supported in crawl API)")
-        
         from tools.interrupt import is_interrupted as _is_int
         if _is_int():
             return json.dumps({"error": "Interrupted", "success": False})
 
-        try:
-            crawl_result = _get_firecrawl_client().crawl(
-                url=url,
-                **crawl_params
-            )
-        except Exception as e:
-            logger.debug("Crawl API call failed: %s", e)
-            raise
+        backend = _get_active_web_backend()
+        debug_call_data["backend"] = backend
 
         pages: List[Dict[str, Any]] = []
-        
-        # Process crawl results - the crawl method returns a CrawlJob object with data attribute
-        data_list = []
-        
-        # The crawl_result is a CrawlJob object with a 'data' attribute containing list of Document objects
-        if hasattr(crawl_result, 'data'):
-            data_list = crawl_result.data if crawl_result.data else []
-            logger.info("Status: %s", getattr(crawl_result, 'status', 'unknown'))
-            logger.info("Retrieved %d pages", len(data_list))
-            
-            # Debug: Check other attributes if no data
-            if not data_list:
-                logger.debug("CrawlJob attributes: %s", [attr for attr in dir(crawl_result) if not attr.startswith('_')])
-                logger.debug("Status: %s", getattr(crawl_result, 'status', 'N/A'))
-                logger.debug("Total: %s", getattr(crawl_result, 'total', 'N/A'))
-                logger.debug("Completed: %s", getattr(crawl_result, 'completed', 'N/A'))
-                
-        elif isinstance(crawl_result, dict) and 'data' in crawl_result:
-            data_list = crawl_result.get("data", [])
-        else:
-            logger.warning("Unexpected crawl result type")
-            logger.debug("Result type: %s", type(crawl_result))
-            if hasattr(crawl_result, '__dict__'):
-                logger.debug("Result attributes: %s", list(crawl_result.__dict__.keys()))
-        
-        for item in data_list:
-            # Process each crawled page - properly handle object serialization
-            page_url = "Unknown URL"
-            title = ""
-            content_markdown = None
-            content_html = None
-            metadata = {}
-            
-            # Extract data from the item
-            if hasattr(item, 'model_dump'):
-                # Pydantic model - use model_dump to get dict
-                item_dict = item.model_dump()
-                content_markdown = item_dict.get('markdown')
-                content_html = item_dict.get('html')
-                metadata = item_dict.get('metadata', {})
-            elif hasattr(item, '__dict__'):
-                # Regular object with attributes
-                content_markdown = getattr(item, 'markdown', None)
-                content_html = getattr(item, 'html', None)
-                
-                # Handle metadata - convert to dict if it's an object
-                metadata_obj = getattr(item, 'metadata', {})
-                if hasattr(metadata_obj, 'model_dump'):
-                    metadata = metadata_obj.model_dump()
-                elif hasattr(metadata_obj, '__dict__'):
-                    metadata = metadata_obj.__dict__
-                elif isinstance(metadata_obj, dict):
-                    metadata = metadata_obj
-                else:
-                    metadata = {}
-            elif isinstance(item, dict):
-                # Already a dictionary
-                content_markdown = item.get('markdown')
-                content_html = item.get('html')
-                metadata = item.get('metadata', {})
-            
-            # Ensure metadata is a dict (not an object)
-            if not isinstance(metadata, dict):
-                if hasattr(metadata, 'model_dump'):
-                    metadata = metadata.model_dump()
-                elif hasattr(metadata, '__dict__'):
-                    metadata = metadata.__dict__
-                else:
-                    metadata = {}
-            
-            # Extract URL and title from metadata
-            page_url = metadata.get("sourceURL", metadata.get("url", "Unknown URL"))
-            title = metadata.get("title", "")
-            
-            # Re-check crawled page URL against policy
-            try:
-                page_blocked = check_website_access(page_url)
-            except WebsitePolicyError:
-                page_blocked = None
-            if page_blocked:
-                logger.info("Blocked crawled page %s by rule %s", page_blocked["host"], page_blocked["rule"])
-                pages.append({
-                    "url": page_url, "title": title, "content": "", "raw_content": "",
-                    "error": page_blocked["message"],
-                    "blocked_by_policy": {"host": page_blocked["host"], "rule": page_blocked["rule"], "source": page_blocked["source"]},
-                })
-                continue
 
-            # Choose content (prefer markdown)
-            content = content_markdown or content_html or ""
-            
-            pages.append({
-                "url": page_url,
-                "title": title,
-                "content": content,
-                "raw_content": content,
-                "metadata": metadata  # Now guaranteed to be a dict
-            })
+        if backend == "firecrawl":
+            crawl_params = {
+                "limit": 20,
+                "scrape_options": {"formats": ["markdown"]},
+            }
+            if instructions:
+                logger.info("Instructions parameter ignored (not supported in crawl API)")
+
+            try:
+                crawl_result = _get_firecrawl_client().crawl(url=url, **crawl_params)
+            except Exception as e:
+                logger.debug("Crawl API call failed: %s", e)
+                raise
+
+            data_list = []
+            if hasattr(crawl_result, 'data'):
+                data_list = crawl_result.data if crawl_result.data else []
+                logger.info("Status: %s", getattr(crawl_result, 'status', 'unknown'))
+                logger.info("Retrieved %d pages", len(data_list))
+                if not data_list:
+                    logger.debug("CrawlJob attributes: %s", [attr for attr in dir(crawl_result) if not attr.startswith('_')])
+                    logger.debug("Status: %s", getattr(crawl_result, 'status', 'N/A'))
+                    logger.debug("Total: %s", getattr(crawl_result, 'total', 'N/A'))
+                    logger.debug("Completed: %s", getattr(crawl_result, 'completed', 'N/A'))
+            elif isinstance(crawl_result, dict) and 'data' in crawl_result:
+                data_list = crawl_result.get("data", [])
+            else:
+                logger.warning("Unexpected crawl result type")
+                logger.debug("Result type: %s", type(crawl_result))
+                if hasattr(crawl_result, '__dict__'):
+                    logger.debug("Result attributes: %s", list(crawl_result.__dict__.keys()))
+
+            for item in data_list:
+                item_dict = _to_dict(item)
+                metadata = item_dict.get("metadata", {})
+                if not isinstance(metadata, dict):
+                    metadata = _to_dict(metadata)
+
+                page_url = metadata.get("sourceURL", metadata.get("url", "Unknown URL"))
+                title = metadata.get("title", "")
+                content = item_dict.get("markdown") or item_dict.get("html") or ""
+
+                try:
+                    page_blocked = check_website_access(page_url)
+                except WebsitePolicyError:
+                    page_blocked = None
+                if page_blocked:
+                    logger.info("Blocked crawled page %s by rule %s", page_blocked["host"], page_blocked["rule"])
+                    pages.append({
+                        "url": page_url,
+                        "title": title,
+                        "content": "",
+                        "raw_content": "",
+                        "error": page_blocked["message"],
+                        "blocked_by_policy": {"host": page_blocked["host"], "rule": page_blocked["rule"], "source": page_blocked["source"]},
+                    })
+                    continue
+
+                pages.append({
+                    "url": page_url,
+                    "title": title,
+                    "content": content,
+                    "raw_content": content,
+                    "metadata": metadata,
+                })
+        else:
+            crawl_payload = {
+                "url": url,
+                "limit": 20,
+                "extract_depth": depth,
+            }
+            if instructions:
+                crawl_payload["instructions"] = instructions
+
+            for page in _normalize_tavily_documents(_tavily_request("/crawl", crawl_payload), fallback_url=url):
+                page_url = page.get("url", url)
+                try:
+                    page_blocked = check_website_access(page_url)
+                except WebsitePolicyError:
+                    page_blocked = None
+                if page_blocked:
+                    pages.append({
+                        "url": page_url,
+                        "title": page.get("title", ""),
+                        "content": "",
+                        "raw_content": "",
+                        "error": page_blocked["message"],
+                        "blocked_by_policy": {"host": page_blocked["host"], "rule": page_blocked["rule"], "source": page_blocked["source"]},
+                    })
+                    continue
+                pages.append(page)
 
         response = {"results": pages}
         
@@ -1160,15 +1248,15 @@ async def web_crawl_tool(
         return json.dumps({"error": error_msg}, ensure_ascii=False)
 
 
-# Convenience function to check if API key is available
+# Convenience function to check if any supported web backend is available.
 def check_firecrawl_api_key() -> bool:
     """
-    Check if the Firecrawl API key is available in environment variables.
-    
-    Returns:
-        bool: True if API key is set, False otherwise
+    Check if a supported web backend is configured.
+
+    Firecrawl remains the preferred backend when present, but Tavily-only
+    setups should also expose the web tools as available.
     """
-    return bool(os.getenv("FIRECRAWL_API_KEY"))
+    return _has_firecrawl_config() or _has_tavily_config()
 
 
 def check_auxiliary_model() -> bool:
@@ -1199,13 +1287,12 @@ if __name__ == "__main__":
     # Check if API keys are available
     firecrawl_available = check_firecrawl_api_key()
     nous_available = check_auxiliary_model()
-    
+
     if not firecrawl_available:
-        print("❌ FIRECRAWL_API_KEY environment variable not set")
-        print("Please set your API key: export FIRECRAWL_API_KEY='your-key-here'")
-        print("Get API key at: https://firecrawl.dev/")
+        print("❌ No supported web backend configured")
+        print("Set FIRECRAWL_API_KEY / FIRECRAWL_API_URL or TAVILY_API_KEY")
     else:
-        print("✅ Firecrawl API key found")
+        print(f"✅ Web backend configured: {_get_active_web_backend()}")
     
     if not nous_available:
         print("❌ No auxiliary model available for LLM content processing")
@@ -1315,7 +1402,7 @@ registry.register(
     schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=5),
     check_fn=check_firecrawl_api_key,
-    requires_env=["FIRECRAWL_API_KEY"],
+    requires_env=["FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
     emoji="🔍",
 )
 registry.register(
@@ -1325,7 +1412,7 @@ registry.register(
     handler=lambda args, **kw: web_extract_tool(
         args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown"),
     check_fn=check_firecrawl_api_key,
-    requires_env=["FIRECRAWL_API_KEY"],
+    requires_env=["FIRECRAWL_API_KEY", "TAVILY_API_KEY"],
     is_async=True,
     emoji="📄",
 )

@@ -385,6 +385,10 @@ async def test_web_extract_returns_clean_policy_error_for_malformed_config(monke
 async def test_web_extract_blocks_redirected_final_url(monkeypatch):
     from tools import web_tools
 
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+    monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
     def fake_check(url):
         if url == "https://allowed.test":
             return None
@@ -448,6 +452,10 @@ async def test_web_crawl_short_circuits_blocked_url(monkeypatch):
 @pytest.mark.asyncio
 async def test_web_crawl_blocks_redirected_final_url(monkeypatch):
     from tools import web_tools
+
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-test")
+    monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
 
     def fake_check(url):
         if url == "https://allowed.test":
