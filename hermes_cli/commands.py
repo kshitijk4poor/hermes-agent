@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -345,7 +346,63 @@ class SlashCommandCompleter(Completer):
         return None
 
     @staticmethod
-    def _path_completions(word: str, limit: int = 30):
+    def _extract_reference_word(text: str) -> tuple[str, str] | None:
+        """Extract ``@file:...`` / ``@folder:...`` token under the cursor."""
+        if not text:
+            return None
+        i = len(text) - 1
+        while i >= 0 and text[i] != " ":
+            i -= 1
+        word = text[i + 1:]
+        for prefix in ("@file:", "@folder:"):
+            if word.startswith(prefix):
+                return prefix, word[len(prefix):]
+        return None
+
+    @staticmethod
+    def _load_ignore_patterns(root: Path) -> list[str]:
+        patterns: list[str] = []
+        for name in (".gitignore", ".hermesignore"):
+            path = root / name
+            if not path.exists():
+                continue
+            try:
+                for line in path.read_text(encoding="utf-8").splitlines():
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("#"):
+                        patterns.append(stripped.lstrip("/"))
+            except OSError:
+                continue
+        return patterns
+
+    @staticmethod
+    def _is_ignored(candidate: Path, root: Path, patterns: list[str]) -> bool:
+        rel = os.path.relpath(candidate, root).replace(os.sep, "/")
+        for pattern in patterns:
+            cleaned = pattern.rstrip("/")
+            if not cleaned:
+                continue
+            if rel == cleaned or rel.startswith(f"{cleaned}/"):
+                return True
+            if cleaned.startswith("*.") and rel.endswith(cleaned[1:]):
+                return True
+        git_dir = root / ".git"
+        if git_dir.exists():
+            try:
+                result = subprocess.run(
+                    ["git", "check-ignore", "-q", rel],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode == 0:
+                    return True
+            except OSError:
+                pass
+        return False
+
+    @staticmethod
+    def _path_completions(word: str, limit: int = 30, directories_only: bool = False):
         """Yield Completion objects for file paths matching *word*."""
         expanded = os.path.expanduser(word)
         # Split into directory part and prefix to match inside it
@@ -355,6 +412,9 @@ class SlashCommandCompleter(Completer):
         else:
             search_dir = os.path.dirname(expanded) or "."
             prefix = os.path.basename(expanded)
+
+        root = Path.cwd()
+        ignore_patterns = SlashCommandCompleter._load_ignore_patterns(root)
 
         try:
             entries = os.listdir(search_dir)
@@ -371,6 +431,12 @@ class SlashCommandCompleter(Completer):
 
             full_path = os.path.join(search_dir, entry)
             is_dir = os.path.isdir(full_path)
+            path_obj = Path(full_path).resolve()
+
+            if SlashCommandCompleter._is_ignored(path_obj, root, ignore_patterns):
+                continue
+            if directories_only and not is_dir:
+                continue
 
             # Build the completion text (what replaces the typed word)
             if word.startswith("~"):
@@ -398,6 +464,20 @@ class SlashCommandCompleter(Completer):
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
         if not text.startswith("/"):
+            reference_word = self._extract_reference_word(text)
+            if reference_word is not None:
+                prefix, path_word = reference_word
+                for completion in self._path_completions(
+                    path_word,
+                    directories_only=(prefix == "@folder:"),
+                ):
+                    yield Completion(
+                        f"{prefix}{completion.text}",
+                        start_position=-(len(prefix) + len(path_word)),
+                        display=f"{prefix}{completion.display}",
+                        display_meta=completion.display_meta,
+                    )
+                return
             # Try file path completion for non-slash input
             path_word = self._extract_path_word(text)
             if path_word is not None:

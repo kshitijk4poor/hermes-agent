@@ -258,6 +258,38 @@ class TestSlashCommandCompleter:
     def test_no_completions_for_empty_input(self):
         assert _completions(SlashCommandCompleter(), "") == []
 
+    def test_file_reference_completion_for_at_file(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+        (tmp_path / "src" / "other.txt").write_text("x\n", encoding="utf-8")
+
+        completions = _completions(SlashCommandCompleter(), "inspect @file:src/ma")
+
+        assert [item.text for item in completions] == ["@file:src/main.py"]
+
+    def test_folder_reference_completion_only_lists_directories(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "scripts").mkdir()
+        (tmp_path / "README.md").write_text("# Demo\n", encoding="utf-8")
+
+        completions = _completions(SlashCommandCompleter(), "inspect @folder:s")
+        texts = {item.text for item in completions}
+
+        assert "@folder:src/" in texts
+        assert "@folder:scripts/" in texts
+        assert all(not text.endswith("README.md") for text in texts)
+
+    def test_plain_path_completion_still_works(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('ok')\n", encoding="utf-8")
+
+        completions = _completions(SlashCommandCompleter(), "open src/ma")
+
+        assert [item.text for item in completions] == ["src/main.py"]
+
     # -- skill commands via provider ------------------------------------
 
     def test_skill_commands_are_completed_from_provider(self):
