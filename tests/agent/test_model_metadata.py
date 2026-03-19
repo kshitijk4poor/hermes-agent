@@ -126,6 +126,10 @@ class TestDefaultContextLengths:
             if "gemini" in key:
                 assert value == 1048576, f"{key} should be 1048576"
 
+    def test_glm_200k_class_models_use_200k_defaults(self):
+        for model_name in ("glm-4.6", "glm-4.7", "glm-5"):
+            assert DEFAULT_CONTEXT_LENGTHS[model_name] == 200000
+
     def test_all_values_positive(self):
         for key, value in DEFAULT_CONTEXT_LENGTHS.items():
             assert value > 0, f"{key} has non-positive context length"
@@ -217,6 +221,34 @@ class TestGetModelContextLength:
         )
 
         assert result == CONTEXT_PROBE_TIERS[0]
+
+    @pytest.mark.parametrize(
+        ("model_name", "expected"),
+        [
+            ("glm-5", 200000),
+            ("anthropic/claude-sonnet-4", 200000),
+            ("openai/gpt-4o", 128000),
+        ],
+    )
+    @patch("agent.model_metadata.fetch_model_metadata")
+    @patch("agent.model_metadata.fetch_endpoint_model_metadata")
+    def test_custom_endpoint_without_metadata_keeps_exact_known_default(
+        self,
+        mock_endpoint_fetch,
+        mock_fetch,
+        model_name,
+        expected,
+    ):
+        mock_fetch.return_value = {}
+        mock_endpoint_fetch.return_value = {}
+
+        result = get_model_context_length(
+            model_name,
+            base_url="https://example-proxy.invalid/v1",
+            api_key="test-key",
+        )
+
+        assert result == expected
 
 
 # =========================================================================

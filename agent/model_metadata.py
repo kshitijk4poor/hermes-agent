@@ -71,8 +71,8 @@ DEFAULT_CONTEXT_LENGTHS = {
     "meta-llama/llama-3.3-70b-instruct": 131072,
     "deepseek/deepseek-chat-v3": 65536,
     "qwen/qwen-2.5-72b-instruct": 32768,
-    "glm-4.7": 202752,
-    "glm-5": 202752,
+    "glm-4.7": 200000,
+    "glm-5": 200000,
     "glm-4.5": 131072,
     "glm-4.5-flash": 131072,
     "kimi-for-coding": 262144,
@@ -113,7 +113,7 @@ DEFAULT_CONTEXT_LENGTHS = {
     "minimax-m2.5": 204800,
     "minimax-m2.5-free": 204800,
     "minimax-m2.1": 204800,
-    "glm-4.6": 202752,
+    "glm-4.6": 200000,
     "kimi-k2": 262144,
     "qwen3-coder": 32768,
     "big-pickle": 128000,
@@ -143,6 +143,76 @@ _MAX_COMPLETION_KEYS = (
     "max_output_tokens",
     "max_tokens",
 )
+
+
+def _get_exact_default_context_length(model: str) -> Optional[int]:
+    """Return an exact hardcoded default for the model, if one exists."""
+    model_lower = (model or "").strip().lower()
+    if not model_lower:
+        return None
+    for default_model, length in DEFAULT_CONTEXT_LENGTHS.items():
+        if default_model.lower() == model_lower:
+            return length
+    return None
+
+
+def resolve_model_context_length(model: str, base_url: str = "", api_key: str = "") -> Dict[str, Any]:
+    """Resolve context length and indicate whether it is authoritative.
+
+    Sources:
+      - cache: persisted from a previously discovered exact limit
+      - endpoint: explicit `/models` metadata from the active endpoint
+      - openrouter: OpenRouter models API metadata
+      - default_exact: exact match in hardcoded defaults
+      - default_fuzzy: fallback substring match in hardcoded defaults
+      - probe: provisional internal tier for unknown models
+    """
+    # 1. Check persistent cache (model+provider)
+    if base_url:
+        cached = get_cached_context_length(model, base_url)
+        if cached is not None:
+            return {"context_length": cached, "source": "cache", "known": True}
+
+    # 2. Active endpoint metadata for explicit custom routes
+    if _is_custom_endpoint(base_url):
+        endpoint_metadata = fetch_endpoint_model_metadata(base_url, api_key=api_key)
+        if model in endpoint_metadata:
+            context_length = endpoint_metadata[model].get("context_length")
+            if isinstance(context_length, int):
+                return {"context_length": context_length, "source": "endpoint", "known": True}
+
+        exact_default = _get_exact_default_context_length(model)
+        if exact_default is not None:
+            return {"context_length": exact_default, "source": "default_exact", "known": True}
+
+        if not _is_known_provider_base_url(base_url):
+            # Explicit third-party endpoints should not borrow fuzzy global
+            # defaults from unrelated providers with similarly named models.
+            return {"context_length": CONTEXT_PROBE_TIERS[0], "source": "probe", "known": False}
+
+    # 3. OpenRouter API metadata
+    metadata = fetch_model_metadata()
+    if model in metadata:
+        return {
+            "context_length": metadata[model].get("context_length", 128000),
+            "source": "openrouter",
+            "known": True,
+        }
+
+    # 4. Exact hardcoded defaults
+    exact_default = _get_exact_default_context_length(model)
+    if exact_default is not None:
+        return {"context_length": exact_default, "source": "default_exact", "known": True}
+
+    # 5. Hardcoded defaults (fuzzy match — longest key first for specificity)
+    for default_model, length in sorted(
+        DEFAULT_CONTEXT_LENGTHS.items(), key=lambda x: len(x[0]), reverse=True
+    ):
+        if default_model in model or model in default_model:
+            return {"context_length": length, "source": "default_fuzzy", "known": True}
+
+    # 6. Unknown model — start at highest probe tier
+    return {"context_length": CONTEXT_PROBE_TIERS[0], "source": "probe", "known": False}
 
 
 def _normalize_base_url(base_url: str) -> str:
@@ -449,38 +519,7 @@ def get_model_context_length(model: str, base_url: str = "", api_key: str = "") 
     4. Hardcoded DEFAULT_CONTEXT_LENGTHS (fuzzy match for hosted routes only)
     5. First probe tier (2M) — will be narrowed on first context error
     """
-    # 1. Check persistent cache (model+provider)
-    if base_url:
-        cached = get_cached_context_length(model, base_url)
-        if cached is not None:
-            return cached
-
-    # 2. Active endpoint metadata for explicit custom routes
-    if _is_custom_endpoint(base_url):
-        endpoint_metadata = fetch_endpoint_model_metadata(base_url, api_key=api_key)
-        if model in endpoint_metadata:
-            context_length = endpoint_metadata[model].get("context_length")
-            if isinstance(context_length, int):
-                return context_length
-        if not _is_known_provider_base_url(base_url):
-            # Explicit third-party endpoints should not borrow fuzzy global
-            # defaults from unrelated providers with similarly named models.
-            return CONTEXT_PROBE_TIERS[0]
-
-    # 3. OpenRouter API metadata
-    metadata = fetch_model_metadata()
-    if model in metadata:
-        return metadata[model].get("context_length", 128000)
-
-    # 4. Hardcoded defaults (fuzzy match — longest key first for specificity)
-    for default_model, length in sorted(
-        DEFAULT_CONTEXT_LENGTHS.items(), key=lambda x: len(x[0]), reverse=True
-    ):
-        if default_model in model or model in default_model:
-            return length
-
-    # 5. Unknown model — start at highest probe tier
-    return CONTEXT_PROBE_TIERS[0]
+    return int(resolve_model_context_length(model, base_url=base_url, api_key=api_key)["context_length"])
 
 
 def estimate_tokens_rough(text: str) -> int:

@@ -1000,9 +1000,15 @@ class AIAgent:
         
         if not self.quiet_mode:
             if compression_enabled:
-                print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
+                if getattr(self.context_compressor, "context_length_known", True):
+                    print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (compress at {int(compression_threshold*100)}% = {self.context_compressor.threshold_tokens:,})")
+                else:
+                    print(f"📊 Context limit: unknown (compress threshold provisional at {self.context_compressor.threshold_tokens:,} tokens)")
             else:
-                print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
+                if getattr(self.context_compressor, "context_length_known", True):
+                    print(f"📊 Context limit: {self.context_compressor.context_length:,} tokens (auto-compression disabled)")
+                else:
+                    print("📊 Context limit: unknown (auto-compression disabled)")
     
     @staticmethod
     def _safe_print(*args, **kwargs):
@@ -5933,15 +5939,20 @@ class AIAgent:
                         parsed_limit = parse_context_limit_from_error(error_msg)
                         if parsed_limit and parsed_limit < old_ctx:
                             new_ctx = parsed_limit
+                            compressor.context_length_known = True
+                            compressor.context_length_source = "error_limit"
+                            compressor._context_probed = True
                             self._vprint(f"{self.log_prefix}⚠️  Context limit detected from API: {new_ctx:,} tokens (was {old_ctx:,})", force=True)
                         else:
                             # Step down to the next probe tier
                             new_ctx = get_next_probe_tier(old_ctx)
+                            compressor.context_length_known = False
+                            compressor.context_length_source = "probe"
+                            compressor._context_probed = False
 
                         if new_ctx and new_ctx < old_ctx:
                             compressor.context_length = new_ctx
                             compressor.threshold_tokens = int(new_ctx * compressor.threshold_percent)
-                            compressor._context_probed = True
                             self._vprint(f"{self.log_prefix}⚠️  Context length exceeded — stepping down: {old_ctx:,} → {new_ctx:,} tokens", force=True)
                         else:
                             self._vprint(f"{self.log_prefix}⚠️  Context length exceeded at minimum tier — attempting compression...", force=True)

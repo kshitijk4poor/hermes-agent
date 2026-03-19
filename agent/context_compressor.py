@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 from agent.auxiliary_client import call_llm
 from agent.model_metadata import (
     get_model_context_length,
+    resolve_model_context_length,
     estimate_messages_tokens_rough,
 )
 
@@ -56,7 +57,16 @@ class ContextCompressor:
         self.summary_target_tokens = summary_target_tokens
         self.quiet_mode = quiet_mode
 
+        context_info = resolve_model_context_length(model, base_url=base_url, api_key=api_key)
         self.context_length = get_model_context_length(model, base_url=base_url, api_key=api_key)
+        if context_info["context_length"] == self.context_length:
+            self.context_length_source = context_info["source"]
+            self.context_length_known = bool(context_info.get("known", True))
+        else:
+            # Preserve compatibility for tests and callers that patch
+            # get_model_context_length directly.
+            self.context_length_source = "legacy"
+            self.context_length_known = True
         self.threshold_tokens = int(self.context_length * threshold_percent)
         self.compression_count = 0
         self._context_probed = False  # True after a step-down from context error
