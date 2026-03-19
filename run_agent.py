@@ -5944,11 +5944,13 @@ class AIAgent:
                             compressor._context_probed = True
                             self._vprint(f"{self.log_prefix}⚠️  Context limit detected from API: {new_ctx:,} tokens (was {old_ctx:,})", force=True)
                         else:
-                            # Step down to the next probe tier
+                            # Step down to the next probe tier. This remains a
+                            # probe-derived discovery, so keep it eligible for
+                            # persistence after the next successful response.
                             new_ctx = get_next_probe_tier(old_ctx)
                             compressor.context_length_known = False
                             compressor.context_length_source = "probe"
-                            compressor._context_probed = False
+                            compressor._context_probed = True
 
                         if new_ctx and new_ctx < old_ctx:
                             compressor.context_length = new_ctx

@@ -19,6 +19,7 @@ import pytest
 import run_agent
 from honcho_integration.client import HonchoClientConfig
 from run_agent import AIAgent, _inject_honcho_turn_context
+from agent.model_metadata import get_next_probe_tier
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
 
@@ -258,6 +259,52 @@ class TestExtractReasoning:
         result = agent._extract_reasoning(msg)
         assert "part1" in result
         assert "part2" in result
+
+
+class TestContextProbeCaching:
+    def test_probe_step_down_is_cached_after_successful_retry(self, agent):
+        old_ctx = agent.context_compressor.context_length
+        expected_ctx = get_next_probe_tier(old_ctx)
+        assert expected_ctx is not None
+
+        agent.base_url = "https://example-proxy.invalid/v1"
+        agent.model = "unknown/model"
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.save_trajectories = False
+
+        err_400 = Exception("Error code: 400 - Please reduce the length of the messages")
+        err_400.status_code = 400
+        ok_resp = _mock_response(
+            content="Recovered after probe step-down",
+            finish_reason="stop",
+            usage={"prompt_tokens": 1234, "completion_tokens": 56, "total_tokens": 1290},
+        )
+        agent.client.chat.completions.create.side_effect = [err_400, ok_resp]
+
+        prefill = [
+            {"role": "user", "content": "previous question"},
+            {"role": "assistant", "content": "previous answer"},
+        ]
+
+        with (
+            patch.object(agent, "_compress_context") as mock_compress,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.save_context_length") as mock_save_context_length,
+        ):
+            mock_compress.return_value = (
+                [{"role": "user", "content": "hello"}],
+                "compressed prompt",
+            )
+            result = agent.run_conversation("hello", conversation_history=prefill)
+
+        assert result["completed"] is True
+        assert agent.context_compressor.context_length == expected_ctx
+        assert agent.context_compressor.context_length_known is False
+        mock_save_context_length.assert_called_once_with(agent.model, agent.base_url, expected_ctx)
 
     def test_deduplication(self, agent):
         msg = _mock_assistant_msg(
