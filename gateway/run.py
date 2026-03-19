@@ -1268,6 +1268,34 @@ class GatewayRunner:
         if config and hasattr(config, "get_unauthorized_dm_behavior"):
             return config.get_unauthorized_dm_behavior(platform)
         return "pair"
+
+    async def _expand_context_references_for_message(
+        self,
+        message: str,
+        *,
+        cwd: str | Path | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
+        """Expand ``@...`` references for gateway-originated text messages."""
+        from agent.context_references import preprocess_context_references_async
+        from agent.model_metadata import get_model_context_length
+
+        effective_cwd = Path(
+            cwd or os.getenv("MESSAGING_CWD") or os.getenv("TERMINAL_CWD") or str(Path.home())
+        )
+        effective_model = model or _resolve_gateway_model()
+        context_length = get_model_context_length(
+            effective_model,
+            base_url=base_url or "",
+            api_key=api_key or "",
+        )
+        return await preprocess_context_references_async(
+            message,
+            cwd=effective_cwd,
+            context_length=context_length,
+        )
     
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
@@ -1954,6 +1982,21 @@ class GatewayRunner:
             )
             if not found_in_history:
                 message_text = f'[Replying to: "{reply_snippet}"]\n\n{message_text}'
+
+        expanded_context = await self._expand_context_references_for_message(
+            message_text,
+            model=_resolve_gateway_model(),
+        )
+        if expanded_context.references:
+            logger.info(
+                "Expanded %d @ context reference(s) for session %s (%d tokens)",
+                len(expanded_context.references),
+                session_entry.session_id,
+                expanded_context.injected_tokens,
+            )
+        if expanded_context.blocked:
+            return "\n".join(expanded_context.warnings) or "Context injection refused."
+        message_text = expanded_context.message
 
         try:
             # Emit agent:start hook

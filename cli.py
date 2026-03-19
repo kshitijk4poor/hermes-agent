@@ -2369,6 +2369,45 @@ class HermesCLI:
             return f"{prefix}\n\n{user_text}" if user_text else prefix
         return user_text or "What do you see in this image?"
 
+    def _expand_context_references_for_turn(
+        self,
+        message: str,
+        *,
+        cwd: str | Path | None = None,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ):
+        """Expand ``@file``/``@folder``/git/url references before the LLM sees them."""
+        from agent.context_references import preprocess_context_references
+        from agent.model_metadata import get_model_context_length
+
+        effective_cwd = Path(cwd or os.getcwd())
+        effective_model = model or self.model
+        effective_base_url = base_url if base_url is not None else self.base_url
+        effective_api_key = api_key if api_key is not None else self.api_key
+        context_length = get_model_context_length(
+            effective_model,
+            base_url=effective_base_url or "",
+            api_key=effective_api_key or "",
+        )
+
+        result = preprocess_context_references(
+            message,
+            cwd=effective_cwd,
+            context_length=context_length,
+        )
+
+        if result.references:
+            ref_count = len(result.references)
+            _cprint(
+                f"  {_DIM}[@ context: {ref_count} reference{'s' if ref_count != 1 else ''}, "
+                f"{result.injected_tokens} tokens injected]{_RST}"
+            )
+        for warning in result.warnings:
+            _cprint(f"  {_DIM}⚠ {warning}{_RST}")
+        return result
+
     def _show_tool_availability_warnings(self):
         """Show warnings about disabled tools due to missing API keys."""
         try:
@@ -5261,6 +5300,17 @@ class HermesCLI:
             route_label=turn_route["label"],
         ):
             return None
+
+        if isinstance(message, str):
+            expanded_context = self._expand_context_references_for_turn(
+                message,
+                model=turn_route["model"],
+                base_url=turn_route["runtime"].get("base_url"),
+                api_key=turn_route["runtime"].get("api_key"),
+            )
+            if expanded_context.blocked:
+                return "\n".join(expanded_context.warnings) or "Context injection refused."
+            message = expanded_context.message
         
         # Pre-process images through the vision tool (Gemini Flash) so the
         # main model receives text descriptions instead of raw base64 image
