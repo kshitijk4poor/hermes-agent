@@ -1290,10 +1290,11 @@ class HermesCLI:
         if compressor:
             context_tokens = getattr(compressor, "last_prompt_tokens", 0) or 0
             context_length = getattr(compressor, "context_length", 0) or 0
+            context_length_known = getattr(compressor, "context_length_known", True)
             snapshot["context_tokens"] = context_tokens
-            snapshot["context_length"] = context_length or None
+            snapshot["context_length"] = context_length if (context_length and context_length_known) else None
             snapshot["compressions"] = getattr(compressor, "compression_count", 0) or 0
-            if context_length:
+            if context_length and context_length_known:
                 snapshot["context_percent"] = max(0, min(100, round((context_tokens / context_length) * 100)))
 
         return snapshot
@@ -1904,7 +1905,8 @@ class HermesCLI:
             # Get context length for display
             ctx_len = None
             if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
-                ctx_len = self.agent.context_compressor.context_length
+                if getattr(self.agent.context_compressor, "context_length_known", True):
+                    ctx_len = self.agent.context_compressor.context_length
             
             # Build and display the banner
             build_welcome_banner(
@@ -3377,7 +3379,8 @@ class HermesCLI:
                     cwd = os.getenv("TERMINAL_CWD", os.getcwd())
                     ctx_len = None
                     if hasattr(self, 'agent') and self.agent and hasattr(self.agent, 'context_compressor'):
-                        ctx_len = self.agent.context_compressor.context_length
+                        if getattr(self.agent.context_compressor, "context_length_known", True):
+                            ctx_len = self.agent.context_compressor.context_length
                     build_welcome_banner(
                         console=cc,
                         model=self.model,
@@ -4275,7 +4278,8 @@ class HermesCLI:
         compressor = agent.context_compressor
         last_prompt = compressor.last_prompt_tokens
         ctx_len = compressor.context_length
-        pct = (last_prompt / ctx_len * 100) if ctx_len else 0
+        ctx_known = getattr(compressor, "context_length_known", True)
+        pct = (last_prompt / ctx_len * 100) if (ctx_len and ctx_known) else 0
         compressions = compressor.compression_count
 
         msg_count = len(self.conversation_history)
@@ -4314,7 +4318,10 @@ class HermesCLI:
         else:
             print(f"  Total cost:              {'n/a':>10}")
         print(f"  {'─' * 40}")
-        print(f"  Current context:  {last_prompt:,} / {ctx_len:,} ({pct:.0f}%)")
+        if ctx_len and ctx_known:
+            print(f"  Current context:  {last_prompt:,} / {ctx_len:,} ({pct:.0f}%)")
+        else:
+            print(f"  Current context:  {last_prompt:,} / unknown")
         print(f"  Messages:         {msg_count}")
         print(f"  Compressions:     {compressions}")
         if cost_result.status == "unknown":

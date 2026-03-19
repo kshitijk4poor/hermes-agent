@@ -27,6 +27,7 @@ def _attach_agent(
     context_tokens: int,
     context_length: int,
     compressions: int = 0,
+    context_length_known: bool = True,
 ):
     cli_obj.agent = SimpleNamespace(
         model=cli_obj.model,
@@ -43,6 +44,7 @@ def _attach_agent(
         context_compressor=SimpleNamespace(
             last_prompt_tokens=context_tokens,
             context_length=context_length,
+            context_length_known=context_length_known,
             compression_count=compressions,
         ),
     )
@@ -109,6 +111,23 @@ class TestCLIStatusBar:
         assert "$0.06" not in text  # cost hidden by default
         assert "15m" in text
         assert "200K" not in text
+
+    def test_build_status_bar_hides_probe_only_context_limit(self):
+        cli_obj = _attach_agent(
+            _make_cli(model="unknown/model"),
+            prompt_tokens=45_700,
+            completion_tokens=2_400,
+            total_tokens=48_100,
+            api_calls=7,
+            context_tokens=45_700,
+            context_length=2_000_000,
+            context_length_known=False,
+        )
+
+        text = cli_obj._build_status_bar_text(width=120)
+
+        assert "45.7K/2M" not in text
+        assert "ctx --" in text
 
     def test_build_status_bar_text_handles_missing_agent(self):
         cli_obj = _make_cli()
