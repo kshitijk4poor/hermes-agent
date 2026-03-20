@@ -14,7 +14,7 @@ import uuid
 from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable, Awaitable, Tuple
@@ -836,6 +836,13 @@ class BasePlatformAdapter(ABC):
             if event.get_command() == "stop":
                 print(f"[{self.name}] ⚡ Stop requested for active session {session_key}")
                 self._active_sessions[session_key].set()
+            elif event.get_command() == "queue":
+                queued_event = self._normalize_queue_event(event)
+                if queued_event is None:
+                    print(f"[{self.name}] ⚠️ Ignoring empty /queue for active session {session_key}")
+                else:
+                    self._append_pending_event(session_key, queued_event)
+                    print(f"[{self.name}] 📨 Queued explicit follow-up for active session {session_key}")
             elif event.message_type == MessageType.PHOTO:
                 q = self._pending_messages.setdefault(session_key, deque())
                 if q and getattr(q[-1], "message_type", None) == MessageType.PHOTO:
@@ -848,18 +855,12 @@ class BasePlatformAdapter(ABC):
                         elif event.text not in existing.text:
                             existing.text = f"{existing.text}\n\n{event.text}".strip()
                 else:
-                    if len(q) >= self._MAX_PENDING_MESSAGES:
-                        print(f"[{self.name}] ⚠️ Queue full for session {session_key}, dropping oldest")
-                        q.popleft()
                     print(f"[{self.name}] 🖼️ Queued photo follow-up for active session {session_key}")
-                    q.append(event)
+                    self._append_pending_event(session_key, event)
             else:
-                q = self._pending_messages.setdefault(session_key, deque())
-                if len(q) >= self._MAX_PENDING_MESSAGES:
-                    print(f"[{self.name}] ⚠️ Queue full for session {session_key}, dropping oldest")
-                    q.popleft()
-                print(f"[{self.name}] 📨 Queued follow-up for active session {session_key}")
-                q.append(event)
+                print(f"[{self.name}] ⚡ Interrupt requested for active session {session_key}")
+                self._append_pending_event(session_key, event)
+                self._active_sessions[session_key].set()
             return  # Don't process now - will be handled after current task finishes
         
         # Spawn background task to process this message
@@ -1123,6 +1124,24 @@ class BasePlatformAdapter(ABC):
     def has_pending_interrupt(self, session_key: str) -> bool:
         """Check if there's a pending interrupt for a session."""
         return session_key in self._active_sessions and self._active_sessions[session_key].is_set()
+
+    def _append_pending_event(self, session_key: str, event: MessageEvent) -> None:
+        """Append a queued event while preserving FIFO order and queue caps."""
+        queue = self._pending_messages.setdefault(session_key, deque())
+        if len(queue) >= self._MAX_PENDING_MESSAGES:
+            print(f"[{self.name}] ⚠️ Queue full for session {session_key}, dropping oldest")
+            queue.popleft()
+        queue.append(event)
+
+    @staticmethod
+    def _normalize_queue_event(event: MessageEvent) -> Optional[MessageEvent]:
+        """Convert `/queue ...` into the replayable follow-up payload."""
+        if event.get_command() != "queue":
+            return event
+        queued_text = event.get_command_args().strip()
+        if not queued_text and not event.media_urls:
+            return None
+        return replace(event, text=queued_text)
 
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Get and clear any pending message for a session."""

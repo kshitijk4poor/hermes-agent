@@ -28,6 +28,7 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
+from dataclasses import replace
 from typing import Dict, Optional, Any, List
 
 # ---------------------------------------------------------------------------
@@ -609,6 +610,25 @@ class GatewayRunner:
             source,
             group_sessions_per_user=getattr(config, "group_sessions_per_user", True),
         )
+
+    @staticmethod
+    def _normalize_queue_event(event: MessageEvent) -> MessageEvent | None:
+        """Convert `/queue ...` into a replayable follow-up event."""
+        if event.get_command() != "queue":
+            return event
+        queued_text = event.get_command_args().strip()
+        if not queued_text and not event.media_urls:
+            return None
+        return replace(event, text=queued_text)
+
+    @staticmethod
+    def _append_adapter_pending_event(adapter: BasePlatformAdapter, session_key: str, event: MessageEvent) -> None:
+        """Append an event to the adapter pending queue while respecting queue caps."""
+        queue = adapter._pending_messages.setdefault(session_key, deque())
+        max_pending = getattr(adapter, "_MAX_PENDING_MESSAGES", None)
+        if max_pending and len(queue) >= max_pending:
+            queue.popleft()
+        queue.append(event)
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
         from agent.smart_model_routing import resolve_turn_route
@@ -1343,8 +1363,8 @@ class GatewayRunner:
         canonical = _cmd_def.name if _cmd_def else command
 
         # Explicit stop still bypasses normal command handling so interruption
-        # reaches the running agent quickly. Plain follow-ups are queued by the
-        # platform adapter and should not preempt by default.
+        # reaches the running agent quickly. Plain follow-ups now interrupt by
+        # default; `/queue` is the explicit opt-in to defer them.
         _quick_key = self._session_key_for_source(source)
         if not bypass_running_agent_check and _quick_key in self._running_agents:
             if canonical == "status":
@@ -1356,8 +1376,11 @@ class GatewayRunner:
                     return "⏳ The agent is still starting up — nothing to stop yet."
                 adapter = self.adapters.get(source.platform)
                 if adapter:
-                    pending_queue = adapter._pending_messages.setdefault(_quick_key, deque())
-                    pending_queue.append(event)
+                    queued_event = self._normalize_queue_event(event) if canonical == "queue" else event
+                    if queued_event is not None:
+                        self._append_adapter_pending_event(adapter, _quick_key, queued_event)
+                if canonical == "queue":
+                    return "Queued for the next turn." if event.get_command_args().strip() or event.media_urls else "Usage: /queue <prompt>"
                 return None
 
             if canonical != "stop":
@@ -1368,20 +1391,39 @@ class GatewayRunner:
                     )
                     adapter = self.adapters.get(source.platform)
                     if adapter:
-                        if _quick_key in adapter._pending_messages:
-                            existing = adapter._pending_messages[_quick_key]
-                            if getattr(existing, "message_type", None) == MessageType.PHOTO:
-                                existing.media_urls.extend(event.media_urls)
-                                existing.media_types.extend(event.media_types)
-                                if event.text:
-                                    if not existing.text:
-                                        existing.text = event.text
-                                    elif event.text not in existing.text:
-                                        existing.text = f"{existing.text}\n\n{event.text}".strip()
-                            else:
-                                adapter._pending_messages[_quick_key] = event
+                        pending_queue = adapter._pending_messages.setdefault(_quick_key, deque())
+                        if pending_queue and getattr(pending_queue[-1], "message_type", None) == MessageType.PHOTO:
+                            existing = pending_queue[-1]
+                            existing.media_urls.extend(event.media_urls)
+                            existing.media_types.extend(event.media_types)
+                            if event.text:
+                                if not existing.text:
+                                    existing.text = event.text
+                                elif event.text not in existing.text:
+                                    existing.text = f"{existing.text}\n\n{event.text}".strip()
                         else:
-                            adapter._pending_messages[_quick_key] = event
+                            self._append_adapter_pending_event(adapter, _quick_key, event)
+                    return None
+                if canonical == "queue":
+                    queued_event = self._normalize_queue_event(event)
+                    if queued_event is None:
+                        return "Usage: /queue <prompt>"
+                    adapter = self.adapters.get(source.platform)
+                    if adapter:
+                        self._append_adapter_pending_event(adapter, _quick_key, queued_event)
+                    if hasattr(self, "hooks"):
+                        await self.hooks.emit("command:queue", {
+                            "platform": source.platform.value if source.platform else "",
+                            "user_id": source.user_id,
+                            "command": "queue",
+                            "args": event.get_command_args().strip(),
+                        })
+                    return "Queued for the next turn."
+                adapter = self.adapters.get(source.platform)
+                if adapter:
+                    self._append_adapter_pending_event(adapter, _quick_key, event)
+                if hasattr(running_agent, "interrupt"):
+                    running_agent.interrupt()
                 return None
 
             logger.debug("PRIORITY stop for session %s", _quick_key[:20])

@@ -1276,6 +1276,20 @@ class HermesCLI:
             self._visible_followups.append(preview)
         self._invalidate(min_interval=0.0)
 
+    @staticmethod
+    def _extract_queue_payload(text: str, images: list[Any] | None = None) -> Any | None:
+        """Return the payload targeted by `/queue`, or None for invalid usage."""
+        images = list(images or [])
+        stripped = text.strip()
+        if not stripped.lower().startswith("/queue"):
+            return None
+
+        parts = stripped.split(maxsplit=1)
+        queued_text = parts[1].strip() if len(parts) > 1 else ""
+        if not queued_text and not images:
+            return None
+        return (queued_text, images) if images else queued_text
+
     def _consume_visible_followup(self) -> None:
         """Drop the oldest rendered follow-up once processing starts."""
         with self._visible_followups_lock:
@@ -1296,7 +1310,7 @@ class HermesCLI:
 
         lines = ["Queued follow-up messages"]
         lines.extend(f"{idx}. {item}" for idx, item in enumerate(queued, start=1))
-        lines.append("Esc or /stop interrupts now; Enter keeps queuing.")
+        lines.append("Enter interrupts now; use /queue to keep these for the next turn.")
         return lines
 
     def _status_bar_context_style(self, percent_used: Optional[int]) -> str:
@@ -3706,6 +3720,17 @@ class HermesCLI:
             self._handle_stop_command()
         elif canonical == "background":
             self._handle_background_command(cmd_original)
+        elif canonical == "queue":
+            if self._agent_running:
+                payload = self._extract_queue_payload(cmd_original)
+                if payload is None:
+                    _cprint("  Usage: /queue <prompt>")
+                else:
+                    self._enqueue_visible_followup(payload)
+                    self._pending_input.put(payload)
+                    _cprint("  Queued for the next turn.")
+            else:
+                _cprint("  /queue only works while Hermes is already busy.")
         elif canonical == "skin":
             self._handle_skin_command(cmd_original)
         elif canonical == "voice":
@@ -5814,7 +5839,7 @@ class HermesCLI:
             - Approval selection: selected choice goes to approval response queue
             - Clarify freetext mode: answer goes to the clarify response queue
             - Clarify choice mode: selected choice goes to the clarify response queue
-            - Agent running: queues in _pending_input
+            - Agent running: interrupts by default; `/queue` opts into follow-up queueing
             - Agent idle: goes to _pending_input (process_loop monitors this)
             """
             # --- Sudo password prompt: submit the typed password ---
@@ -5886,7 +5911,18 @@ class HermesCLI:
                     event.app.invalidate()
                     return
                 if self._agent_running:
-                    self._enqueue_visible_followup(payload)
+                    queued_payload = self._extract_queue_payload(text, images)
+                    if queued_payload is not None:
+                        self._enqueue_visible_followup(queued_payload)
+                        self._pending_input.put(queued_payload)
+                    else:
+                        if self._tts_stop_event is not None:
+                            self._tts_stop_event.set()
+                        self._pending_input.put(payload)
+                        self.agent.interrupt()
+                    event.app.current_buffer.reset(append_to_history=True)
+                    event.app.invalidate()
+                    return
                 self._pending_input.put(payload)
                 event.app.current_buffer.reset(append_to_history=True)
                 event.app.invalidate()
@@ -6358,7 +6394,7 @@ class HermesCLI:
                 status = cli_ref._command_status or "Processing command..."
                 return f"{frame} {status}"
             if cli_ref._agent_running:
-                return "Enter queues follow-up, Esc or /stop preempts, Ctrl+C cancels"
+                return "Enter interrupts, /queue saves next turn, Esc or /stop preempts, Ctrl+C cancels"
             if cli_ref._voice_mode:
                 return "type or Ctrl+B to record"
             return ""

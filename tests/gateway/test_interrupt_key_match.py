@@ -100,8 +100,8 @@ class TestInterruptKeyConsistency:
         assert result is event
 
     @pytest.mark.asyncio
-    async def test_handle_message_stores_under_session_key(self):
-        """handle_message stores pending messages under session_key, not chat_id."""
+    async def test_handle_message_interrupts_and_stores_under_session_key(self):
+        """Plain follow-ups should queue under session_key and trigger an interrupt."""
         adapter = StubAdapter()
         adapter.set_message_handler(lambda event: asyncio.sleep(0, result=None))
 
@@ -121,7 +121,7 @@ class TestInterruptKeyConsistency:
         assert source.chat_id not in adapter._pending_messages
 
         # Interrupt event was set
-        assert adapter._active_sessions[session_key].is_set() is False
+        assert adapter._active_sessions[session_key].is_set() is True
 
     @pytest.mark.asyncio
     async def test_stop_uses_interrupt_signal(self):
@@ -162,4 +162,22 @@ class TestInterruptKeyConsistency:
         queued = adapter.get_pending_message(session_key)
         assert queued is event
         assert queued.media_urls == ["/tmp/photo-a.jpg"]
+        assert interrupt_event.is_set() is False
+
+    @pytest.mark.asyncio
+    async def test_queue_command_queues_without_interrupt(self):
+        """Explicit /queue should defer the follow-up without preempting the run."""
+        adapter = StubAdapter()
+        adapter.set_message_handler(lambda event: asyncio.sleep(0, result=None))
+
+        source = _source("-1001234", "group")
+        session_key = build_session_key(source)
+        interrupt_event = asyncio.Event()
+        adapter._active_sessions[session_key] = interrupt_event
+
+        event = MessageEvent(text="/queue review this next", source=source, message_id="2")
+        await adapter.handle_message(event)
+
+        queued = adapter.get_pending_message(session_key)
+        assert queued.text == "review this next"
         assert interrupt_event.is_set() is False

@@ -100,7 +100,7 @@ class TestBasePlatformTopicSessions:
         await adapter.handle_message(pending_event)
 
         assert scheduled == []
-        assert adapter._active_sessions[build_session_key(pending_event.source)].is_set() is False
+        assert adapter._active_sessions[build_session_key(pending_event.source)].is_set() is True
         assert adapter.get_pending_message(build_session_key(pending_event.source)) == pending_event
 
     @pytest.mark.asyncio
