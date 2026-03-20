@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 # Provider names that can appear as a "provider:" prefix before a model ID.
 # Only these are stripped — Ollama-style "model:tag" colons (e.g. "qwen3.5:27b")
 # are preserved so the full model name reaches cache lookups and server queries.
+# NOTE: This mirrors _KNOWN_PROVIDER_NAMES in hermes_cli/models.py plus "local".
+# We cannot import it here — agent/ is a pure-utility layer that must not pull in
+# hermes_cli/ at module load time.  Keep in sync when adding new providers.
 _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
     "zai", "kimi-coding", "minimax", "minimax-cn", "anthropic", "deepseek",
@@ -42,9 +45,9 @@ def _strip_provider_prefix(model: str) -> str:
     """
     if ":" not in model or model.startswith("http"):
         return model
-    prefix = model.split(":", 1)[0].strip().lower()
-    if prefix in _PROVIDER_PREFIXES:
-        return model.split(":", 1)[1]
+    head, _, tail = model.partition(":")
+    if head.strip().lower() in _PROVIDER_PREFIXES:
+        return tail
     return model
 
 _model_metadata_cache: Dict[str, Dict[str, Any]] = {}
