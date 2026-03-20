@@ -52,8 +52,6 @@ _HERMES_CORE_TOOLS = [
     "todo", "memory",
     # Session history search
     "session_search",
-    # Document parsing
-    "document_parse",
     # Clarifying questions
     "clarify",
     # Code execution + delegation
@@ -179,13 +177,6 @@ TOOLSETS = {
         "tools": ["session_search"],
         "includes": []
     },
-
-    "documents": {
-        "description": "Parse local documents such as PDFs, DOCX, PPTX, XLSX, images, and text files into normalized text",
-        "tools": ["document_parse"],
-        "includes": []
-    },
-    
     "clarify": {
         "description": "Ask the user clarifying questions (multiple-choice or open-ended)",
         "tools": ["clarify"],
@@ -245,7 +236,6 @@ TOOLSETS = {
             "web_search", "web_extract",
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
-            "document_parse",
             "vision_analyze",
             "skills_list", "skill_view", "skill_manage",
             "browser_navigate", "browser_snapshot", "browser_click",
