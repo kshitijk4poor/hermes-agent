@@ -835,6 +835,9 @@ class BasePlatformAdapter(ABC):
             self._enqueue_debounced_message(session_key, event, debounce_ms)
             return
 
+        if event.is_command():
+            self._clear_debounced_message(session_key)
+
         await self._handle_message_now(event, session_key)
 
     def _get_inbound_debounce_ms(self) -> int:
@@ -888,6 +891,13 @@ class BasePlatformAdapter(ABC):
         self._pending_debounce_tasks[session_key] = asyncio.create_task(
             self._flush_debounced_message(session_key, debounce_ms / 1000.0)
         )
+
+    def _clear_debounced_message(self, session_key: str) -> None:
+        """Drop any queued debounced message for this session."""
+        self._pending_debounced_messages.pop(session_key, None)
+        task = self._pending_debounce_tasks.pop(session_key, None)
+        if task and not task.done():
+            task.cancel()
 
     async def _flush_debounced_message(self, session_key: str, delay_seconds: float) -> None:
         """Wait for the debounce window to expire, then dispatch the merged event."""

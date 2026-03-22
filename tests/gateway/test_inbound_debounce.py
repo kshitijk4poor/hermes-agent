@@ -2,11 +2,13 @@
 
 import asyncio
 from unittest.mock import AsyncMock
+from unittest.mock import patch
 
 import pytest
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import BasePlatformAdapter, MessageEvent, MessageType, SendResult
+from gateway.run import GatewayRunner
 from gateway.session import SessionSource, build_session_key
 
 
@@ -77,6 +79,29 @@ class TestInboundDebounce:
         assert adapter._pending_debounced_messages == {}
 
     @pytest.mark.asyncio
+    async def test_command_clears_queued_debounced_message(self):
+        adapter = DummyDebounceAdapter(debounce_ms=5000)
+        adapter.set_message_handler(AsyncMock(return_value=None))
+        adapter._handle_message_now = AsyncMock()
+
+        await adapter.handle_message(_make_event("queued prompt", message_id="1"))
+        session_key = build_session_key(_make_event("queued prompt").source)
+        assert session_key in adapter._pending_debounced_messages
+
+        await adapter.handle_message(
+            MessageEvent(
+                text="/reset",
+                message_type=MessageType.COMMAND,
+                source=SessionSource(platform=Platform.TELEGRAM, chat_id="12345", chat_type="dm"),
+                message_id="cmd-1",
+            )
+        )
+
+        assert session_key not in adapter._pending_debounced_messages
+        assert session_key not in adapter._pending_debounce_tasks
+        adapter._handle_message_now.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_repeated_identical_messages_are_preserved(self):
         adapter = DummyDebounceAdapter(debounce_ms=50)
         adapter.set_message_handler(AsyncMock(return_value=None))
@@ -104,3 +129,20 @@ class TestInboundDebounce:
 
         assert adapter._pending_debounced_messages == {}
         assert adapter._pending_debounce_tasks == {}
+
+
+class TestAdapterDebounceConfig:
+    def test_create_adapter_overrides_invalid_platform_debounce_with_resolved_fallback(self):
+        runner = object.__new__(GatewayRunner)
+        runner.config = GatewayConfig(
+            debounce_ms=5000,
+            platforms={Platform.TELEGRAM: PlatformConfig(enabled=True, token="fake-token", extra={"debounce_ms": "nope"})},
+        )
+
+        adapter_config = runner.config.platforms[Platform.TELEGRAM]
+
+        with patch("gateway.platforms.telegram.check_telegram_requirements", return_value=True), \
+             patch("gateway.platforms.telegram.TelegramAdapter", side_effect=lambda cfg: cfg):
+            created = runner._create_adapter(Platform.TELEGRAM, adapter_config)
+
+        assert created.extra["debounce_ms"] == 5000
