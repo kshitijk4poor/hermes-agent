@@ -39,6 +39,16 @@ def test_parse_terminal_keyboard_capabilities_detects_kitty_and_modify_other_key
     assert capabilities.modify_other_keys_supported is True
 
 
+def test_parse_terminal_keyboard_detection_result_preserves_non_probe_input():
+    result = cli._parse_terminal_keyboard_detection_result(
+        "\x1b[?1uhello\x1b[>4;2m\x1b[?64;1;2;6;9c"
+    )
+
+    assert result.capabilities.kitty_supported is True
+    assert result.capabilities.modify_other_keys_supported is True
+    assert result.pending_input == "hello"
+
+
 def test_select_terminal_keyboard_mode_prefers_kitty():
     capabilities = cli._TerminalKeyboardCapabilities(
         kitty_supported=True,
@@ -123,6 +133,36 @@ def test_vt100_parser_maps_ctrl_backspace_csi_u_sequence():
     parser.flush()
 
     assert [press.key for press in key_presses] == list(cli._CTRL_BACKSPACE_KEYS)
+
+
+def test_vt100_parser_maps_ctrl_b_kitty_sequence():
+    key_presses = []
+    parser = Vt100Parser(key_presses.append)
+
+    parser.feed(cli._kitty_key_sequence(ord("b"), 5))
+    parser.flush()
+
+    assert [press.key for press in key_presses] == [cli.Keys.ControlB]
+
+
+def test_vt100_parser_maps_alt_v_kitty_sequence():
+    key_presses = []
+    parser = Vt100Parser(key_presses.append)
+
+    parser.feed(cli._kitty_key_sequence(ord("v"), 3))
+    parser.flush()
+
+    assert [press.key for press in key_presses] == [cli.Keys.Escape, "v"]
+
+
+def test_vt100_parser_maps_alt_enter_modify_other_keys_sequence():
+    key_presses = []
+    parser = Vt100Parser(key_presses.append)
+
+    parser.feed(cli._modify_other_keys_sequence(13, 3))
+    parser.flush()
+
+    assert [press.key for press in key_presses] == [cli.Keys.Escape, cli.Keys.ControlM]
 
 
 def test_delete_previous_word_uses_prompt_toolkit_word_boundaries():
