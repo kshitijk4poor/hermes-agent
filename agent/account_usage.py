@@ -20,14 +20,7 @@ class AccountUsageWindow:
     label: str
     used_percent: Optional[float] = None
     reset_at: Optional[datetime] = None
-    window_seconds: Optional[int] = None
     detail: Optional[str] = None
-
-    @property
-    def remaining_percent(self) -> Optional[float]:
-        if self.used_percent is None:
-            return None
-        return max(0.0, 100.0 - float(self.used_percent))
 
 
 @dataclass(frozen=True)
@@ -159,7 +152,6 @@ def _fetch_codex_account_usage() -> Optional[AccountUsageSnapshot]:
                 label=label,
                 used_percent=float(used),
                 reset_at=_parse_dt(window.get("reset_at")),
-                window_seconds=window.get("limit_window_seconds"),
             )
         )
     details: list[str] = []

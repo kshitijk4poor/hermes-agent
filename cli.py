@@ -13,6 +13,7 @@ Usage:
     python cli.py --list-tools             # List available tools and exit
 """
 
+import concurrent.futures
 import logging
 import os
 import shutil
@@ -4469,24 +4470,31 @@ class HermesCLI:
             provider = getattr(self, "provider", None)
             base_url = getattr(self, "base_url", None)
             api_key = getattr(self, "api_key", None)
-        account_snapshot = fetch_account_usage(provider, base_url=base_url, api_key=api_key)
+
+        if session_lines:
+            for line in session_lines:
+                print(line)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _pool:
+            try:
+                account_snapshot = _pool.submit(
+                    fetch_account_usage, provider, base_url=base_url, api_key=api_key,
+                ).result(timeout=10.0)
+            except (concurrent.futures.TimeoutError, Exception):
+                account_snapshot = None
         account_lines = [f"  {line}" for line in render_account_usage_lines(account_snapshot)]
+
+        if account_lines:
+            if session_lines:
+                print()
+            for line in account_lines:
+                print(line)
 
         if not session_lines and not account_lines:
             if agent:
                 print("(._.) No API calls made yet in this session.")
             else:
                 print("(._.) No active agent -- send a message first.")
-            return
-
-        if session_lines:
-            for line in session_lines:
-                print(line)
-        if account_lines:
-            if session_lines:
-                print()
-            for line in account_lines:
-                print(line)
 
         if self.verbose:
             logging.getLogger().setLevel(logging.DEBUG)
