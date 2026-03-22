@@ -23,9 +23,7 @@ import tempfile
 import time
 import uuid
 import textwrap
-import re
 from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -50,8 +48,6 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
-from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.keys import Keys
 from prompt_toolkit import print_formatted_text as _pt_print
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
@@ -70,332 +66,9 @@ from agent.usage_pricing import (
     format_token_count_compact,
 )
 from hermes_cli.banner import _format_context_length
+from hermes_cli import terminal_keyboard as _tkbd
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
-_BACKWARD_KILL_WORD = get_by_name("backward-kill-word").handler
-_CTRL_BACKSPACE_KEYS = (Keys.Escape, Keys.ControlH)
-_CTRL_BACKSPACE_ESCAPE_SEQUENCES = (
-    "\x1b[127;5u",
-    "\x1b[8;5u",
-    "\x1b[27;5;127~",
-    "\x1b[27;5;8~",
-)
-_CTRL_ENTER_KEYS = Keys.ControlJ
-_KITTY_KEYBOARD_QUERY = "\x1b[?u"
-_KITTY_KEYBOARD_ENABLE = "\x1b[>1u"
-_KITTY_KEYBOARD_DISABLE = "\x1b[<u"
-_MODIFY_OTHER_KEYS_QUERY = "\x1b[>4;?m"
-_MODIFY_OTHER_KEYS_ENABLE = "\x1b[>4;2m"
-_MODIFY_OTHER_KEYS_DISABLE = "\x1b[>4;0m"
-_DEVICE_ATTRIBUTES_QUERY = "\x1b[c"
-_TERMINAL_KEYBOARD_QUERY_TIMEOUT_S = 0.25
-_KITTY_QUERY_RESPONSE_RE = re.compile(r"\x1b\[\?(\d+)u")
-_MODIFY_OTHER_KEYS_RESPONSE_RE = re.compile(r"\x1b\[>4;(\d+)m")
-_DEVICE_ATTRIBUTES_RESPONSE_RE = re.compile(r"\x1b\[\?(?:\d+)(?:;\d+)*c")
-_CONTROL_KEY_BY_ASCII = {
-    ord("a"): Keys.ControlA,
-    ord("b"): Keys.ControlB,
-    ord("c"): Keys.ControlC,
-    ord("d"): Keys.ControlD,
-    ord("e"): Keys.ControlE,
-    ord("f"): Keys.ControlF,
-    ord("g"): Keys.ControlG,
-    ord("h"): Keys.ControlH,
-    ord("i"): Keys.ControlI,
-    ord("j"): Keys.ControlJ,
-    ord("k"): Keys.ControlK,
-    ord("l"): Keys.ControlL,
-    ord("m"): Keys.ControlM,
-    ord("n"): Keys.ControlN,
-    ord("o"): Keys.ControlO,
-    ord("p"): Keys.ControlP,
-    ord("q"): Keys.ControlQ,
-    ord("r"): Keys.ControlR,
-    ord("s"): Keys.ControlS,
-    ord("t"): Keys.ControlT,
-    ord("u"): Keys.ControlU,
-    ord("v"): Keys.ControlV,
-    ord("w"): Keys.ControlW,
-    ord("x"): Keys.ControlX,
-    ord("y"): Keys.ControlY,
-    ord("z"): Keys.ControlZ,
-}
-
-
-@dataclass(frozen=True)
-class _TerminalKeyboardCapabilities:
-    kitty_supported: bool = False
-    modify_other_keys_supported: bool = False
-
-
-@dataclass(frozen=True)
-class _TerminalKeyboardDetectionResult:
-    capabilities: _TerminalKeyboardCapabilities
-    pending_input: str = ""
-
-
-def _kitty_key_sequence(codepoint: int, modifiers: int) -> str:
-    return f"\x1b[{codepoint};{modifiers}u"
-
-
-def _modify_other_keys_sequence(codepoint: int, modifiers: int) -> str:
-    return f"\x1b[27;{modifiers};{codepoint}~"
-
-
-def _parse_terminal_keyboard_capabilities(data: str) -> _TerminalKeyboardCapabilities:
-    """Parse raw terminal responses for keyboard protocol support."""
-    kitty_supported = bool(_KITTY_QUERY_RESPONSE_RE.search(data))
-    modify_levels = [
-        int(match.group(1))
-        for match in _MODIFY_OTHER_KEYS_RESPONSE_RE.finditer(data)
-    ]
-    return _TerminalKeyboardCapabilities(
-        kitty_supported=kitty_supported,
-        modify_other_keys_supported=any(level >= 2 for level in modify_levels),
-    )
-
-
-def _strip_terminal_keyboard_query_responses(data: str) -> str:
-    """Remove terminal capability probe responses and preserve other input."""
-    data = _KITTY_QUERY_RESPONSE_RE.sub("", data)
-    data = _MODIFY_OTHER_KEYS_RESPONSE_RE.sub("", data)
-    data = _DEVICE_ATTRIBUTES_RESPONSE_RE.sub("", data)
-    return data
-
-
-def _parse_terminal_keyboard_detection_result(
-    data: str,
-) -> _TerminalKeyboardDetectionResult:
-    """Parse terminal capability responses and preserve unrelated bytes."""
-    return _TerminalKeyboardDetectionResult(
-        capabilities=_parse_terminal_keyboard_capabilities(data),
-        pending_input=_strip_terminal_keyboard_query_responses(data),
-    )
-
-
-def _select_terminal_keyboard_mode(
-    capabilities: _TerminalKeyboardCapabilities,
-) -> str | None:
-    """Pick the best keyboard enhancement mode supported by the terminal."""
-    if capabilities.kitty_supported:
-        return "kitty"
-    if capabilities.modify_other_keys_supported:
-        return "modify_other_keys"
-    return None
-
-
-def _write_terminal_sequence(
-    sequence: str,
-    *,
-    writer=None,
-) -> None:
-    """Emit a raw terminal control sequence."""
-    if writer is not None:
-        writer(sequence)
-        return
-
-    stdout = getattr(sys, "__stdout__", None) or sys.stdout
-    if stdout is None or not hasattr(stdout, "write") or not hasattr(stdout, "flush"):
-        return
-    stdout.write(sequence)
-    stdout.flush()
-
-
-def _set_terminal_keyboard_mode(
-    mode: str | None,
-    *,
-    enable: bool,
-    writer=None,
-) -> None:
-    """Enable or disable an enhanced terminal keyboard mode."""
-    if mode == "kitty":
-        sequence = _KITTY_KEYBOARD_ENABLE if enable else _KITTY_KEYBOARD_DISABLE
-    elif mode == "modify_other_keys":
-        sequence = _MODIFY_OTHER_KEYS_ENABLE if enable else _MODIFY_OTHER_KEYS_DISABLE
-    else:
-        return
-    _write_terminal_sequence(sequence, writer=writer)
-
-
-def _detect_terminal_keyboard_capabilities(
-    *,
-    timeout_s: float = _TERMINAL_KEYBOARD_QUERY_TIMEOUT_S,
-) -> _TerminalKeyboardDetectionResult:
-    """Best-effort terminal capability probe for keyboard enhancement modes."""
-    if os.name == "nt":
-        return _TerminalKeyboardDetectionResult(_TerminalKeyboardCapabilities())
-
-    stdin = getattr(sys, "__stdin__", None) or sys.stdin
-    stdout = getattr(sys, "__stdout__", None) or sys.stdout
-    if stdin is None or stdout is None:
-        return _TerminalKeyboardDetectionResult(_TerminalKeyboardCapabilities())
-    if not hasattr(stdin, "isatty") or not hasattr(stdout, "isatty"):
-        return _TerminalKeyboardDetectionResult(_TerminalKeyboardCapabilities())
-    if not stdin.isatty() or not stdout.isatty():
-        return _TerminalKeyboardDetectionResult(_TerminalKeyboardCapabilities())
-
-    try:
-        import select
-        import termios
-        import tty
-    except Exception:
-        return _TerminalKeyboardDetectionResult(_TerminalKeyboardCapabilities())
-
-    try:
-        stdin_fd = stdin.fileno()
-        original_attrs = termios.tcgetattr(stdin_fd)
-    except Exception:
-        return _TerminalKeyboardDetectionResult(_TerminalKeyboardCapabilities())
-
-    try:
-        tty.setcbreak(stdin_fd)
-        _write_terminal_sequence(
-            _KITTY_KEYBOARD_QUERY + _MODIFY_OTHER_KEYS_QUERY + _DEVICE_ATTRIBUTES_QUERY
-        )
-
-        chunks: list[bytes] = []
-        deadline = time.monotonic() + max(0.0, timeout_s)
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            ready, _, _ = select.select([stdin_fd], [], [], max(0.0, remaining))
-            if not ready:
-                continue
-            chunk = os.read(stdin_fd, 1024)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            decoded = b"".join(chunks).decode("utf-8", errors="ignore")
-            if _DEVICE_ATTRIBUTES_RESPONSE_RE.search(decoded):
-                break
-
-        return _parse_terminal_keyboard_detection_result(
-            b"".join(chunks).decode("utf-8", errors="ignore")
-        )
-    except Exception:
-        return _TerminalKeyboardDetectionResult(_TerminalKeyboardCapabilities())
-    finally:
-        try:
-            termios.tcsetattr(stdin_fd, termios.TCSANOW, original_attrs)
-        except Exception:
-            pass
-
-
-def _detect_terminfo_backspace() -> bytes | None:
-    """Return the terminal's declared Backspace byte from terminfo, if known."""
-    term = os.getenv("TERM")
-    if not term:
-        return None
-
-    try:
-        import curses
-
-        curses.setupterm(term=term)
-        return curses.tigetstr("kbs")
-    except Exception:
-        return None
-
-
-def _install_ctrl_backspace_input_sequences(
-    ansi_sequences: dict[str, Keys | tuple[Keys, ...]] | None = None,
-    *,
-    terminfo_backspace: bytes | None = None,
-) -> None:
-    """Teach prompt_toolkit how to recognize Ctrl+Backspace input sequences.
-
-    Modern terminals may emit CSI-u or modifyOtherKeys sequences for
-    Ctrl+Backspace. Legacy terminals only expose ``\\x08`` and ``\\x7f``; in
-    that case terminfo's ``kbs`` tells us which byte is Backspace so we can
-    treat the other byte as the closest available Ctrl+Backspace signal.
-    """
-
-    sequences = ANSI_SEQUENCES if ansi_sequences is None else ansi_sequences
-
-    for sequence in _CTRL_BACKSPACE_ESCAPE_SEQUENCES:
-        sequences[sequence] = _CTRL_BACKSPACE_KEYS
-
-    if terminfo_backspace is None:
-        terminfo_backspace = _detect_terminfo_backspace()
-
-    # Legacy terminals often expose Backspace/Ctrl+Backspace as the two raw
-    # bytes ``\x08`` and ``\x7f``. ``kbs`` tells us which byte is the real
-    # Backspace key; treat the other byte as Ctrl+Backspace so the TUI matches
-    # the terminal's own key model as closely as legacy input allows.
-    if terminfo_backspace == b"\x08":
-        sequences["\x7f"] = _CTRL_BACKSPACE_KEYS
-    elif terminfo_backspace == b"\x7f":
-        sequences["\x08"] = _CTRL_BACKSPACE_KEYS
-
-
-def _install_enhanced_keyboard_input_sequences(
-    ansi_sequences: dict[str, Keys | tuple[Keys, ...]] | None = None,
-) -> None:
-    """Normalize Kitty/modifyOtherKeys text-key sequences Hermes relies on.
-
-    This keeps existing Hermes bindings working when enhanced keyboard modes are
-    enabled, including Alt-based shortcuts and configurable Ctrl/Alt letter
-    bindings such as the default voice push-to-talk key.
-    """
-
-    sequences = ANSI_SEQUENCES if ansi_sequences is None else ansi_sequences
-
-    for codepoint in range(32, 127):
-        char = chr(codepoint)
-        alt_key = (Keys.Escape, char)
-        sequences[_kitty_key_sequence(codepoint, 3)] = alt_key
-        sequences[_modify_other_keys_sequence(codepoint, 3)] = alt_key
-
-    for codepoint, control_key in _CONTROL_KEY_BY_ASCII.items():
-        sequences[_kitty_key_sequence(codepoint, 5)] = control_key
-        sequences[_modify_other_keys_sequence(codepoint, 5)] = control_key
-
-    # Keep enhanced Ctrl+Enter on Hermes' existing multiline binding (`c-j`)
-    # instead of letting it collapse to the plain Enter/submit path.
-    sequences[_kitty_key_sequence(13, 5)] = _CTRL_ENTER_KEYS
-    sequences[_modify_other_keys_sequence(13, 5)] = _CTRL_ENTER_KEYS
-
-    for codepoint in (8, 13, 127):
-        alt_key = (Keys.Escape, Keys.ControlH if codepoint in (8, 127) else Keys.ControlM)
-        sequences[_kitty_key_sequence(codepoint, 3)] = alt_key
-        sequences[_modify_other_keys_sequence(codepoint, 3)] = alt_key
-
-
-def _delete_previous_word(event) -> None:
-    """Delete the previous word using prompt_toolkit's native semantics."""
-    _BACKWARD_KILL_WORD(event)
-
-
-def _parse_terminal_input_key_presses(data: str) -> list:
-    """Parse raw terminal input into prompt_toolkit key presses."""
-    if not data:
-        return []
-
-    from prompt_toolkit.input.vt100_parser import Vt100Parser
-
-    key_presses = []
-    parser = Vt100Parser(key_presses.append)
-    parser.feed(data)
-    parser.flush()
-    return key_presses
-
-
-def _register_word_delete_keybindings(kb: KeyBindings) -> None:
-    """Bind terminal word-delete sequences to prompt_toolkit's native handler."""
-
-    def _bind(*keys: str) -> None:
-        @kb.add(*keys)
-        def _delete_word(event) -> None:
-            _delete_previous_word(event)
-
-    # Many terminals emit Alt/Meta+Backspace or Esc-prefixed delete sequences
-    # for Ctrl+Backspace-style whole-word deletion. Bind them explicitly so the
-    # Hermes TUI behaves consistently inside the custom application wrapper.
-    _bind("escape", "backspace")
-    _bind("escape", "c-h")
-    _bind("escape", "delete")
-
-
-_install_ctrl_backspace_input_sequences()
-_install_enhanced_keyboard_input_sequences()
 
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
@@ -6325,7 +5998,7 @@ class HermesCLI:
         
         # Key bindings for the input area
         kb = KeyBindings()
-        _register_word_delete_keybindings(kb)
+        _tkbd.register_word_delete_keybindings(kb)
         
         @kb.add('enter')
         def handle_enter(event):
@@ -7409,20 +7082,20 @@ class HermesCLI:
         terminal_keyboard_cleanup = None
         pending_terminal_key_presses = []
         try:
-            terminal_keyboard_detection = _detect_terminal_keyboard_capabilities()
-            self._terminal_keyboard_mode = _select_terminal_keyboard_mode(
+            terminal_keyboard_detection = _tkbd.detect_capabilities()
+            self._terminal_keyboard_mode = _tkbd.select_mode(
                 terminal_keyboard_detection.capabilities
             )
-            pending_terminal_key_presses = _parse_terminal_input_key_presses(
+            pending_terminal_key_presses = _tkbd.parse_input_key_presses(
                 terminal_keyboard_detection.pending_input
             )
             if self._terminal_keyboard_mode:
-                _set_terminal_keyboard_mode(self._terminal_keyboard_mode, enable=True)
+                _tkbd.set_mode(self._terminal_keyboard_mode, enable=True)
 
                 def terminal_keyboard_cleanup(
                     mode=self._terminal_keyboard_mode,
                 ) -> None:
-                    _set_terminal_keyboard_mode(mode, enable=False)
+                    _tkbd.set_mode(mode, enable=False)
 
                 atexit.register(terminal_keyboard_cleanup)
         except Exception:
