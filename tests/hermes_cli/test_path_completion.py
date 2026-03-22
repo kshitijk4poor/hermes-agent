@@ -436,6 +436,25 @@ class TestIgnoredEntries:
         assert "app.log" not in names
         assert "secrets/" not in names
 
+    def test_nested_hermesignore_excludes_files(self, tmp_path):
+        import subprocess as sp
+
+        sp.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        nested = tmp_path / "workspace" / "src"
+        nested.mkdir(parents=True)
+        (tmp_path / "workspace" / ".hermesignore").write_text("*.tmp\ncache/\n")
+        (nested / "good.py").touch()
+        (nested / "bad.tmp").touch()
+        (nested / "cache").mkdir()
+
+        completions = list(
+            SlashCommandCompleter._path_completions(f"{nested}/")
+        )
+        names = _display_names(completions)
+        assert "good.py" in names
+        assert "bad.tmp" not in names
+        assert "cache/" not in names
+
     def test_context_completions_also_respect_gitignore(self, tmp_path):
         """Bare @ context completions should also filter gitignored entries."""
         import subprocess as sp

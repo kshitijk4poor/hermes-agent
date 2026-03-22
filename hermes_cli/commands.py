@@ -438,6 +438,8 @@ class SlashCommandCompleter(Completer):
         """Return the subset of *entries* ignored by ``.gitignore`` / ``.hermesignore``.
 
         Uses ``git check-ignore`` which honours all gitignore layers.
+        Also walks upward through ``.hermesignore`` files so nested ignore rules
+        are applied relative to the directory that defined them.
         Falls back to an empty set outside git repos or on any error.
         """
         if not entries:
@@ -460,26 +462,44 @@ class SlashCommandCompleter(Completer):
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-        hermesignore = os.path.join(search_dir, ".hermesignore")
-        if not os.path.isfile(hermesignore):
-            git_root = SlashCommandCompleter._find_git_root(search_dir)
-            if git_root:
-                hermesignore = os.path.join(git_root, ".hermesignore")
-
-        try:
-            with open(hermesignore) as f:
-                patterns = [
-                    line.strip() for line in f
-                    if line.strip() and not line.startswith("#")
-                ]
-            for entry in entries:
+        for ignore_dir, patterns in SlashCommandCompleter._hermesignore_patterns(search_dir):
+            rel_entries = [os.path.relpath(os.path.join(search_dir, entry), ignore_dir) for entry in entries]
+            for entry, rel_entry in zip(entries, rel_entries, strict=False):
                 for pattern in patterns:
-                    if _hermesignore_match(pattern, entry):
+                    if _hermesignore_match(pattern, entry) or _hermesignore_match(pattern, rel_entry):
                         ignored.add(entry)
-        except OSError:
-            pass
+                        break
 
         return ignored
+
+    @staticmethod
+    def _hermesignore_patterns(search_dir: str) -> list[tuple[str, list[str]]]:
+        """Collect ``.hermesignore`` patterns from ``search_dir`` and ancestors."""
+        patterns_by_dir: list[tuple[str, list[str]]] = []
+        current = os.path.abspath(search_dir)
+        git_root = SlashCommandCompleter._find_git_root(search_dir)
+        stop_dir = os.path.abspath(git_root) if git_root else os.path.abspath(os.sep)
+
+        while True:
+            ignore_file = os.path.join(current, ".hermesignore")
+            if os.path.isfile(ignore_file):
+                try:
+                    with open(ignore_file, encoding="utf-8") as f:
+                        patterns = [
+                            line.strip() for line in f
+                            if line.strip() and not line.startswith("#")
+                        ]
+                    patterns_by_dir.append((current, patterns))
+                except OSError:
+                    pass
+            if current == stop_dir:
+                break
+            parent = os.path.dirname(current)
+            if parent == current:
+                break
+            current = parent
+
+        return patterns_by_dir
 
     @staticmethod
     def _find_git_root(path: str) -> str | None:
