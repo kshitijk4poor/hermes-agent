@@ -272,20 +272,38 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
     details = [f"Credits balance: ${max(0.0, total_credits - total_usage):.2f}"]
     windows: list[AccountUsageWindow] = []
     limit = key_data.get("limit")
+    limit_remaining = key_data.get("limit_remaining")
+    limit_reset = str(key_data.get("limit_reset") or "").strip()
     usage = key_data.get("usage")
-    if isinstance(limit, (int, float)) and limit > 0 and isinstance(usage, (int, float)):
-        used_percent = (float(usage) / float(limit)) * 100
-        rate = key_data.get("rate_limit") or {}
-        detail = None
-        if rate.get("requests") and rate.get("interval"):
-            detail = f"{rate['requests']} requests / {rate['interval']}"
+    if (
+        isinstance(limit, (int, float))
+        and float(limit) > 0
+        and isinstance(limit_remaining, (int, float))
+        and 0 <= float(limit_remaining) <= float(limit)
+    ):
+        limit_value = float(limit)
+        remaining_value = float(limit_remaining)
+        used_percent = ((limit_value - remaining_value) / limit_value) * 100
+        detail_parts = [f"${remaining_value:.2f} of ${limit_value:.2f} remaining"]
+        if limit_reset:
+            detail_parts.append(f"resets {limit_reset}")
         windows.append(
             AccountUsageWindow(
                 label="API key quota",
                 used_percent=used_percent,
-                detail=detail,
+                detail=" • ".join(detail_parts),
             )
         )
+    if isinstance(usage, (int, float)):
+        usage_parts = [f"API key usage: ${float(usage):.2f} total"]
+        for value, label in (
+            (key_data.get("usage_daily"), "today"),
+            (key_data.get("usage_weekly"), "this week"),
+            (key_data.get("usage_monthly"), "this month"),
+        ):
+            if isinstance(value, (int, float)) and float(value) > 0:
+                usage_parts.append(f"${float(value):.2f} {label}")
+        details.append(" • ".join(usage_parts))
     return AccountUsageSnapshot(
         provider="openrouter",
         source="credits_api",
