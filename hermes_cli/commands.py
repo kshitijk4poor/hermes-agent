@@ -13,8 +13,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
@@ -325,6 +324,34 @@ def slack_subcommand_map() -> dict[str, str]:
 # Autocomplete
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class _PathToken:
+    raw: str
+    reference_prefix: str = ""
+    quote: str = ""
+    close_quote: bool = False
+    keep_escaped: bool = False
+    path: str = ""
+
+    def is_path_like(self) -> bool:
+        if self.reference_prefix:
+            return True
+        return self.path.startswith(("./", "../", "~/", "/")) or "/" in self.path
+
+    def lookup_word(self) -> str:
+        return self.path or "."
+
+    def render(self, path: str) -> str:
+        rendered = path
+        if self.keep_escaped:
+            rendered = re.sub(r'([\\\s])', r'\\\1', rendered)
+        if self.quote:
+            rendered = f"{self.quote}{rendered}"
+            if self.close_quote:
+                rendered += self.quote
+        return f"{self.reference_prefix}{rendered}"
+
+
 class SlashCommandCompleter(Completer):
     """Autocomplete for built-in slash commands, subcommands, and skill commands."""
 
@@ -406,15 +433,15 @@ class SlashCommandCompleter(Completer):
         return word
 
     @staticmethod
-    def _path_completions(word: str, limit: int = 30):
-        """Yield Completion objects for file paths matching *word*."""
-        parsed = SlashCommandCompleter._parse_path_token(word)
-        if parsed is None:
-            return
+    def _list_matching_entries(
+        lookup_word: str,
+    ) -> list[tuple[tuple[int, int, int, str], str, str, str, bool]]:
+        """List directory entries fuzzy-matching the basename of *lookup_word*.
 
-        lookup_word = parsed.lookup_word()
+        Returns a score-sorted list of
+        ``(score, entry, full_path, display_path, is_dir)`` tuples.
+        """
         expanded = os.path.expanduser(lookup_word)
-        # Split into directory part and prefix to match inside it
         if expanded.endswith("/"):
             search_dir = expanded
             prefix = ""
@@ -425,9 +452,9 @@ class SlashCommandCompleter(Completer):
         try:
             entries = os.listdir(search_dir)
         except OSError:
-            return
+            return []
 
-        matches: list[tuple[tuple[int, int, int, str], Completion]] = []
+        matches: list[tuple[tuple[int, int, int, str], str, str, str, bool]] = []
         for entry in sorted(entries):
             score = SlashCommandCompleter._fuzzy_match_score(entry, prefix)
             if score is None:
@@ -436,35 +463,40 @@ class SlashCommandCompleter(Completer):
             full_path = os.path.join(search_dir, entry)
             is_dir = os.path.isdir(full_path)
 
-            # Build the completion text (what replaces the typed word)
             if lookup_word.startswith("~"):
                 display_path = "~/" + os.path.relpath(full_path, os.path.expanduser("~"))
             elif os.path.isabs(lookup_word):
                 display_path = full_path
             else:
-                # Keep relative
                 display_path = os.path.relpath(full_path)
 
+            matches.append((score, entry, full_path, display_path, is_dir))
+
+        matches.sort(key=lambda item: item[0])
+        return matches
+
+    @staticmethod
+    def _path_completions(word: str, limit: int = 30):
+        """Yield Completion objects for file paths matching *word*."""
+        parsed = SlashCommandCompleter._parse_path_token(word)
+        if parsed is None:
+            return
+
+        for _score, entry, full_path, display_path, is_dir in (
+            SlashCommandCompleter._list_matching_entries(parsed.lookup_word())[:limit]
+        ):
             if is_dir:
                 display_path += "/"
 
             suffix = "/" if is_dir else ""
             meta = "dir" if is_dir else _file_size_label(full_path)
-            completion_text = parsed.render(display_path)
 
-            matches.append((
-                score,
-                Completion(
-                    completion_text,
-                    start_position=-len(word),
-                    display=entry + suffix,
-                    display_meta=meta,
-                ),
+            yield Completion(
+                parsed.render(display_path),
+                start_position=-len(word),
+                display=entry + suffix,
+                display_meta=meta,
             )
-            )
-
-        for _score, completion in sorted(matches, key=lambda item: item[0])[:limit]:
-            yield completion
 
     @staticmethod
     def _context_completions(word: str, limit: int = 30):
@@ -487,35 +519,9 @@ class SlashCommandCompleter(Completer):
                 )
 
         query = word[1:]
-        expanded = os.path.expanduser(query or ".")
-        if expanded.endswith("/"):
-            search_dir = expanded
-            prefix = ""
-        else:
-            search_dir = os.path.dirname(expanded) or "."
-            prefix = os.path.basename(expanded)
-
-        try:
-            entries = os.listdir(search_dir)
-        except OSError:
-            return
-
-        matches: list[tuple[tuple[int, int, int, str], Completion]] = []
-        for entry in sorted(entries):
-            score = SlashCommandCompleter._fuzzy_match_score(entry, prefix)
-            if score is None:
-                continue
-
-            full_path = os.path.join(search_dir, entry)
-            is_dir = os.path.isdir(full_path)
-
-            if query.startswith("~"):
-                display_path = "~/" + os.path.relpath(full_path, os.path.expanduser("~"))
-            elif os.path.isabs(query):
-                display_path = full_path
-            else:
-                display_path = os.path.relpath(full_path)
-
+        for _score, entry, full_path, display_path, is_dir in (
+            SlashCommandCompleter._list_matching_entries(query or ".")[:limit]
+        ):
             completion_text = SlashCommandCompleter._render_context_reference(
                 display_path,
                 is_dir=is_dir,
@@ -523,18 +529,12 @@ class SlashCommandCompleter(Completer):
             suffix = "/" if is_dir else ""
             meta = "context dir" if is_dir else f"context {_file_size_label(full_path)}".strip()
 
-            matches.append((
-                score,
-                Completion(
-                    completion_text,
-                    start_position=-len(word),
-                    display=entry + suffix,
-                    display_meta=meta,
-                ),
-            ))
-
-        for _score, completion in sorted(matches, key=lambda item: item[0])[:limit]:
-            yield completion
+            yield Completion(
+                completion_text,
+                start_position=-len(word),
+                display=entry + suffix,
+                display_meta=meta,
+            )
 
     @staticmethod
     def _render_context_reference(path: str, *, is_dir: bool) -> str:
@@ -542,13 +542,18 @@ class SlashCommandCompleter(Completer):
         prefix = "@folder:" if is_dir else "@file:"
         rendered_path = f"{path}/" if is_dir and not path.endswith("/") else path
 
-        if any(ch.isspace() for ch in rendered_path):
+        has_whitespace = any(ch.isspace() for ch in rendered_path)
+        if has_whitespace:
             if '"' not in rendered_path:
                 return f'{prefix}"{rendered_path}"'
             if "'" not in rendered_path:
                 return f"{prefix}'{rendered_path}'"
+            # Both quote types present -- escape backslashes first, then
+            # whitespace, so existing backslashes are not double-escaped.
+            rendered_path = rendered_path.replace("\\", "\\\\")
+            rendered_path = re.sub(r'(\s)', r'\\\1', rendered_path)
+            return f"{prefix}{rendered_path}"
 
-        rendered_path = re.sub(r'([\\\s])', r'\\\1', rendered_path)
         return f"{prefix}{rendered_path}"
 
     @staticmethod
@@ -732,34 +737,6 @@ class SlashCommandCompleter(Completer):
                     display=cmd,
                     display_meta=f"⚡ {short_desc}",
                 )
-
-
-@dataclass(frozen=True)
-class _PathToken:
-    raw: str
-    reference_prefix: str = ""
-    quote: str = ""
-    close_quote: bool = False
-    keep_escaped: bool = False
-    path: str = ""
-
-    def is_path_like(self) -> bool:
-        if self.reference_prefix:
-            return True
-        return self.path.startswith(("./", "../", "~/", "/")) or "/" in self.path
-
-    def lookup_word(self) -> str:
-        return self.path or "."
-
-    def render(self, path: str) -> str:
-        rendered = path
-        if self.keep_escaped:
-            rendered = re.sub(r'([\\\s])', r'\\\1', rendered)
-        if self.quote:
-            rendered = f"{self.quote}{rendered}"
-            if self.close_quote:
-                rendered += self.quote
-        return f"{self.reference_prefix}{rendered}"
 
 
 # ---------------------------------------------------------------------------

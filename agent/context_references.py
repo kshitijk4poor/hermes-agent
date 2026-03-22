@@ -320,8 +320,12 @@ def _resolve_path(cwd: Path, target: str, *, allowed_root: Path | None = None) -
     return resolved
 
 
+def _is_quoted(value: str) -> bool:
+    return len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}
+
+
 def _strip_trailing_punctuation(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+    if _is_quoted(value):
         return value
     stripped = value.rstrip(TRAILING_PUNCTUATION)
     while stripped.endswith((")", "]", "}")):
@@ -335,7 +339,7 @@ def _strip_trailing_punctuation(value: str) -> str:
 
 
 def _decode_reference_value(value: str) -> str:
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+    if _is_quoted(value):
         value = value[1:-1]
     return re.sub(r"\\(.)", r"\1", value)
 
