@@ -7,7 +7,12 @@ import pytest
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import to_plain_text
 
-from hermes_cli.commands import SlashCommandCompleter, _file_size_label
+from hermes_cli.commands import (
+    SlashCommandCompleter,
+    _file_size_label,
+    _hermesignore_match,
+    _token_estimate_label,
+)
 
 
 def _display_names(completions):
@@ -354,3 +359,131 @@ class TestFileSizeLabel:
 
     def test_nonexistent(self):
         assert _file_size_label("/nonexistent_xyz") == ""
+
+
+class TestTokenEstimateLabel:
+    def test_small_file(self, tmp_path):
+        f = tmp_path / "tiny.txt"
+        f.write_text("hello world")
+        label = _token_estimate_label(str(f))
+        assert label.startswith("~")
+        assert "tok" in label
+
+    def test_large_file(self, tmp_path):
+        f = tmp_path / "big.txt"
+        f.write_bytes(b"x" * 40_000)
+        label = _token_estimate_label(str(f))
+        assert "K tok" in label
+
+    def test_nonexistent(self):
+        assert _token_estimate_label("/nonexistent_xyz") == ""
+
+
+class TestHermesignoreMatch:
+    def test_exact_name(self):
+        assert _hermesignore_match("node_modules", "node_modules")
+        assert not _hermesignore_match("node_modules", "node_mod")
+
+    def test_directory_pattern(self):
+        assert _hermesignore_match("build/", "build")
+        assert not _hermesignore_match("build/", "builder")
+
+    def test_leading_wildcard(self):
+        assert _hermesignore_match("*.pyc", "test.pyc")
+        assert not _hermesignore_match("*.pyc", "test.py")
+
+    def test_trailing_wildcard(self):
+        assert _hermesignore_match("test_*", "test_foo")
+        assert not _hermesignore_match("test_*", "my_test")
+
+    def test_surrounding_wildcards(self):
+        assert _hermesignore_match("*cache*", "my_cache_dir")
+        assert not _hermesignore_match("*cache*", "my_dir")
+
+
+class TestIgnoredEntries:
+    def test_gitignored_files_excluded_from_completions(self, tmp_path):
+        """Files in .gitignore should not appear in completions."""
+        import subprocess as sp
+
+        sp.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        (tmp_path / ".gitignore").write_text("ignored.txt\n")
+        (tmp_path / "ignored.txt").touch()
+        (tmp_path / "visible.txt").touch()
+
+        completions = list(
+            SlashCommandCompleter._path_completions(f"{tmp_path}/")
+        )
+        names = _display_names(completions)
+        assert "visible.txt" in names
+        assert "ignored.txt" not in names
+
+    def test_hermesignore_excludes_files(self, tmp_path):
+        """Files matching .hermesignore patterns should not appear."""
+        import subprocess as sp
+
+        sp.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        (tmp_path / ".hermesignore").write_text("*.log\nsecrets/\n")
+        (tmp_path / "app.log").touch()
+        (tmp_path / "app.py").touch()
+        (tmp_path / "secrets").mkdir()
+
+        completions = list(
+            SlashCommandCompleter._path_completions(f"{tmp_path}/")
+        )
+        names = _display_names(completions)
+        assert "app.py" in names
+        assert "app.log" not in names
+        assert "secrets/" not in names
+
+    def test_context_completions_also_respect_gitignore(self, tmp_path):
+        """Bare @ context completions should also filter gitignored entries."""
+        import subprocess as sp
+
+        sp.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        (tmp_path / ".gitignore").write_text("node_modules\n")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "src").mkdir()
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            completions = list(SlashCommandCompleter._context_completions("@"))
+            names = _display_names(completions)
+        finally:
+            os.chdir(old_cwd)
+
+        assert "src/" in names
+        assert "node_modules/" not in names
+
+
+class TestStaticContextCompletions:
+    def test_includes_git_reference(self):
+        completions = list(SlashCommandCompleter._context_completions("@gi"))
+        texts = [c.text for c in completions]
+        assert "@git:" in texts
+
+    def test_includes_url_reference(self):
+        completions = list(SlashCommandCompleter._context_completions("@ur"))
+        texts = [c.text for c in completions]
+        assert "@url:" in texts
+
+    def test_all_static_refs_present(self):
+        completions = list(SlashCommandCompleter._context_completions("@"))
+        texts = [c.text for c in completions]
+        for expected in ("@diff", "@staged", "@file:", "@folder:", "@git:", "@url:"):
+            assert expected in texts
+
+    def test_context_completions_show_token_estimate(self, tmp_path):
+        target = tmp_path / "main.py"
+        target.write_text("print('hello')\n" * 100)
+
+        old_cwd = os.getcwd()
+        os.chdir(tmp_path)
+        try:
+            completions = list(SlashCommandCompleter._context_completions("@ma"))
+            metas = _display_metas(completions)
+        finally:
+            os.chdir(old_cwd)
+
+        assert any("tok" in m for m in metas)

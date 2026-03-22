@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -433,6 +434,71 @@ class SlashCommandCompleter(Completer):
         return word
 
     @staticmethod
+    def _ignored_entries(search_dir: str, entries: list[str]) -> set[str]:
+        """Return the subset of *entries* ignored by ``.gitignore`` / ``.hermesignore``.
+
+        Uses ``git check-ignore`` which honours all gitignore layers.
+        Falls back to an empty set outside git repos or on any error.
+        """
+        if not entries:
+            return set()
+        paths = [os.path.join(search_dir, e) for e in entries]
+        ignored: set[str] = set()
+        try:
+            result = subprocess.run(
+                ["git", "check-ignore", "--stdin", "-z"],
+                input="\0".join(paths),
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=search_dir,
+            )
+            if result.stdout:
+                for p in result.stdout.split("\0"):
+                    if p:
+                        ignored.add(os.path.basename(p))
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+        hermesignore = os.path.join(search_dir, ".hermesignore")
+        if not os.path.isfile(hermesignore):
+            git_root = SlashCommandCompleter._find_git_root(search_dir)
+            if git_root:
+                hermesignore = os.path.join(git_root, ".hermesignore")
+
+        try:
+            with open(hermesignore) as f:
+                patterns = [
+                    line.strip() for line in f
+                    if line.strip() and not line.startswith("#")
+                ]
+            for entry in entries:
+                for pattern in patterns:
+                    if _hermesignore_match(pattern, entry):
+                        ignored.add(entry)
+        except OSError:
+            pass
+
+        return ignored
+
+    @staticmethod
+    def _find_git_root(path: str) -> str | None:
+        """Return the git repo root for *path*, or None."""
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                cwd=path,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return None
+
+    @staticmethod
     def _list_matching_entries(
         lookup_word: str,
     ) -> list[tuple[tuple[int, int, int, str], str, str, str, bool]]:
@@ -440,6 +506,7 @@ class SlashCommandCompleter(Completer):
 
         Returns a score-sorted list of
         ``(score, entry, full_path, display_path, is_dir)`` tuples.
+        Entries ignored by ``.gitignore`` or ``.hermesignore`` are excluded.
         """
         expanded = os.path.expanduser(lookup_word)
         if expanded.endswith("/"):
@@ -454,8 +521,12 @@ class SlashCommandCompleter(Completer):
         except OSError:
             return []
 
+        ignored = SlashCommandCompleter._ignored_entries(search_dir, entries)
+
         matches: list[tuple[tuple[int, int, int, str], str, str, str, bool]] = []
         for entry in sorted(entries):
+            if entry in ignored:
+                continue
             score = SlashCommandCompleter._fuzzy_match_score(entry, prefix)
             if score is None:
                 continue
@@ -507,6 +578,8 @@ class SlashCommandCompleter(Completer):
             ("@staged", "Git staged diff"),
             ("@file:", "Attach a file"),
             ("@folder:", "Attach a folder"),
+            ("@git:", "Git log with diffs (e.g. @git:5)"),
+            ("@url:", "Fetch web content"),
         )
 
         for candidate, meta in static_refs:
@@ -527,7 +600,7 @@ class SlashCommandCompleter(Completer):
                 is_dir=is_dir,
             )
             suffix = "/" if is_dir else ""
-            meta = "context dir" if is_dir else f"context {_file_size_label(full_path)}".strip()
+            meta = "dir" if is_dir else _token_estimate_label(full_path)
 
             yield Completion(
                 completion_text,
@@ -823,6 +896,23 @@ class SlashCommandAutoSuggest(AutoSuggest):
         return None
 
 
+def _hermesignore_match(pattern: str, entry: str) -> bool:
+    """Check if *entry* matches a simple .hermesignore *pattern*.
+
+    Supports basic gitignore-style patterns: exact names, directory markers
+    (trailing ``/``), and leading/trailing ``*`` wildcards.
+    """
+    if pattern.endswith("/"):
+        return entry == pattern[:-1]
+    if pattern.startswith("*") and pattern.endswith("*"):
+        return pattern[1:-1] in entry
+    if pattern.startswith("*"):
+        return entry.endswith(pattern[1:])
+    if pattern.endswith("*"):
+        return entry.startswith(pattern[:-1])
+    return entry == pattern
+
+
 def _file_size_label(path: str) -> str:
     """Return a compact human-readable file size, or '' on error."""
     try:
@@ -836,3 +926,17 @@ def _file_size_label(path: str) -> str:
     if size < 1024 * 1024 * 1024:
         return f"{size / (1024 * 1024):.1f}M"
     return f"{size / (1024 * 1024 * 1024):.1f}G"
+
+
+def _token_estimate_label(path: str) -> str:
+    """Return a compact token estimate label (``~N tokens``), or file size as fallback."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return ""
+    tokens = max(1, size // 4)
+    if tokens < 1000:
+        return f"~{tokens} tok"
+    if tokens < 1_000_000:
+        return f"~{tokens / 1000:.1f}K tok"
+    return f"~{tokens / 1_000_000:.1f}M tok"
