@@ -5,9 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.clipboard import InMemoryClipboard
 from prompt_toolkit.document import Document
+from prompt_toolkit.input.vt100_parser import Vt100Parser
 from prompt_toolkit.key_binding import KeyBindings
 
 import cli
@@ -26,6 +28,49 @@ def test_register_word_delete_keybindings_wires_terminal_sequences():
             binding.handler(event)
 
     assert delete_previous_word.call_count == 3
+
+
+def test_install_ctrl_backspace_sequences_registers_modified_keycodes():
+    sequences = {}
+
+    cli._install_ctrl_backspace_input_sequences(
+        sequences,
+        terminfo_backspace=None,
+    )
+
+    for sequence in cli._CTRL_BACKSPACE_ESCAPE_SEQUENCES:
+        assert sequences[sequence] == cli._CTRL_BACKSPACE_KEYS
+
+
+@pytest.mark.parametrize(
+    ("terminfo_backspace", "ctrl_backspace_byte"),
+    [
+        (b"\x08", "\x7f"),
+        (b"\x7f", "\x08"),
+    ],
+)
+def test_install_ctrl_backspace_sequences_uses_terminfo_backspace_swap(
+    terminfo_backspace,
+    ctrl_backspace_byte,
+):
+    sequences = {}
+
+    cli._install_ctrl_backspace_input_sequences(
+        sequences,
+        terminfo_backspace=terminfo_backspace,
+    )
+
+    assert sequences[ctrl_backspace_byte] == cli._CTRL_BACKSPACE_KEYS
+
+
+def test_vt100_parser_maps_ctrl_backspace_csi_u_sequence():
+    key_presses = []
+    parser = Vt100Parser(key_presses.append)
+
+    parser.feed("\x1b[127;5u")
+    parser.flush()
+
+    assert [press.key for press in key_presses] == list(cli._CTRL_BACKSPACE_KEYS)
 
 
 def test_delete_previous_word_uses_prompt_toolkit_word_boundaries():

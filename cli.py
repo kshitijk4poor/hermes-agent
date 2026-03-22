@@ -49,6 +49,8 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
+from prompt_toolkit.keys import Keys
 from prompt_toolkit import print_formatted_text as _pt_print
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
 try:
@@ -69,6 +71,59 @@ from hermes_cli.banner import _format_context_length
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 _BACKWARD_KILL_WORD = get_by_name("backward-kill-word").handler
+_CTRL_BACKSPACE_KEYS = (Keys.Escape, Keys.ControlH)
+_CTRL_BACKSPACE_ESCAPE_SEQUENCES = (
+    "\x1b[127;5u",
+    "\x1b[8;5u",
+    "\x1b[27;5;127~",
+    "\x1b[27;5;8~",
+)
+
+
+def _detect_terminfo_backspace() -> bytes | None:
+    """Return the terminal's declared Backspace byte from terminfo, if known."""
+    term = os.getenv("TERM")
+    if not term:
+        return None
+
+    try:
+        import curses
+
+        curses.setupterm(term=term)
+        return curses.tigetstr("kbs")
+    except Exception:
+        return None
+
+
+def _install_ctrl_backspace_input_sequences(
+    ansi_sequences: dict[str, Keys | tuple[Keys, ...]] | None = None,
+    *,
+    terminfo_backspace: bytes | None = None,
+) -> None:
+    """Teach prompt_toolkit how to recognize Ctrl+Backspace input sequences.
+
+    Modern terminals may emit CSI-u or modifyOtherKeys sequences for
+    Ctrl+Backspace. Legacy terminals only expose ``\\x08`` and ``\\x7f``; in
+    that case terminfo's ``kbs`` tells us which byte is Backspace so we can
+    treat the other byte as the closest available Ctrl+Backspace signal.
+    """
+
+    sequences = ANSI_SEQUENCES if ansi_sequences is None else ansi_sequences
+
+    for sequence in _CTRL_BACKSPACE_ESCAPE_SEQUENCES:
+        sequences[sequence] = _CTRL_BACKSPACE_KEYS
+
+    if terminfo_backspace is None:
+        terminfo_backspace = _detect_terminfo_backspace()
+
+    # Legacy terminals often expose Backspace/Ctrl+Backspace as the two raw
+    # bytes ``\x08`` and ``\x7f``. ``kbs`` tells us which byte is the real
+    # Backspace key; treat the other byte as Ctrl+Backspace so the TUI matches
+    # the terminal's own key model as closely as legacy input allows.
+    if terminfo_backspace == b"\x08":
+        sequences["\x7f"] = _CTRL_BACKSPACE_KEYS
+    elif terminfo_backspace == b"\x7f":
+        sequences["\x08"] = _CTRL_BACKSPACE_KEYS
 
 
 def _delete_previous_word(event) -> None:
@@ -90,6 +145,9 @@ def _register_word_delete_keybindings(kb: KeyBindings) -> None:
     _bind("escape", "backspace")
     _bind("escape", "c-h")
     _bind("escape", "delete")
+
+
+_install_ctrl_backspace_input_sequences()
 
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
