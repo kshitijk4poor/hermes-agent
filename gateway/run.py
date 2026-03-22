@@ -3850,13 +3850,28 @@ class GatewayRunner:
         """Handle /usage command -- show token usage for the session's last agent run."""
         source = event.source
         session_key = self._session_key_for_source(source)
+        session_entry = self.session_store.get_or_create_session(source)
 
         agent = self._running_agents.get(session_key)
         account_lines: list[str] = []
         provider = getattr(agent, "provider", None)
         base_url = getattr(agent, "base_url", None)
         api_key = getattr(agent, "api_key", None)
-        account_snapshot = fetch_account_usage(provider, base_url=base_url, api_key=api_key)
+        if not provider and self._session_db and session_entry:
+            try:
+                persisted = self._session_db.get_session(session_entry.session_id) or {}
+            except Exception:
+                persisted = {}
+            provider = provider or persisted.get("billing_provider")
+            base_url = base_url or persisted.get("billing_base_url")
+        account_snapshot = None
+        if provider:
+            account_snapshot = await asyncio.to_thread(
+                fetch_account_usage,
+                provider,
+                base_url=base_url,
+                api_key=api_key,
+            )
         if account_snapshot:
             account_lines = render_account_usage_lines(account_snapshot, markdown=True)
 
@@ -3879,7 +3894,6 @@ class GatewayRunner:
             return "\n".join(lines)
 
         # No running agent -- check session history for a rough count
-        session_entry = self.session_store.get_or_create_session(source)
         history = self.session_store.load_transcript(session_entry.session_id)
         if history:
             from agent.model_metadata import estimate_messages_tokens_rough
