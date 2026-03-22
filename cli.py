@@ -48,6 +48,7 @@ from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.widgets import TextArea
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.key_binding.bindings.named_commands import get_by_name
 from prompt_toolkit import print_formatted_text as _pt_print
 from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
 try:
@@ -67,6 +68,28 @@ from agent.usage_pricing import (
 from hermes_cli.banner import _format_context_length
 
 _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_BACKWARD_KILL_WORD = get_by_name("backward-kill-word").handler
+
+
+def _delete_previous_word(event) -> None:
+    """Delete the previous word using prompt_toolkit's native semantics."""
+    _BACKWARD_KILL_WORD(event)
+
+
+def _register_word_delete_keybindings(kb: KeyBindings) -> None:
+    """Bind terminal word-delete sequences to prompt_toolkit's native handler."""
+
+    def _bind(*keys: str) -> None:
+        @kb.add(*keys)
+        def _delete_word(event) -> None:
+            _delete_previous_word(event)
+
+    # Many terminals emit Alt/Meta+Backspace or Esc-prefixed delete sequences
+    # for Ctrl+Backspace-style whole-word deletion. Bind them explicitly so the
+    # Hermes TUI behaves consistently inside the custom application wrapper.
+    _bind("escape", "backspace")
+    _bind("escape", "c-h")
+    _bind("escape", "delete")
 
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
@@ -5995,6 +6018,7 @@ class HermesCLI:
         
         # Key bindings for the input area
         kb = KeyBindings()
+        _register_word_delete_keybindings(kb)
         
         @kb.add('enter')
         def handle_enter(event):
