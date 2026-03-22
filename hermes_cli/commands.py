@@ -776,14 +776,14 @@ class SlashCommandCompleter(Completer):
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor
         if not text.startswith("/"):
+            context_word = self._extract_context_word(text)
+            if context_word is not None:
+                yield from self._context_completions(context_word)
+                return
             # Try file path completion for non-slash input
             path_word = self._extract_path_word(text)
             if path_word is not None:
                 yield from self._path_completions(path_word)
-                return
-            context_word = self._extract_context_word(text)
-            if context_word is not None:
-                yield from self._context_completions(context_word)
             return
 
         # Check if we're completing a subcommand (base command already typed)
