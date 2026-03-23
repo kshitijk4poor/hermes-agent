@@ -6,8 +6,10 @@ import os
 from typing import Any, Dict, Optional
 
 from hermes_cli import auth as auth_mod
+from agent.credential_pool import load_pool
 from hermes_cli.auth import (
     AuthError,
+    DEFAULT_CODEX_BASE_URL,
     PROVIDER_REGISTRY,
     format_auth_error,
     resolve_provider,
@@ -104,6 +106,48 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
         if normalized in _VALID_API_MODES:
             return normalized
     return None
+
+
+def _resolve_runtime_from_pool_entry(
+    *,
+    provider: str,
+    entry: Any,
+    requested_provider: str,
+    model_cfg: Optional[Dict[str, Any]] = None,
+    pool: Any = None,
+) -> Dict[str, Any]:
+    model_cfg = model_cfg or _get_model_config()
+    base_url = (getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or "").rstrip("/")
+    api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
+    api_mode = "chat_completions"
+    if provider == "openai-codex":
+        api_mode = "codex_responses"
+        base_url = base_url or DEFAULT_CODEX_BASE_URL
+    elif provider == "anthropic":
+        api_mode = "anthropic_messages"
+        base_url = base_url or "https://api.anthropic.com"
+    elif provider == "nous":
+        api_mode = "chat_completions"
+    elif provider == "copilot":
+        api_mode = _copilot_runtime_api_mode(model_cfg, getattr(entry, "runtime_api_key", ""))
+    else:
+        configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
+        if configured_mode:
+            api_mode = configured_mode
+        elif base_url.rstrip("/").endswith("/anthropic") or provider in ("minimax", "minimax-cn"):
+            api_mode = "anthropic_messages"
+            if base_url.rstrip("/").endswith("/v1"):
+                base_url = base_url.rstrip("/")[:-3] + "/anthropic"
+
+    return {
+        "provider": provider,
+        "api_mode": api_mode,
+        "base_url": base_url,
+        "api_key": api_key,
+        "source": getattr(entry, "source", "pool"),
+        "credential_pool": pool,
+        "requested_provider": requested_provider,
+    }
 
 
 def resolve_requested_provider(requested: Optional[str] = None) -> str:
@@ -313,6 +357,38 @@ def resolve_runtime_provider(
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
     )
+    model_cfg = _get_model_config()
+
+    should_use_pool = provider != "openrouter"
+    if provider == "openrouter":
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        cfg_base_url = str(model_cfg.get("base_url") or "").strip()
+        env_openai_base_url = os.getenv("OPENAI_BASE_URL", "").strip()
+        has_custom_endpoint = bool(explicit_base_url or env_openai_base_url)
+        if cfg_base_url and cfg_provider in {"auto", "custom"}:
+            has_custom_endpoint = True
+        should_use_pool = requested_provider == "openrouter" and not has_custom_endpoint
+
+    try:
+        pool = load_pool(provider) if should_use_pool else None
+    except Exception:
+        pool = None
+    if pool and pool.has_credentials():
+        entry = pool.select()
+        pool_api_key = ""
+        if entry is not None:
+            pool_api_key = (
+                getattr(entry, "runtime_api_key", None)
+                or getattr(entry, "access_token", "")
+            )
+        if entry is not None and pool_api_key:
+            return _resolve_runtime_from_pool_entry(
+                provider=provider,
+                entry=entry,
+                requested_provider=requested_provider,
+                model_cfg=model_cfg,
+                pool=pool,
+            )
 
     if provider == "nous":
         creds = resolve_nous_runtime_credentials(
@@ -385,7 +461,6 @@ def resolve_runtime_provider(
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
         creds = resolve_api_key_provider_credentials(provider)
-        model_cfg = _get_model_config()
         base_url = creds.get("base_url", "").rstrip("/")
         api_mode = "chat_completions"
         if provider == "copilot":

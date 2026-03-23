@@ -206,6 +206,31 @@ class TestAnthropicOAuthFlag:
             adapter = client.chat.completions
             assert adapter._is_oauth is False
 
+    def test_pool_entry_takes_priority_over_legacy_resolution(self):
+        class _Entry:
+            access_token = "sk-ant-oat01-pooled"
+            base_url = "https://api.anthropic.com"
+
+        class _Pool:
+            def has_credentials(self):
+                return True
+
+            def select(self):
+                return _Entry()
+
+        with (
+            patch("agent.auxiliary_client.load_pool", return_value=_Pool()),
+            patch("agent.anthropic_adapter.resolve_anthropic_token", side_effect=AssertionError("legacy path should not run")),
+            patch("agent.anthropic_adapter.build_anthropic_client", return_value=MagicMock()) as mock_build,
+        ):
+            from agent.auxiliary_client import _try_anthropic
+
+            client, model = _try_anthropic()
+
+        assert client is not None
+        assert model == "claude-haiku-4-5-20251001"
+        assert mock_build.call_args.args[0] == "sk-ant-oat01-pooled"
+
 
 class TestExpiredCodexFallback:
     """Test that expired Codex tokens don't block the auto chain."""
@@ -533,6 +558,32 @@ class TestGetTextAuxiliaryClient:
         from agent.auxiliary_client import CodexAuxiliaryClient
         assert isinstance(client, CodexAuxiliaryClient)
 
+    def test_codex_pool_entry_takes_priority_over_auth_store(self):
+        class _Entry:
+            access_token = "pooled-codex-token"
+            base_url = "https://chatgpt.com/backend-api/codex"
+
+        class _Pool:
+            def has_credentials(self):
+                return True
+
+            def select(self):
+                return _Entry()
+
+        with (
+            patch("agent.auxiliary_client.load_pool", return_value=_Pool()),
+            patch("agent.auxiliary_client.OpenAI"),
+            patch("hermes_cli.auth._read_codex_tokens", side_effect=AssertionError("legacy codex store should not run")),
+        ):
+            from agent.auxiliary_client import _try_codex
+
+            client, model = _try_codex()
+
+        from agent.auxiliary_client import CodexAuxiliaryClient
+
+        assert isinstance(client, CodexAuxiliaryClient)
+        assert model == "gpt-5.2-codex"
+
     def test_returns_none_when_nothing_available(self, monkeypatch):
         monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -580,6 +631,35 @@ class TestVisionClientFallback:
         assert client is not None
         assert client.__class__.__name__ == "AnthropicAuxiliaryClient"
         assert model == "claude-haiku-4-5-20251001"
+
+
+class TestAuxiliaryPoolAwareness:
+    def test_try_nous_uses_pool_entry(self):
+        class _Entry:
+            access_token = "pooled-access-token"
+            agent_key = "pooled-agent-key"
+            inference_base_url = "https://inference.pool.example/v1"
+
+        class _Pool:
+            def has_credentials(self):
+                return True
+
+            def select(self):
+                return _Entry()
+
+        with (
+            patch("agent.auxiliary_client.load_pool", return_value=_Pool()),
+            patch("agent.auxiliary_client.OpenAI") as mock_openai,
+        ):
+            from agent.auxiliary_client import _try_nous
+
+            client, model = _try_nous()
+
+        assert client is not None
+        assert model == "gemini-3-flash"
+        call_kwargs = mock_openai.call_args.kwargs
+        assert call_kwargs["api_key"] == "pooled-agent-key"
+        assert call_kwargs["base_url"] == "https://inference.pool.example/v1"
 
     def test_resolve_provider_client_copilot_uses_runtime_credentials(self, monkeypatch):
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)

@@ -418,6 +418,7 @@ class AIAgent:
         honcho_config=None,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
+        credential_pool=None,
         checkpoints_enabled: bool = False,
         checkpoint_max_snapshots: int = 50,
         pass_session_id: bool = False,
@@ -485,6 +486,7 @@ class AIAgent:
         self._print_fn = None
         self.skip_context_files = skip_context_files
         self.pass_session_id = pass_session_id
+        self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
         # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
@@ -3420,6 +3422,84 @@ class AIAgent:
         self._is_anthropic_oauth = _is_oauth_token(new_token)
         return True
 
+    def _apply_client_headers_for_base_url(self, base_url: str) -> None:
+        normalized = (base_url or "").lower()
+        if "openrouter" in normalized:
+            self._client_kwargs["default_headers"] = {
+                "HTTP-Referer": "https://hermes-agent.nousresearch.com",
+                "X-OpenRouter-Title": "Hermes Agent",
+                "X-OpenRouter-Categories": "productivity,cli-agent",
+            }
+        elif "api.githubcopilot.com" in normalized:
+            from hermes_cli.models import copilot_default_headers
+
+            self._client_kwargs["default_headers"] = copilot_default_headers()
+        elif "api.kimi.com" in normalized:
+            self._client_kwargs["default_headers"] = {"User-Agent": "KimiCLI/1.3"}
+        else:
+            self._client_kwargs.pop("default_headers", None)
+
+    def _swap_credential(self, entry) -> None:
+        runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
+        runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
+
+        if self.api_mode == "anthropic_messages":
+            from agent.anthropic_adapter import build_anthropic_client, _is_oauth_token
+
+            try:
+                self._anthropic_client.close()
+            except Exception:
+                pass
+
+            self._anthropic_api_key = runtime_key
+            self._anthropic_base_url = runtime_base
+            self._anthropic_client = build_anthropic_client(runtime_key, runtime_base)
+            self._is_anthropic_oauth = _is_oauth_token(runtime_key) if self.provider == "anthropic" else False
+            self.api_key = runtime_key
+            self.base_url = runtime_base
+            return
+
+        self.api_key = runtime_key
+        self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
+        self._client_kwargs["api_key"] = self.api_key
+        self._client_kwargs["base_url"] = self.base_url
+        self._apply_client_headers_for_base_url(self.base_url)
+        self._replace_primary_openai_client(reason="credential_rotation")
+
+    def _recover_with_credential_pool(
+        self,
+        *,
+        status_code: Optional[int],
+        retry_429_with_same_cred: bool,
+    ) -> tuple[bool, bool]:
+        pool = getattr(self, "_credential_pool", None)
+        if pool is None or status_code is None:
+            return False, retry_429_with_same_cred
+
+        if status_code == 402:
+            next_entry = pool.mark_exhausted_and_rotate(status_code=402)
+            if next_entry is not None:
+                self._swap_credential(next_entry)
+                return True, False
+            return False, retry_429_with_same_cred
+
+        if status_code == 429:
+            if not retry_429_with_same_cred:
+                return False, True
+            next_entry = pool.mark_exhausted_and_rotate(status_code=429)
+            if next_entry is not None:
+                self._swap_credential(next_entry)
+                return True, False
+            return False, True
+
+        if status_code == 401:
+            refreshed = pool.try_refresh_current()
+            if refreshed is not None:
+                self._swap_credential(refreshed)
+                return True, retry_429_with_same_cred
+
+        return False, retry_429_with_same_cred
+
     def _anthropic_messages_create(self, api_kwargs: dict):
         if self.api_mode == "anthropic_messages":
             self._try_refresh_anthropic_client_credentials()
@@ -5724,6 +5804,7 @@ class AIAgent:
             codex_auth_retry_attempted = False
             anthropic_auth_retry_attempted = False
             nous_auth_retry_attempted = False
+            retry_429_with_same_cred = False
             restart_with_compressed_messages = False
             restart_with_length_continuation = False
 
@@ -6101,6 +6182,12 @@ class AIAgent:
                         self.thinking_callback("")
 
                     status_code = getattr(api_error, "status_code", None)
+                    recovered_with_pool, retry_429_with_same_cred = self._recover_with_credential_pool(
+                        status_code=status_code,
+                        retry_429_with_same_cred=retry_429_with_same_cred,
+                    )
+                    if recovered_with_pool:
+                        continue
                     if (
                         self.api_mode == "codex_responses"
                         and self.provider == "openai-codex"
