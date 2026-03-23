@@ -125,7 +125,11 @@ def _resolve_runtime_from_pool_entry(
         base_url = base_url or DEFAULT_CODEX_BASE_URL
     elif provider == "anthropic":
         api_mode = "anthropic_messages"
-        base_url = base_url or "https://api.anthropic.com"
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        cfg_base_url = ""
+        if cfg_provider == "anthropic":
+            cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+        base_url = cfg_base_url or base_url or "https://api.anthropic.com"
     elif provider == "nous":
         api_mode = "chat_completions"
     elif provider == "copilot":
@@ -364,10 +368,20 @@ def resolve_runtime_provider(
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = str(model_cfg.get("base_url") or "").strip()
         env_openai_base_url = os.getenv("OPENAI_BASE_URL", "").strip()
-        has_custom_endpoint = bool(explicit_base_url or env_openai_base_url)
+        env_openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "").strip()
+        has_custom_endpoint = bool(
+            explicit_base_url
+            or env_openai_base_url
+            or env_openrouter_base_url
+        )
         if cfg_base_url and cfg_provider in {"auto", "custom"}:
             has_custom_endpoint = True
-        should_use_pool = requested_provider == "openrouter" and not has_custom_endpoint
+        has_runtime_override = bool(explicit_api_key or explicit_base_url)
+        should_use_pool = (
+            requested_provider == "openrouter"
+            and not has_custom_endpoint
+            and not has_runtime_override
+        )
 
     try:
         pool = load_pool(provider) if should_use_pool else None

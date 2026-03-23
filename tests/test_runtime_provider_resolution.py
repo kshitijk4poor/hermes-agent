@@ -25,6 +25,38 @@ def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     assert resolved["source"] == "manual"
 
 
+def test_resolve_runtime_provider_anthropic_pool_respects_config_base_url(monkeypatch):
+    class _Entry:
+        access_token = "pool-token"
+        source = "manual"
+        base_url = "https://api.anthropic.com"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "anthropic",
+            "base_url": "https://proxy.example.com/anthropic",
+        },
+    )
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+
+    resolved = rp.resolve_runtime_provider(requested="anthropic")
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["api_key"] == "pool-token"
+    assert resolved["base_url"] == "https://proxy.example.com/anthropic"
+
+
 def test_resolve_runtime_provider_falls_back_when_pool_empty(monkeypatch):
     class _Pool:
         def has_credentials(self):
@@ -108,6 +140,39 @@ def test_resolve_runtime_provider_openrouter_explicit(monkeypatch):
     assert resolved["api_key"] == "test-key"
     assert resolved["base_url"] == "https://example.com/v1"
     assert resolved["source"] == "explicit"
+
+
+def test_resolve_runtime_provider_openrouter_explicit_api_key_skips_pool(monkeypatch):
+    class _Entry:
+        access_token = "pool-key"
+        source = "manual"
+        base_url = "https://openrouter.ai/api/v1"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    resolved = rp.resolve_runtime_provider(
+        requested="openrouter",
+        explicit_api_key="explicit-key",
+    )
+
+    assert resolved["provider"] == "openrouter"
+    assert resolved["api_key"] == "explicit-key"
+    assert resolved["base_url"] == rp.OPENROUTER_BASE_URL
+    assert resolved["source"] == "explicit"
+    assert resolved.get("credential_pool") is None
 
 
 def test_resolve_runtime_provider_openrouter_ignores_codex_config_base_url(monkeypatch):
@@ -406,6 +471,36 @@ def test_explicit_openrouter_skips_openai_base_url(monkeypatch):
     assert "openrouter.ai" in resolved["base_url"]
     assert "my-custom-llm" not in resolved["base_url"]
     assert resolved["api_key"] == "or-test-key"
+
+
+def test_explicit_openrouter_honors_openrouter_base_url_over_pool(monkeypatch):
+    class _Entry:
+        access_token = "pool-key"
+        source = "manual"
+        base_url = "https://openrouter.ai/api/v1"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.setenv("OPENROUTER_BASE_URL", "https://mirror.example.com/v1")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "mirror-key")
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="openrouter")
+
+    assert resolved["provider"] == "openrouter"
+    assert resolved["base_url"] == "https://mirror.example.com/v1"
+    assert resolved["api_key"] == "mirror-key"
+    assert resolved["source"] == "env/config"
+    assert resolved.get("credential_pool") is None
 
 
 def test_resolve_requested_provider_precedence(monkeypatch):

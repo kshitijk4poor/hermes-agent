@@ -658,10 +658,25 @@ def clear_provider_auth(provider_id: Optional[str] = None) -> bool:
             return False
 
         providers = auth_store.get("providers", {})
-        if target not in providers:
-            return False
+        if not isinstance(providers, dict):
+            providers = {}
+            auth_store["providers"] = providers
 
-        del providers[target]
+        pool = auth_store.get("credential_pool")
+        if not isinstance(pool, dict):
+            pool = {}
+            auth_store["credential_pool"] = pool
+
+        cleared = False
+        if target in providers:
+            del providers[target]
+            cleared = True
+        if target in pool:
+            del pool[target]
+            cleared = True
+
+        if not cleared:
+            return False
         if auth_store.get("active_provider") == target:
             auth_store["active_provider"] = None
         _save_auth_store(auth_store)

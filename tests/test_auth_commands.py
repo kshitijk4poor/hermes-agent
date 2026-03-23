@@ -266,3 +266,49 @@ def test_auth_reset_clears_provider_statuses(tmp_path, monkeypatch, capsys):
     assert entry["last_status"] is None
     assert entry["last_status_at"] is None
     assert entry["last_error_code"] is None
+
+
+def test_clear_provider_auth_removes_provider_pool_entries(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "active_provider": "anthropic",
+            "providers": {
+                "anthropic": {"access_token": "legacy-token"},
+            },
+            "credential_pool": {
+                "anthropic": [
+                    {
+                        "id": "cred-1",
+                        "label": "primary",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "manual:hermes_pkce",
+                        "access_token": "pool-token",
+                    }
+                ],
+                "openrouter": [
+                    {
+                        "id": "cred-2",
+                        "label": "other-provider",
+                        "auth_type": "api_key",
+                        "priority": 0,
+                        "source": "manual",
+                        "access_token": "sk-or-test",
+                    }
+                ],
+            },
+        },
+    )
+
+    from hermes_cli.auth import clear_provider_auth
+
+    assert clear_provider_auth("anthropic") is True
+
+    payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    assert payload["active_provider"] is None
+    assert "anthropic" not in payload.get("providers", {})
+    assert "anthropic" not in payload.get("credential_pool", {})
+    assert "openrouter" in payload.get("credential_pool", {})

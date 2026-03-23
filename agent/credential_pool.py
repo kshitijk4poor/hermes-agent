@@ -110,6 +110,11 @@ def _next_priority(entries: List[PooledCredential]) -> int:
     return max((entry.priority for entry in entries), default=-1) + 1
 
 
+def _is_manual_source(source: str) -> bool:
+    normalized = (source or "").strip().lower()
+    return normalized == "manual" or normalized.startswith("manual:")
+
+
 class CredentialPool:
     def __init__(self, provider: str, entries: List[PooledCredential]):
         self.provider = provider
@@ -337,7 +342,15 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> bool:
     if pconfig.base_url_env_var:
         env_url = os.getenv(pconfig.base_url_env_var, "").strip().rstrip("/")
 
-    for env_var in pconfig.api_key_env_vars:
+    env_vars = list(pconfig.api_key_env_vars)
+    if provider == "anthropic":
+        env_vars = [
+            "ANTHROPIC_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+        ]
+
+    for env_var in env_vars:
         token = os.getenv(env_var, "").strip()
         if not token:
             continue
@@ -355,6 +368,38 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> bool:
                 "label": env_var,
             },
         )
+    return changed
+
+
+def _normalize_pool_priorities(provider: str, entries: List[PooledCredential]) -> bool:
+    if provider != "anthropic":
+        return False
+
+    source_rank = {
+        "env:ANTHROPIC_TOKEN": 0,
+        "env:CLAUDE_CODE_OAUTH_TOKEN": 1,
+        "hermes_pkce": 2,
+        "claude_code": 3,
+        "env:ANTHROPIC_API_KEY": 4,
+    }
+    manual_entries = sorted(
+        (entry for entry in entries if _is_manual_source(entry.source)),
+        key=lambda entry: entry.priority,
+    )
+    seeded_entries = sorted(
+        (entry for entry in entries if not _is_manual_source(entry.source)),
+        key=lambda entry: (
+            source_rank.get(entry.source, len(source_rank)),
+            entry.priority,
+            entry.label,
+        ),
+    )
+
+    changed = False
+    for new_priority, entry in enumerate([*manual_entries, *seeded_entries]):
+        if entry.priority != new_priority:
+            entry.priority = new_priority
+            changed = True
     return changed
 
 
@@ -448,6 +493,7 @@ def load_pool(provider: str) -> CredentialPool:
     entries = [PooledCredential.from_dict(provider, payload) for payload in raw_entries]
     changed = _seed_from_singletons(provider, entries)
     changed |= _seed_from_env(provider, entries)
+    changed |= _normalize_pool_priorities(provider, entries)
     if changed:
         write_credential_pool(
             provider,
