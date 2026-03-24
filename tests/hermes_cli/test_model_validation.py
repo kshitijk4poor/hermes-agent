@@ -181,6 +181,10 @@ class TestProviderModelIds:
 
         assert ids
         assert "cursor-acp" not in ids
+        assert "GPT-5.4" in ids
+        assert "Claude 4.6 Sonnet" in ids
+        assert "Gemini 3.1 Pro" in ids
+        assert "Composer 2" in ids
 
 
 # -- fetch_api_models --------------------------------------------------------

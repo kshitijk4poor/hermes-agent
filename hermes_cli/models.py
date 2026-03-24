@@ -25,6 +25,44 @@ COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
 GITHUB_MODELS_BASE_URL = COPILOT_BASE_URL
 GITHUB_MODELS_CATALOG_URL = COPILOT_MODELS_URL
 
+# Cursor ACP fallback model hints mirror the public models table in:
+# https://cursor.com/docs/models-and-pricing
+# These are only used when the live Cursor catalog is unavailable.
+CURSOR_FALLBACK_MODELS: list[str] = [
+    "Composer 2",
+    "Composer 2 (Fast)",
+    "Composer 1.5",
+    "Composer 1",
+    "Claude 4.6 Opus",
+    "Claude 4.6 Opus (Fast mode)",
+    "Claude 4.6 Sonnet",
+    "Claude 4 Sonnet",
+    "Claude 4 Sonnet 1M",
+    "Claude 4.5 Opus",
+    "Claude 4.5 Sonnet",
+    "Claude 4.5 Haiku",
+    "GPT-5.4",
+    "GPT-5.4 Mini",
+    "GPT-5.4 Nano",
+    "GPT-5.3 Codex",
+    "GPT-5.2",
+    "GPT-5.2 Codex",
+    "GPT-5.1 Codex",
+    "GPT-5.1 Codex Max",
+    "GPT-5.1 Codex Mini",
+    "GPT-5-Codex",
+    "GPT-5",
+    "GPT-5 Fast",
+    "GPT-5 Mini",
+    "Gemini 3.1 Pro",
+    "Gemini 3 Pro",
+    "Gemini 3 Pro Image Preview",
+    "Gemini 3 Flash",
+    "Gemini 2.5 Flash",
+    "Grok 4.20",
+    "Kimi K2.5",
+]
+
 # (model_id, display description shown in menus)
 OPENROUTER_MODELS: list[tuple[str, str]] = [
     ("anthropic/claude-opus-4.6",       "recommended"),
@@ -70,11 +108,7 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "copilot-acp": [
         "copilot-acp",
     ],
-    "cursor-acp": [
-        "gpt-5",
-        "claude-4-sonnet",
-        "gemini-2.5-pro",
-    ],
+    "cursor-acp": list(CURSOR_FALLBACK_MODELS),
     "copilot": [
         "gpt-5.4",
         "gpt-5.4-mini",

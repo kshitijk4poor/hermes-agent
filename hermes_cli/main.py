@@ -58,6 +58,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # User-managed env files should override stale shell exports on restart.
 from hermes_cli.config import get_hermes_home
 from hermes_cli.env_loader import load_hermes_dotenv
+from hermes_cli.models import CURSOR_FALLBACK_MODELS
 load_hermes_dotenv(project_env=PROJECT_ROOT / '.env')
 
 # Point mini-swe-agent at ~/.hermes/ so it shares our config
@@ -1456,11 +1457,7 @@ _PROVIDER_MODELS = {
     "copilot-acp": [
         "copilot-acp",
     ],
-    "cursor-acp": [
-        "gpt-5",
-        "claude-4-sonnet",
-        "gemini-2.5-pro",
-    ],
+    "cursor-acp": list(CURSOR_FALLBACK_MODELS),
     "copilot": [
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -1897,7 +1894,7 @@ def _model_flow_cursor_acp(config, current_model=""):
         get_external_process_provider_status,
         resolve_external_process_provider_credentials,
     )
-    from hermes_cli.models import provider_model_ids
+    from hermes_cli.models import _fetch_cursor_models
     from hermes_cli.config import load_config, save_config
 
     del config
@@ -1924,9 +1921,17 @@ def _model_flow_cursor_acp(config, current_model=""):
         return
 
     effective_base = creds.get("base_url") or effective_base
-    model_list = provider_model_ids(provider_id)
+    live_models = _fetch_cursor_models()
+    if live_models:
+        model_list = live_models
+        print(f"  Found {len(model_list)} model(s) from Cursor API")
+    else:
+        model_list = list(CURSOR_FALLBACK_MODELS)
+        if model_list:
+            print("  ⚠ Could not auto-detect models from Cursor API — showing documented defaults.")
+            print('    Use "Enter custom model name" if you do not see your model.')
+
     if model_list:
-        print(f"  Found {len(model_list)} model(s) for Cursor ACP")
         selected = _prompt_model_selection(
             model_list,
             current_model=current_model,

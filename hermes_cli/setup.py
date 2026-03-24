@@ -22,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
+from hermes_cli.models import CURSOR_FALLBACK_MODELS
+
 
 def _model_config_dict(config: Dict[str, Any]) -> Dict[str, Any]:
     current_model = config.get("model")
@@ -58,11 +60,7 @@ _DEFAULT_PROVIDER_MODELS = {
     "copilot-acp": [
         "copilot-acp",
     ],
-    "cursor-acp": [
-        "gpt-5",
-        "claude-4-sonnet",
-        "gemini-2.5-pro",
-    ],
+    "cursor-acp": list(CURSOR_FALLBACK_MODELS),
     "copilot": [
         "gpt-5.4",
         "gpt-5.4-mini",
