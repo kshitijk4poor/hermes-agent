@@ -57,6 +57,42 @@ def test_resolve_runtime_provider_anthropic_pool_respects_config_base_url(monkey
     assert resolved["base_url"] == "https://proxy.example.com/anthropic"
 
 
+def test_resolve_runtime_provider_anthropic_explicit_override_skips_pool(monkeypatch):
+    def _unexpected_pool(provider):
+        raise AssertionError(f"load_pool should not be called for {provider}")
+
+    def _unexpected_anthropic_token():
+        raise AssertionError("resolve_anthropic_token should not be called")
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "anthropic")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "anthropic",
+            "base_url": "https://config.example.com/anthropic",
+        },
+    )
+    monkeypatch.setattr(rp, "load_pool", _unexpected_pool)
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.resolve_anthropic_token",
+        _unexpected_anthropic_token,
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="anthropic",
+        explicit_api_key="anthropic-explicit-token",
+        explicit_base_url="https://proxy.example.com/anthropic/",
+    )
+
+    assert resolved["provider"] == "anthropic"
+    assert resolved["api_mode"] == "anthropic_messages"
+    assert resolved["api_key"] == "anthropic-explicit-token"
+    assert resolved["base_url"] == "https://proxy.example.com/anthropic"
+    assert resolved["source"] == "explicit"
+    assert resolved.get("credential_pool") is None
+
+
 def test_resolve_runtime_provider_falls_back_when_pool_empty(monkeypatch):
     class _Pool:
         def has_credentials(self):
@@ -119,6 +155,36 @@ def test_resolve_runtime_provider_ai_gateway(monkeypatch):
     assert resolved["base_url"] == "https://ai-gateway.vercel.sh/v1"
     assert resolved["api_key"] == "test-ai-gw-key"
     assert resolved["requested_provider"] == "ai-gateway"
+
+
+def test_resolve_runtime_provider_ai_gateway_explicit_override_skips_pool(monkeypatch):
+    def _unexpected_pool(provider):
+        raise AssertionError(f"load_pool should not be called for {provider}")
+
+    def _unexpected_provider_resolution(provider):
+        raise AssertionError(f"resolve_api_key_provider_credentials should not be called for {provider}")
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "ai-gateway")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setattr(rp, "load_pool", _unexpected_pool)
+    monkeypatch.setattr(
+        rp,
+        "resolve_api_key_provider_credentials",
+        _unexpected_provider_resolution,
+    )
+
+    resolved = rp.resolve_runtime_provider(
+        requested="ai-gateway",
+        explicit_api_key="ai-gateway-explicit-token",
+        explicit_base_url="https://proxy.example.com/v1/",
+    )
+
+    assert resolved["provider"] == "ai-gateway"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["api_key"] == "ai-gateway-explicit-token"
+    assert resolved["base_url"] == "https://proxy.example.com/v1"
+    assert resolved["source"] == "explicit"
+    assert resolved.get("credential_pool") is None
 
 
 def test_resolve_runtime_provider_openrouter_explicit(monkeypatch):

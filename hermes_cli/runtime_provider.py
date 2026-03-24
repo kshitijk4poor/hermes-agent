@@ -338,6 +338,138 @@ def _resolve_openrouter_runtime(
     }
 
 
+def _resolve_explicit_runtime(
+    *,
+    provider: str,
+    requested_provider: str,
+    model_cfg: Dict[str, Any],
+    explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    explicit_api_key = str(explicit_api_key or "").strip()
+    explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
+    if not explicit_api_key and not explicit_base_url:
+        return None
+
+    if provider == "anthropic":
+        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
+        cfg_base_url = ""
+        if cfg_provider == "anthropic":
+            cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+        base_url = explicit_base_url or cfg_base_url or "https://api.anthropic.com"
+        api_key = explicit_api_key
+        if not api_key:
+            from agent.anthropic_adapter import resolve_anthropic_token
+
+            api_key = resolve_anthropic_token()
+            if not api_key:
+                raise AuthError(
+                    "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
+                    "run 'claude setup-token', or authenticate with 'claude /login'."
+                )
+        return {
+            "provider": "anthropic",
+            "api_mode": "anthropic_messages",
+            "base_url": base_url,
+            "api_key": api_key,
+            "source": "explicit",
+            "requested_provider": requested_provider,
+        }
+
+    if provider == "openai-codex":
+        base_url = explicit_base_url or DEFAULT_CODEX_BASE_URL
+        api_key = explicit_api_key
+        last_refresh = None
+        if not api_key:
+            creds = resolve_codex_runtime_credentials()
+            api_key = creds.get("api_key", "")
+            last_refresh = creds.get("last_refresh")
+            if not explicit_base_url:
+                base_url = creds.get("base_url", "").rstrip("/") or base_url
+        return {
+            "provider": "openai-codex",
+            "api_mode": "codex_responses",
+            "base_url": base_url,
+            "api_key": api_key,
+            "source": "explicit",
+            "last_refresh": last_refresh,
+            "requested_provider": requested_provider,
+        }
+
+    if provider == "nous":
+        state = auth_mod.get_provider_auth_state("nous") or {}
+        base_url = (
+            explicit_base_url
+            or str(state.get("inference_base_url") or auth_mod.DEFAULT_NOUS_INFERENCE_URL).strip().rstrip("/")
+        )
+        api_key = explicit_api_key or str(state.get("agent_key") or state.get("access_token") or "").strip()
+        expires_at = state.get("agent_key_expires_at") or state.get("expires_at")
+        if not api_key:
+            creds = resolve_nous_runtime_credentials(
+                min_key_ttl_seconds=max(60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800"))),
+                timeout_seconds=float(os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
+            )
+            api_key = creds.get("api_key", "")
+            expires_at = creds.get("expires_at")
+            if not explicit_base_url:
+                base_url = creds.get("base_url", "").rstrip("/") or base_url
+        return {
+            "provider": "nous",
+            "api_mode": "chat_completions",
+            "base_url": base_url,
+            "api_key": api_key,
+            "source": "explicit",
+            "expires_at": expires_at,
+            "requested_provider": requested_provider,
+        }
+
+    pconfig = PROVIDER_REGISTRY.get(provider)
+    if pconfig and pconfig.auth_type == "api_key":
+        env_url = ""
+        if pconfig.base_url_env_var:
+            env_url = os.getenv(pconfig.base_url_env_var, "").strip().rstrip("/")
+
+        base_url = explicit_base_url
+        if not base_url:
+            if provider == "kimi-coding":
+                creds = resolve_api_key_provider_credentials(provider)
+                base_url = creds.get("base_url", "").rstrip("/")
+            else:
+                base_url = env_url or pconfig.inference_base_url
+
+        api_key = explicit_api_key
+        if not api_key:
+            creds = resolve_api_key_provider_credentials(provider)
+            api_key = creds.get("api_key", "")
+            if not base_url:
+                base_url = creds.get("base_url", "").rstrip("/")
+
+        api_mode = "chat_completions"
+        if provider == "copilot":
+            api_mode = _copilot_runtime_api_mode(model_cfg, api_key)
+        else:
+            configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
+            if configured_mode:
+                api_mode = configured_mode
+            elif base_url.rstrip("/").endswith("/anthropic"):
+                api_mode = "anthropic_messages"
+            elif provider in ("minimax", "minimax-cn"):
+                api_mode = "anthropic_messages"
+                if base_url.rstrip("/").endswith("/v1"):
+                    base_url = base_url.rstrip("/")[:-3] + "/anthropic"
+
+        return {
+            "provider": provider,
+            "api_mode": api_mode,
+            "base_url": base_url.rstrip("/"),
+            "api_key": api_key,
+            "source": "explicit",
+            "requested_provider": requested_provider,
+        }
+
+    return None
+
+
 def resolve_runtime_provider(
     *,
     requested: Optional[str] = None,
@@ -362,6 +494,15 @@ def resolve_runtime_provider(
         explicit_base_url=explicit_base_url,
     )
     model_cfg = _get_model_config()
+    explicit_runtime = _resolve_explicit_runtime(
+        provider=provider,
+        requested_provider=requested_provider,
+        model_cfg=model_cfg,
+        explicit_api_key=explicit_api_key,
+        explicit_base_url=explicit_base_url,
+    )
+    if explicit_runtime:
+        return explicit_runtime
 
     should_use_pool = provider != "openrouter"
     if provider == "openrouter":

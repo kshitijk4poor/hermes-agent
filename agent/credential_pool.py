@@ -7,7 +7,7 @@ import time
 import uuid
 import os
 from dataclasses import dataclass, fields, replace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from hermes_constants import OPENROUTER_BASE_URL
 import hermes_cli.auth as auth_mod
@@ -387,62 +387,6 @@ def _upsert_entry(entries: List[PooledCredential], provider: str, source: str, p
     return False
 
 
-def _seed_from_env(provider: str, entries: List[PooledCredential]) -> bool:
-    changed = False
-    if provider == "openrouter":
-        token = os.getenv("OPENROUTER_API_KEY", "").strip()
-        if token:
-            changed |= _upsert_entry(
-                entries,
-                provider,
-                "env:OPENROUTER_API_KEY",
-                {
-                    "source": "env:OPENROUTER_API_KEY",
-                    "auth_type": AUTH_TYPE_API_KEY,
-                    "access_token": token,
-                    "base_url": OPENROUTER_BASE_URL,
-                    "label": "OPENROUTER_API_KEY",
-                },
-            )
-        return changed
-
-    pconfig = PROVIDER_REGISTRY.get(provider)
-    if not pconfig or pconfig.auth_type != AUTH_TYPE_API_KEY:
-        return changed
-
-    env_url = ""
-    if pconfig.base_url_env_var:
-        env_url = os.getenv(pconfig.base_url_env_var, "").strip().rstrip("/")
-
-    env_vars = list(pconfig.api_key_env_vars)
-    if provider == "anthropic":
-        env_vars = [
-            "ANTHROPIC_TOKEN",
-            "CLAUDE_CODE_OAUTH_TOKEN",
-            "ANTHROPIC_API_KEY",
-        ]
-
-    for env_var in env_vars:
-        token = os.getenv(env_var, "").strip()
-        if not token:
-            continue
-        auth_type = AUTH_TYPE_OAUTH if provider == "anthropic" and not token.startswith("sk-ant-api") else AUTH_TYPE_API_KEY
-        base_url = env_url or pconfig.inference_base_url
-        changed |= _upsert_entry(
-            entries,
-            provider,
-            f"env:{env_var}",
-            {
-                "source": f"env:{env_var}",
-                "auth_type": auth_type,
-                "access_token": token,
-                "base_url": base_url,
-                "label": env_var,
-            },
-        )
-    return changed
-
-
 def _normalize_pool_priorities(provider: str, entries: List[PooledCredential]) -> bool:
     if provider != "anthropic":
         return False
@@ -477,8 +421,9 @@ def _normalize_pool_priorities(provider: str, entries: List[PooledCredential]) -
     return changed
 
 
-def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> bool:
+def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> Tuple[bool, Set[str]]:
     changed = False
+    active_sources: Set[str] = set()
     auth_store = _load_auth_store()
 
     if provider == "anthropic":
@@ -486,6 +431,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
 
         hermes_creds = read_hermes_oauth_credentials()
         if hermes_creds and hermes_creds.get("accessToken"):
+            active_sources.add("hermes_pkce")
             changed |= _upsert_entry(
                 entries,
                 provider,
@@ -501,6 +447,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
             )
         claude_creds = read_claude_code_credentials()
         if claude_creds and claude_creds.get("accessToken"):
+            active_sources.add("claude_code")
             changed |= _upsert_entry(
                 entries,
                 provider,
@@ -518,6 +465,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
     elif provider == "nous":
         state = _load_provider_state(auth_store, "nous")
         if state:
+            active_sources.add("device_code")
             changed |= _upsert_entry(
                 entries,
                 provider,
@@ -535,6 +483,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                     "inference_base_url": state.get("inference_base_url"),
                     "agent_key": state.get("agent_key"),
                     "agent_key_expires_at": state.get("agent_key_expires_at"),
+                    "tls": state.get("tls") if isinstance(state.get("tls"), dict) else None,
                     "label": label_from_token(state.get("access_token", ""), "device_code"),
                 },
             )
@@ -543,6 +492,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
         state = _load_provider_state(auth_store, "openai-codex")
         tokens = state.get("tokens") if isinstance(state, dict) else None
         if isinstance(tokens, dict) and tokens.get("access_token"):
+            active_sources.add("device_code")
             changed |= _upsert_entry(
                 entries,
                 provider,
@@ -558,15 +508,95 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                 },
             )
 
-    return changed
+    return changed, active_sources
+
+
+def _seed_from_env(provider: str, entries: List[PooledCredential]) -> Tuple[bool, Set[str]]:
+    changed = False
+    active_sources: Set[str] = set()
+    if provider == "openrouter":
+        token = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if token:
+            source = "env:OPENROUTER_API_KEY"
+            active_sources.add(source)
+            changed |= _upsert_entry(
+                entries,
+                provider,
+                source,
+                {
+                    "source": source,
+                    "auth_type": AUTH_TYPE_API_KEY,
+                    "access_token": token,
+                    "base_url": OPENROUTER_BASE_URL,
+                    "label": "OPENROUTER_API_KEY",
+                },
+            )
+        return changed, active_sources
+
+    pconfig = PROVIDER_REGISTRY.get(provider)
+    if not pconfig or pconfig.auth_type != AUTH_TYPE_API_KEY:
+        return changed, active_sources
+
+    env_url = ""
+    if pconfig.base_url_env_var:
+        env_url = os.getenv(pconfig.base_url_env_var, "").strip().rstrip("/")
+
+    env_vars = list(pconfig.api_key_env_vars)
+    if provider == "anthropic":
+        env_vars = [
+            "ANTHROPIC_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+        ]
+
+    for env_var in env_vars:
+        token = os.getenv(env_var, "").strip()
+        if not token:
+            continue
+        source = f"env:{env_var}"
+        active_sources.add(source)
+        auth_type = AUTH_TYPE_OAUTH if provider == "anthropic" and not token.startswith("sk-ant-api") else AUTH_TYPE_API_KEY
+        base_url = env_url or pconfig.inference_base_url
+        changed |= _upsert_entry(
+            entries,
+            provider,
+            source,
+            {
+                "source": source,
+                "auth_type": auth_type,
+                "access_token": token,
+                "base_url": base_url,
+                "label": env_var,
+            },
+        )
+    return changed, active_sources
+
+
+def _prune_stale_seeded_entries(entries: List[PooledCredential], active_sources: Set[str]) -> bool:
+    retained = [
+        entry
+        for entry in entries
+        if _is_manual_source(entry.source)
+        or entry.source in active_sources
+        or not (
+            entry.source.startswith("env:")
+            or entry.source in {"claude_code", "hermes_pkce"}
+        )
+    ]
+    if len(retained) == len(entries):
+        return False
+    entries[:] = retained
+    return True
 
 
 def load_pool(provider: str) -> CredentialPool:
     provider = (provider or "").strip().lower()
     raw_entries = read_credential_pool(provider)
     entries = [PooledCredential.from_dict(provider, payload) for payload in raw_entries]
-    changed = _seed_from_singletons(provider, entries)
-    changed |= _seed_from_env(provider, entries)
+    singleton_changed, singleton_sources = _seed_from_singletons(provider, entries)
+    env_changed, env_sources = _seed_from_env(provider, entries)
+    changed = singleton_changed or env_changed
+    changed |= _prune_stale_seeded_entries(entries, singleton_sources | env_sources)
     changed |= _normalize_pool_priorities(provider, entries)
     if changed:
         write_credential_pool(

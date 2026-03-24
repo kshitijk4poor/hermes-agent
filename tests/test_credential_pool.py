@@ -214,6 +214,39 @@ def test_load_pool_seeds_env_api_key(tmp_path, monkeypatch):
     assert entry.access_token == "sk-or-seeded"
 
 
+def test_load_pool_removes_stale_seeded_env_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "openrouter": [
+                    {
+                        "id": "seeded-env",
+                        "label": "OPENROUTER_API_KEY",
+                        "auth_type": "api_key",
+                        "priority": 0,
+                        "source": "env:OPENROUTER_API_KEY",
+                        "access_token": "stale-token",
+                        "base_url": "https://openrouter.ai/api/v1",
+                    }
+                ]
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("openrouter")
+
+    assert pool.entries() == []
+
+    auth_payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    assert auth_payload["credential_pool"]["openrouter"] == []
+
+
 def test_load_pool_migrates_nous_provider_state(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     _write_auth_store(
@@ -247,6 +280,97 @@ def test_load_pool_migrates_nous_provider_state(tmp_path, monkeypatch):
     assert entry.source == "device_code"
     assert entry.portal_base_url == "https://portal.example.com"
     assert entry.agent_key == "agent-key"
+
+
+def test_load_pool_removes_stale_file_backed_singleton_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_TOKEN", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "credential_pool": {
+                "anthropic": [
+                    {
+                        "id": "seeded-file",
+                        "label": "claude-code",
+                        "auth_type": "oauth",
+                        "priority": 0,
+                        "source": "claude_code",
+                        "access_token": "stale-access-token",
+                        "refresh_token": "stale-refresh-token",
+                        "expires_at_ms": int(time.time() * 1000) + 60_000,
+                    }
+                ]
+            },
+        },
+    )
+
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.read_hermes_oauth_credentials",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        "agent.anthropic_adapter.read_claude_code_credentials",
+        lambda: None,
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("anthropic")
+
+    assert pool.entries() == []
+
+    auth_payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    assert auth_payload["credential_pool"]["anthropic"] == []
+
+
+def test_load_pool_migrates_nous_provider_state_preserves_tls(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(
+        tmp_path,
+        {
+            "version": 1,
+            "active_provider": "nous",
+            "providers": {
+                "nous": {
+                    "portal_base_url": "https://portal.example.com",
+                    "inference_base_url": "https://inference.example.com/v1",
+                    "client_id": "hermes-cli",
+                    "token_type": "Bearer",
+                    "scope": "inference:mint_agent_key",
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "expires_at": "2026-03-24T12:00:00+00:00",
+                    "agent_key": "agent-key",
+                    "agent_key_expires_at": "2026-03-24T13:30:00+00:00",
+                    "tls": {
+                        "insecure": True,
+                        "ca_bundle": "/tmp/nous-ca.pem",
+                    },
+                }
+            },
+        },
+    )
+
+    from agent.credential_pool import load_pool
+
+    pool = load_pool("nous")
+    entry = pool.select()
+
+    assert entry is not None
+    assert entry.tls == {
+        "insecure": True,
+        "ca_bundle": "/tmp/nous-ca.pem",
+    }
+
+    auth_payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    assert auth_payload["credential_pool"]["nous"][0]["tls"] == {
+        "insecure": True,
+        "ca_bundle": "/tmp/nous-ca.pem",
+    }
 
 
 def test_singleton_seed_does_not_clobber_manual_oauth_entry(tmp_path, monkeypatch):
