@@ -11,7 +11,7 @@ from agent.credential_pool import (
     SOURCE_MANUAL,
     STATUS_EXHAUSTED,
     PooledCredential,
-    _label_from_token,
+    label_from_token,
     load_pool,
 )
 import hermes_cli.auth as auth_mod
@@ -88,7 +88,7 @@ def auth_add_command(args) -> None:
         creds = anthropic_mod.run_hermes_oauth_login_pure()
         if not creds:
             raise SystemExit("Anthropic OAuth login did not return credentials.")
-        label = (getattr(args, "label", None) or "").strip() or _label_from_token(
+        label = (getattr(args, "label", None) or "").strip() or label_from_token(
             creds["access_token"],
             _oauth_default_label(provider, len(pool.entries()) + 1),
         )
@@ -120,7 +120,7 @@ def auth_add_command(args) -> None:
             ca_bundle=getattr(args, "ca_bundle", None),
             min_key_ttl_seconds=max(60, int(getattr(args, "min_key_ttl_seconds", 5 * 60))),
         )
-        label = (getattr(args, "label", None) or "").strip() or _label_from_token(
+        label = (getattr(args, "label", None) or "").strip() or label_from_token(
             creds.get("access_token", ""),
             _oauth_default_label(provider, len(pool.entries()) + 1),
         )
@@ -137,7 +137,7 @@ def auth_add_command(args) -> None:
 
     if provider == "openai-codex":
         creds = auth_mod._codex_device_code_login()
-        label = (getattr(args, "label", None) or "").strip() or _label_from_token(
+        label = (getattr(args, "label", None) or "").strip() or label_from_token(
             creds["tokens"]["access_token"],
             _oauth_default_label(provider, len(pool.entries()) + 1),
         )

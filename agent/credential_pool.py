@@ -11,8 +11,6 @@ from typing import Any, Dict, List, Optional
 
 from hermes_constants import OPENROUTER_BASE_URL
 import hermes_cli.auth as auth_mod
-
-logger = logging.getLogger(__name__)
 from hermes_cli.auth import (
     ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -27,6 +25,8 @@ from hermes_cli.auth import (
     read_credential_pool,
     write_credential_pool,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # --- Status and type constants ---
@@ -115,7 +115,7 @@ class PooledCredential:
         return self.base_url
 
 
-def _label_from_token(token: str, fallback: str) -> str:
+def label_from_token(token: str, fallback: str) -> str:
     claims = _decode_jwt_claims(token)
     for key in ("email", "preferred_username", "upn"):
         value = claims.get(key)
@@ -274,13 +274,14 @@ class CredentialPool:
 
     def select(self) -> Optional[PooledCredential]:
         now = time.time()
-        for idx, entry in enumerate(self._entries):
+        for entry in self._entries:
             if entry.last_status == STATUS_EXHAUSTED:
                 ttl = _exhausted_ttl(entry.last_error_code)
                 if entry.last_status_at and now - entry.last_status_at < ttl:
                     continue
-                entry = replace(entry, last_status=STATUS_OK, last_status_at=None, last_error_code=None)
-                self._entries[idx] = entry
+                cleared = replace(entry, last_status=STATUS_OK, last_status_at=None, last_error_code=None)
+                self._replace_entry(entry, cleared)
+                entry = cleared
                 self._persist()
             if self._entry_needs_refresh(entry):
                 refreshed = self._refresh_entry(entry, force=False)
@@ -358,14 +359,20 @@ class CredentialPool:
 
 
 def _upsert_entry(entries: List[PooledCredential], provider: str, source: str, payload: Dict[str, Any]) -> bool:
-    existing = next((entry for entry in entries if entry.source == source), None)
-    if existing is None:
+    existing_idx = None
+    for idx, entry in enumerate(entries):
+        if entry.source == source:
+            existing_idx = idx
+            break
+
+    if existing_idx is None:
         payload.setdefault("id", uuid.uuid4().hex[:6])
         payload.setdefault("priority", _next_priority(entries))
         payload.setdefault("label", payload.get("label") or source)
         entries.append(PooledCredential.from_dict(provider, payload))
         return True
 
+    existing = entries[existing_idx]
     updates = {}
     for key, value in payload.items():
         if key in {"id", "priority"} or value is None:
@@ -375,8 +382,7 @@ def _upsert_entry(entries: List[PooledCredential], provider: str, source: str, p
         if hasattr(existing, key) and getattr(existing, key) != value:
             updates[key] = value
     if updates:
-        idx = entries.index(existing)
-        entries[idx] = replace(existing, **updates)
+        entries[existing_idx] = replace(existing, **updates)
         return True
     return False
 
@@ -401,7 +407,7 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> bool:
         return changed
 
     pconfig = PROVIDER_REGISTRY.get(provider)
-    if not pconfig or pconfig.auth_type != "api_key":
+    if not pconfig or pconfig.auth_type != AUTH_TYPE_API_KEY:
         return changed
 
     env_url = ""
@@ -462,13 +468,12 @@ def _normalize_pool_priorities(provider: str, entries: List[PooledCredential]) -
     )
 
     ordered = [*manual_entries, *seeded_entries]
+    id_to_idx = {entry.id: idx for idx, entry in enumerate(entries)}
     changed = False
     for new_priority, entry in enumerate(ordered):
         if entry.priority != new_priority:
+            entries[id_to_idx[entry.id]] = replace(entry, priority=new_priority)
             changed = True
-    if changed:
-        for idx, entry in enumerate(ordered):
-            entries[entries.index(entry)] = replace(entry, priority=idx)
     return changed
 
 
@@ -491,7 +496,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                     "access_token": hermes_creds.get("accessToken", ""),
                     "refresh_token": hermes_creds.get("refreshToken"),
                     "expires_at_ms": hermes_creds.get("expiresAt"),
-                    "label": _label_from_token(hermes_creds.get("accessToken", ""), "hermes_pkce"),
+                    "label": label_from_token(hermes_creds.get("accessToken", ""), "hermes_pkce"),
                 },
             )
         claude_creds = read_claude_code_credentials()
@@ -506,7 +511,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                     "access_token": claude_creds.get("accessToken", ""),
                     "refresh_token": claude_creds.get("refreshToken"),
                     "expires_at_ms": claude_creds.get("expiresAt"),
-                    "label": _label_from_token(claude_creds.get("accessToken", ""), "claude_code"),
+                    "label": label_from_token(claude_creds.get("accessToken", ""), "claude_code"),
                 },
             )
 
@@ -530,7 +535,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                     "inference_base_url": state.get("inference_base_url"),
                     "agent_key": state.get("agent_key"),
                     "agent_key_expires_at": state.get("agent_key_expires_at"),
-                    "label": _label_from_token(state.get("access_token", ""), "device_code"),
+                    "label": label_from_token(state.get("access_token", ""), "device_code"),
                 },
             )
 
@@ -549,7 +554,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                     "refresh_token": tokens.get("refresh_token"),
                     "base_url": "https://chatgpt.com/backend-api/codex",
                     "last_refresh": state.get("last_refresh"),
-                    "label": _label_from_token(tokens.get("access_token", ""), "device_code"),
+                    "label": label_from_token(tokens.get("access_token", ""), "device_code"),
                 },
             )
 
