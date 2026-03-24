@@ -23,7 +23,7 @@ import sys
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 
-from gateway.config import Platform, PlatformConfig
+from gateway.config import MessageCoalescingConfig, Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
 from hermes_cli.config import get_hermes_home
 
@@ -328,6 +328,15 @@ class SendResult:
     raw_response: Any = None
 
 
+@dataclass
+class PendingCoalescedMessages:
+    """Buffered inbound messages waiting to be coalesced into one turn."""
+
+    events: List[MessageEvent] = field(default_factory=list)
+    first_received_at: float = 0.0
+    last_received_at: float = 0.0
+
+
 # Type for message handlers
 MessageHandler = Callable[[MessageEvent], Awaitable[Optional[str]]]
 
@@ -357,6 +366,8 @@ class BasePlatformAdapter(ABC):
         # Key: session_key (e.g., chat_id), Value: (event, asyncio.Event for interrupt)
         self._active_sessions: Dict[str, asyncio.Event] = {}
         self._pending_messages: Dict[str, MessageEvent] = {}
+        self._pending_coalesced_messages: Dict[str, PendingCoalescedMessages] = {}
+        self._pending_coalescing_tasks: Dict[str, asyncio.Task] = {}
         # Background message-processing tasks spawned by handle_message().
         # Gateway shutdown cancels these so an old gateway instance doesn't keep
         # working on a task after --replace or manual restarts.
@@ -835,8 +846,202 @@ class BasePlatformAdapter(ABC):
             event.source,
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
         )
-        
-        # Check if there's already an active handler for this session
+
+        coalescing = self._get_message_coalescing_config()
+
+        if event.is_command():
+            self._clear_coalesced_message(session_key)
+            await self._handle_message_now(event, session_key)
+            return
+
+        if self._should_coalesce_event(event, coalescing):
+            self._append_coalesced_message(session_key, event)
+            if session_key in self._active_sessions:
+                self._active_sessions[session_key].set()
+                return
+            self._schedule_coalesced_flush(session_key, coalescing)
+            try:
+                thread_metadata = {"thread_id": event.source.thread_id} if event.source.thread_id else None
+                await self.send_typing(event.source.chat_id, metadata=thread_metadata)
+            except Exception:
+                pass
+            return
+
+        if session_key not in self._active_sessions:
+            coalesced_event = self._pop_coalesced_event(session_key)
+            if coalesced_event is not None:
+                await self._handle_message_now(coalesced_event, session_key)
+
+        await self._handle_message_now(event, session_key)
+
+    def _get_message_coalescing_config(self) -> MessageCoalescingConfig:
+        """Resolve adapter-level inbound message coalescing settings."""
+        raw = self.config.extra.get("message_coalescing")
+        if raw is None:
+            return MessageCoalescingConfig(enabled=False)
+        if isinstance(raw, MessageCoalescingConfig):
+            return raw
+        if not isinstance(raw, dict):
+            return MessageCoalescingConfig(enabled=False)
+        return MessageCoalescingConfig.from_dict(raw)
+
+    @staticmethod
+    def _should_coalesce_event(
+        event: MessageEvent,
+        config: MessageCoalescingConfig,
+    ) -> bool:
+        """Return True when an inbound event should wait for a quiet period."""
+        if not config.enabled:
+            return False
+        if event.is_command():
+            return False
+        if event.message_type != MessageType.TEXT:
+            return False
+        if event.media_urls:
+            return False
+        if config.multi_user_only and event.source.chat_type == "dm":
+            return False
+        return bool((event.text or "").strip())
+
+    def _append_coalesced_message(
+        self,
+        session_key: str,
+        event: MessageEvent,
+    ) -> PendingCoalescedMessages:
+        """Append an inbound message to a session's pending coalesced batch."""
+        now = asyncio.get_running_loop().time()
+        batch = self._pending_coalesced_messages.get(session_key)
+        if batch is None:
+            batch = PendingCoalescedMessages(
+                events=[event],
+                first_received_at=now,
+                last_received_at=now,
+            )
+            self._pending_coalesced_messages[session_key] = batch
+            return batch
+
+        batch.events.append(event)
+        batch.last_received_at = now
+        return batch
+
+    def _schedule_coalesced_flush(
+        self,
+        session_key: str,
+        config: MessageCoalescingConfig,
+    ) -> None:
+        """Reset the debounce timer for an idle coalesced batch."""
+        batch = self._pending_coalesced_messages.get(session_key)
+        if batch is None:
+            return
+
+        prior_task = self._pending_coalescing_tasks.pop(session_key, None)
+        if prior_task and not prior_task.done():
+            prior_task.cancel()
+
+        elapsed_ms = max(
+            0,
+            int((asyncio.get_running_loop().time() - batch.first_received_at) * 1000),
+        )
+        remaining_cap_ms = max(0, config.max_wait_ms - elapsed_ms)
+        delay_ms = config.debounce_ms
+        if len(batch.events) < config.min_messages:
+            delay_ms = min(delay_ms, 350)
+        if config.max_wait_ms > 0:
+            delay_ms = min(delay_ms, remaining_cap_ms)
+
+        self._pending_coalescing_tasks[session_key] = asyncio.create_task(
+            self._flush_coalesced_message_after(session_key, delay_ms / 1000.0)
+        )
+
+    async def _flush_coalesced_message_after(self, session_key: str, delay_seconds: float) -> None:
+        """Wait for the coalescing window, then dispatch the merged event."""
+        current_task = asyncio.current_task()
+        try:
+            await asyncio.sleep(max(0.0, delay_seconds))
+            event = self._pop_coalesced_event(session_key)
+            if event is None:
+                return
+            await self._handle_message_now(event, session_key)
+        finally:
+            if self._pending_coalescing_tasks.get(session_key) is current_task:
+                self._pending_coalescing_tasks.pop(session_key, None)
+
+    def _pop_coalesced_event(self, session_key: str) -> Optional[MessageEvent]:
+        """Return the current coalesced event and clear any pending timer."""
+        current_task = asyncio.current_task()
+        task = self._pending_coalescing_tasks.pop(session_key, None)
+        if task and task is not current_task and not task.done():
+            task.cancel()
+
+        batch = self._pending_coalesced_messages.pop(session_key, None)
+        if batch is None:
+            return None
+        return self._build_coalesced_event(batch)
+
+    def _clear_coalesced_message(self, session_key: str) -> None:
+        """Drop any pending coalesced inbound batch for a session."""
+        self._pending_coalesced_messages.pop(session_key, None)
+        task = self._pending_coalescing_tasks.pop(session_key, None)
+        if task and not task.done():
+            task.cancel()
+
+    def _build_coalesced_event(self, batch: PendingCoalescedMessages) -> MessageEvent:
+        """Format a pending batch into a single MessageEvent."""
+        if len(batch.events) == 1:
+            return batch.events[0]
+
+        latest = batch.events[-1]
+        elapsed_seconds = max(0.0, batch.last_received_at - batch.first_received_at)
+        include_hint = self._get_message_coalescing_config().include_hint
+        unique_senders = {
+            event.source.user_id or event.source.user_name or ""
+            for event in batch.events
+            if event.source
+        }
+        include_sender = latest.source.chat_type != "dm" or len(unique_senders) > 1
+
+        lines: List[str] = []
+        for item in batch.events:
+            text = (item.text or "").strip() or "[empty message]"
+            timestamp = item.timestamp.strftime("%H:%M:%S")
+            if include_sender:
+                sender = item.source.user_name or item.source.user_id or "User"
+                lines.append(f"[{timestamp}] {sender}: {text}")
+            else:
+                lines.append(f"[{timestamp}] {text}")
+
+        parts: List[str] = []
+        if include_hint:
+            summary = (
+                f"{len(batch.events)} rapid messages arrived over {elapsed_seconds:.1f}s. "
+                "Treat them as one turn and respond to the overall request."
+            )
+            if len(unique_senders) > 1:
+                summary += f" {len(unique_senders)} participants are involved."
+            parts.extend([summary, ""])
+        parts.extend(lines)
+
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        for item in batch.events:
+            media_urls.extend(item.media_urls)
+            media_types.extend(item.media_types)
+
+        return MessageEvent(
+            text="\n\n".join(parts).strip(),
+            message_type=latest.message_type,
+            source=latest.source,
+            raw_message=latest.raw_message,
+            message_id=latest.message_id,
+            media_urls=media_urls,
+            media_types=media_types,
+            reply_to_message_id=latest.reply_to_message_id,
+            reply_to_text=latest.reply_to_text,
+            timestamp=latest.timestamp,
+        )
+
+    async def _handle_message_now(self, event: MessageEvent, session_key: str) -> None:
+        """Dispatch an inbound event immediately using interrupt-aware session logic."""
         if session_key in self._active_sessions:
             # Special case: photo bursts/albums frequently arrive as multiple near-
             # simultaneous messages. Queue them without interrupting the active run,
@@ -854,22 +1059,20 @@ class BasePlatformAdapter(ABC):
                             existing.text = f"{existing.text}\n\n{event.text}".strip()
                 else:
                     self._pending_messages[session_key] = event
-                return  # Don't interrupt now - will run after current task completes
+                return
 
-            # Default behavior for non-photo follow-ups: interrupt the running agent
             print(f"[{self.name}] ⚡ New message while session {session_key} is active - triggering interrupt")
             self._pending_messages[session_key] = event
-            # Signal the interrupt (the processing task checks this)
             self._active_sessions[session_key].set()
-            return  # Don't process now - will be handled after current task finishes
-        
-        # Spawn background task to process this message
-        task = asyncio.create_task(self._process_message_background(event, session_key))
+            return
+
+        interrupt_event = asyncio.Event()
+        self._active_sessions[session_key] = interrupt_event
+        task = asyncio.create_task(self._process_message_background(event, session_key, interrupt_event))
         try:
             self._background_tasks.add(task)
         except TypeError:
-            # Some tests stub create_task() with lightweight sentinels that are not
-            # hashable and do not support lifecycle callbacks.
+            self._active_sessions.pop(session_key, None)
             return
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
@@ -895,10 +1098,15 @@ class BasePlatformAdapter(ABC):
             min_ms, max_ms = 800, 2500
         return random.uniform(min_ms / 1000.0, max_ms / 1000.0)
 
-    async def _process_message_background(self, event: MessageEvent, session_key: str) -> None:
+    async def _process_message_background(
+        self,
+        event: MessageEvent,
+        session_key: str,
+        interrupt_event: Optional[asyncio.Event] = None,
+    ) -> None:
         """Background task that actually processes the message."""
-        # Create interrupt event for this session
-        interrupt_event = asyncio.Event()
+        if interrupt_event is None:
+            interrupt_event = asyncio.Event()
         self._active_sessions[session_key] = interrupt_event
         
         # Start continuous typing indicator (refreshes every 2 seconds)
@@ -1088,8 +1296,10 @@ class BasePlatformAdapter(ABC):
                         logger.error("[%s] Error sending local file %s: %s", self.name, file_path, file_err)
 
             # Check if there's a pending message that was queued during our processing
-            if session_key in self._pending_messages:
-                pending_event = self._pending_messages.pop(session_key)
+            pending_event = self._pending_messages.pop(session_key, None)
+            if pending_event is None:
+                pending_event = self._pop_coalesced_event(session_key)
+            if pending_event is not None:
                 print(f"[{self.name}] 📨 Processing queued message from interrupt")
                 # Clean up current session before processing pending
                 if session_key in self._active_sessions:
@@ -1147,6 +1357,14 @@ class BasePlatformAdapter(ABC):
             await asyncio.gather(*tasks, return_exceptions=True)
         self._background_tasks.clear()
         self._pending_messages.clear()
+        pending_coalescing_tasks = list(self._pending_coalescing_tasks.values())
+        for task in pending_coalescing_tasks:
+            if not task.done():
+                task.cancel()
+        if pending_coalescing_tasks:
+            await asyncio.gather(*pending_coalescing_tasks, return_exceptions=True)
+        self._pending_coalescing_tasks.clear()
+        self._pending_coalesced_messages.clear()
         self._active_sessions.clear()
 
     def has_pending_interrupt(self, session_key: str) -> bool:

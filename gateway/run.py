@@ -1282,6 +1282,7 @@ class GatewayRunner:
                 "group_sessions_per_user",
                 self.config.group_sessions_per_user,
             )
+            config.extra["message_coalescing"] = self.config.get_message_coalescing(platform).to_dict()
 
         if platform == Platform.TELEGRAM:
             from gateway.platforms.telegram import TelegramAdapter, check_telegram_requirements

@@ -333,6 +333,18 @@ DEFAULT_CONFIG = {
         "auto_thread": True,           # Auto-create threads on @mention in channels (like Slack)
     },
 
+    # Gateway inbound message batching for rapid-fire chat messages.
+    # Hermes coalesces by session key, so group chats still respect
+    # group_sessions_per_user unless the user disables it separately.
+    "message_coalescing": {
+        "enabled": True,
+        "debounce_ms": 1500,
+        "max_wait_ms": 5000,
+        "min_messages": 2,
+        "multi_user_only": True,
+        "include_hint": True,
+    },
+
     # WhatsApp platform settings (gateway mode)
     "whatsapp": {
         # Reply prefix prepended to every outgoing WhatsApp message.
@@ -373,7 +385,7 @@ DEFAULT_CONFIG = {
     },
 
     # Config schema version - bump this when adding new required fields
-    "_config_version": 10,
+    "_config_version": 11,
 }
 
 # =============================================================================

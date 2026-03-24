@@ -41,6 +41,16 @@ def _normalize_unauthorized_dm_behavior(value: Any, default: str = "pair") -> st
     return default
 
 
+def _coerce_non_negative_int(value: Any, default: int = 0) -> int:
+    """Coerce a config value to a non-negative integer, falling back safely."""
+    if value is None:
+        return default
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 class Platform(Enum):
     """Supported messaging platforms."""
     LOCAL = "local"
@@ -201,6 +211,62 @@ class StreamingConfig:
 
 
 @dataclass
+class MessageCoalescingConfig:
+    """Configuration for batching rapid inbound gateway messages into one turn."""
+
+    enabled: bool = True
+    debounce_ms: int = 1500
+    max_wait_ms: int = 5000
+    min_messages: int = 2
+    multi_user_only: bool = True
+    include_hint: bool = True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "debounce_ms": self.debounce_ms,
+            "max_wait_ms": self.max_wait_ms,
+            "min_messages": self.min_messages,
+            "multi_user_only": self.multi_user_only,
+            "include_hint": self.include_hint,
+        }
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: Optional[Dict[str, Any]],
+        *,
+        defaults: Optional["MessageCoalescingConfig"] = None,
+    ) -> "MessageCoalescingConfig":
+        base = defaults or cls()
+        if not isinstance(data, dict):
+            return cls(
+                enabled=base.enabled,
+                debounce_ms=base.debounce_ms,
+                max_wait_ms=base.max_wait_ms,
+                min_messages=base.min_messages,
+                multi_user_only=base.multi_user_only,
+                include_hint=base.include_hint,
+            )
+
+        debounce_ms = _coerce_non_negative_int(data.get("debounce_ms"), base.debounce_ms)
+        max_wait_ms = _coerce_non_negative_int(data.get("max_wait_ms"), base.max_wait_ms)
+        min_messages = max(1, _coerce_non_negative_int(data.get("min_messages"), base.min_messages))
+
+        if max_wait_ms < debounce_ms:
+            max_wait_ms = debounce_ms
+
+        return cls(
+            enabled=_coerce_bool(data.get("enabled"), base.enabled),
+            debounce_ms=debounce_ms,
+            max_wait_ms=max_wait_ms,
+            min_messages=min_messages,
+            multi_user_only=_coerce_bool(data.get("multi_user_only"), base.multi_user_only),
+            include_hint=_coerce_bool(data.get("include_hint"), base.include_hint),
+        )
+
+
+@dataclass
 class GatewayConfig:
     """
     Main gateway configuration.
@@ -232,6 +298,9 @@ class GatewayConfig:
 
     # Session isolation in shared chats
     group_sessions_per_user: bool = True  # Isolate group/channel sessions per participant when user IDs are available
+
+    # Inbound message coalescing
+    message_coalescing: MessageCoalescingConfig = field(default_factory=MessageCoalescingConfig)
 
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
@@ -313,6 +382,7 @@ class GatewayConfig:
             "always_log_local": self.always_log_local,
             "stt_enabled": self.stt_enabled,
             "group_sessions_per_user": self.group_sessions_per_user,
+            "message_coalescing": self.message_coalescing.to_dict(),
             "unauthorized_dm_behavior": self.unauthorized_dm_behavior,
             "streaming": self.streaming.to_dict(),
         }
@@ -356,6 +426,7 @@ class GatewayConfig:
             stt_enabled = data.get("stt", {}).get("enabled") if isinstance(data.get("stt"), dict) else None
 
         group_sessions_per_user = data.get("group_sessions_per_user")
+        message_coalescing = MessageCoalescingConfig.from_dict(data.get("message_coalescing"))
         unauthorized_dm_behavior = _normalize_unauthorized_dm_behavior(
             data.get("unauthorized_dm_behavior"),
             "pair",
@@ -372,8 +443,27 @@ class GatewayConfig:
             always_log_local=data.get("always_log_local", True),
             stt_enabled=_coerce_bool(stt_enabled, True),
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
+            message_coalescing=message_coalescing,
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
+        )
+
+    def get_message_coalescing(self, platform: Optional[Platform] = None) -> MessageCoalescingConfig:
+        """Return the effective coalescing config for a platform."""
+        if not platform:
+            return MessageCoalescingConfig.from_dict(
+                self.message_coalescing.to_dict(),
+                defaults=self.message_coalescing,
+            )
+
+        platform_cfg = self.platforms.get(platform)
+        platform_override = None
+        if platform_cfg and isinstance(platform_cfg.extra, dict):
+            platform_override = platform_cfg.extra.get("message_coalescing")
+
+        return MessageCoalescingConfig.from_dict(
+            platform_override,
+            defaults=self.message_coalescing,
         )
 
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
@@ -446,6 +536,10 @@ def load_gateway_config() -> GatewayConfig:
 
             if "group_sessions_per_user" in yaml_cfg:
                 gw_data["group_sessions_per_user"] = yaml_cfg["group_sessions_per_user"]
+
+            message_coalescing_cfg = yaml_cfg.get("message_coalescing")
+            if isinstance(message_coalescing_cfg, dict):
+                gw_data["message_coalescing"] = message_coalescing_cfg
 
             streaming_cfg = yaml_cfg.get("streaming")
             if isinstance(streaming_cfg, dict):
@@ -797,5 +891,4 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.default_reset_policy.at_hour = int(reset_hour)
         except ValueError:
             pass
-
 
