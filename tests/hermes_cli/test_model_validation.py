@@ -132,6 +132,7 @@ class TestProviderLabel:
         assert provider_label("kimi") == "Kimi / Moonshot"
         assert provider_label("copilot") == "GitHub Copilot"
         assert provider_label("copilot-acp") == "GitHub Copilot ACP"
+        assert provider_label("cursor-acp") == "Cursor ACP"
         assert provider_label("auto") == "Auto"
 
     def test_unknown_provider_preserves_original_name(self):
@@ -169,6 +170,17 @@ class TestProviderModelIds:
 
         assert "gpt-5.4" in ids
         assert "copilot-acp" not in ids
+
+    def test_cursor_acp_prefers_live_catalog(self):
+        with patch("hermes_cli.models._fetch_cursor_models", return_value=["gpt-5", "claude-4-sonnet"]):
+            assert provider_model_ids("cursor-acp") == ["gpt-5", "claude-4-sonnet"]
+
+    def test_cursor_acp_falls_back_to_defaults(self):
+        with patch("hermes_cli.models._fetch_cursor_models", return_value=None):
+            ids = provider_model_ids("cursor-acp")
+
+        assert ids
+        assert "cursor-acp" not in ids
 
 
 # -- fetch_api_models --------------------------------------------------------

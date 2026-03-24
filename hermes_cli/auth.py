@@ -69,6 +69,7 @@ DEVICE_AUTH_POLL_INTERVAL_CAP_SECONDS = 1     # poll at most every 1s
 DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex"
 DEFAULT_GITHUB_MODELS_BASE_URL = "https://api.githubcopilot.com"
 DEFAULT_COPILOT_ACP_BASE_URL = "acp://copilot"
+DEFAULT_CURSOR_ACP_BASE_URL = "acp://cursor"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
@@ -124,6 +125,14 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         auth_type="external_process",
         inference_base_url=DEFAULT_COPILOT_ACP_BASE_URL,
         base_url_env_var="COPILOT_ACP_BASE_URL",
+    ),
+    "cursor-acp": ProviderConfig(
+        id="cursor-acp",
+        name="Cursor ACP",
+        auth_type="external_process",
+        inference_base_url=DEFAULT_CURSOR_ACP_BASE_URL,
+        api_key_env_vars=("CURSOR_API_KEY",),
+        base_url_env_var="CURSOR_ACP_BASE_URL",
     ),
     "zai": ProviderConfig(
         id="zai",
@@ -212,6 +221,32 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("KILOCODE_API_KEY",),
         base_url_env_var="KILOCODE_BASE_URL",
     ),
+}
+
+
+_EXTERNAL_PROCESS_PROVIDER_SETTINGS: Dict[str, Dict[str, Any]] = {
+    "copilot-acp": {
+        "command_env_vars": ("HERMES_COPILOT_ACP_COMMAND", "COPILOT_CLI_PATH"),
+        "default_commands": ("copilot",),
+        "args_env_var": "HERMES_COPILOT_ACP_ARGS",
+        "default_args": ("--acp", "--stdio"),
+        "missing_command_code": "missing_copilot_cli",
+        "missing_command_message": (
+            "Could not find the Copilot CLI command '{command}'. "
+            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH."
+        ),
+    },
+    "cursor-acp": {
+        "command_env_vars": ("HERMES_CURSOR_ACP_COMMAND", "CURSOR_AGENT_PATH"),
+        "default_commands": ("cursor-agent", "agent"),
+        "args_env_var": "HERMES_CURSOR_ACP_ARGS",
+        "default_args": ("acp",),
+        "missing_command_code": "missing_cursor_cli",
+        "missing_command_message": (
+            "Could not find the Cursor ACP command '{command}'. "
+            "Install Cursor CLI or set HERMES_CURSOR_ACP_COMMAND/CURSOR_AGENT_PATH."
+        ),
+    },
 }
 
 
@@ -683,6 +718,7 @@ def resolve_provider(
         "github": "copilot", "github-copilot": "copilot",
         "github-models": "copilot", "github-model": "copilot",
         "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
+        "cursor": "cursor-acp", "cursor-agent": "cursor-acp",
         "aigateway": "ai-gateway", "vercel": "ai-gateway", "vercel-ai-gateway": "ai-gateway",
         "opencode": "opencode-zen", "zen": "opencode-zen",
         "go": "opencode-go", "opencode-go-sub": "opencode-go",
@@ -1618,24 +1654,50 @@ def get_api_key_provider_status(provider_id: str) -> Dict[str, Any]:
     }
 
 
+def _external_process_provider_settings(provider_id: str) -> Dict[str, Any]:
+    return dict(_EXTERNAL_PROCESS_PROVIDER_SETTINGS.get(provider_id, {}))
+
+
+def _resolve_external_process_command(provider_id: str) -> tuple[str, Optional[str]]:
+    settings = _external_process_provider_settings(provider_id)
+
+    for env_var in settings.get("command_env_vars", ()):
+        command = os.getenv(env_var, "").strip()
+        if command:
+            return command, shutil.which(command) if command else None
+
+    default_commands = tuple(settings.get("default_commands", ()) or ())
+    for command in default_commands:
+        resolved = shutil.which(command)
+        if resolved:
+            return command, resolved
+
+    if default_commands:
+        return default_commands[0], None
+    return "", None
+
+
+def _resolve_external_process_args(provider_id: str) -> list[str]:
+    settings = _external_process_provider_settings(provider_id)
+    args_env_var = str(settings.get("args_env_var") or "").strip()
+    raw_args = os.getenv(args_env_var, "").strip() if args_env_var else ""
+    if raw_args:
+        return shlex.split(raw_args)
+    return list(settings.get("default_args", ()) or ())
+
+
 def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
     """Status snapshot for providers that run a local subprocess."""
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "external_process":
         return {"configured": False}
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
+    command, resolved_command = _resolve_external_process_command(provider_id)
+    args = _resolve_external_process_args(provider_id)
     base_url = os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    resolved_command = shutil.which(command) if command else None
     return {
         "configured": bool(resolved_command or base_url.startswith("acp+tcp://")),
         "provider": provider_id,
@@ -1655,10 +1717,10 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
         return get_nous_auth_status()
     if target == "openai-codex":
         return get_codex_auth_status()
-    if target == "copilot-acp":
+    pconfig = PROVIDER_REGISTRY.get(target)
+    if pconfig and pconfig.auth_type == "external_process":
         return get_external_process_provider_status(target)
     # API-key providers
-    pconfig = PROVIDER_REGISTRY.get(target)
     if pconfig and pconfig.auth_type == "api_key":
         return get_api_key_provider_status(target)
     return {"logged_in": False}
@@ -1714,25 +1776,21 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     if not base_url:
         base_url = pconfig.inference_base_url
 
-    command = (
-        os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
-        or os.getenv("COPILOT_CLI_PATH", "").strip()
-        or "copilot"
-    )
-    raw_args = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    args = shlex.split(raw_args) if raw_args else ["--acp", "--stdio"]
-    resolved_command = shutil.which(command) if command else None
+    command, resolved_command = _resolve_external_process_command(provider_id)
+    args = _resolve_external_process_args(provider_id)
     if not resolved_command and not base_url.startswith("acp+tcp://"):
+        settings = _external_process_provider_settings(provider_id)
         raise AuthError(
-            f"Could not find the Copilot CLI command '{command}'. "
-            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
+            str(settings.get("missing_command_message") or "Could not find the external ACP command '{command}'.").format(
+                command=command
+            ),
             provider=provider_id,
-            code="missing_copilot_cli",
+            code=str(settings.get("missing_command_code") or "missing_external_process_command"),
         )
 
     return {
         "provider": provider_id,
-        "api_key": "copilot-acp",
+        "api_key": provider_id,
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

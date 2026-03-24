@@ -37,6 +37,7 @@ class TestProviderRegistry:
 
     @pytest.mark.parametrize("provider_id,name,auth_type", [
         ("copilot-acp", "GitHub Copilot ACP", "external_process"),
+        ("cursor-acp", "Cursor ACP", "external_process"),
         ("copilot", "GitHub Copilot", "api_key"),
         ("zai", "Z.AI / GLM", "api_key"),
         ("kimi-coding", "Kimi / Moonshot", "api_key"),
@@ -90,6 +91,7 @@ class TestProviderRegistry:
     def test_base_urls(self):
         assert PROVIDER_REGISTRY["copilot"].inference_base_url == "https://api.githubcopilot.com"
         assert PROVIDER_REGISTRY["copilot-acp"].inference_base_url == "acp://copilot"
+        assert PROVIDER_REGISTRY["cursor-acp"].inference_base_url == "acp://cursor"
         assert PROVIDER_REGISTRY["zai"].inference_base_url == "https://api.z.ai/api/paas/v4"
         assert PROVIDER_REGISTRY["kimi-coding"].inference_base_url == "https://api.moonshot.ai/v1"
         assert PROVIDER_REGISTRY["minimax"].inference_base_url == "https://api.minimax.io/anthropic"
@@ -118,8 +120,11 @@ PROVIDER_ENV_VARS = (
     "KILOCODE_API_KEY", "KILOCODE_BASE_URL",
     "DASHSCOPE_API_KEY", "OPENCODE_ZEN_API_KEY", "OPENCODE_GO_API_KEY",
     "NOUS_API_KEY", "GITHUB_TOKEN", "GH_TOKEN",
+    "CURSOR_API_KEY",
     "OPENAI_BASE_URL", "HERMES_COPILOT_ACP_COMMAND", "COPILOT_CLI_PATH",
     "HERMES_COPILOT_ACP_ARGS", "COPILOT_ACP_BASE_URL",
+    "HERMES_CURSOR_ACP_COMMAND", "CURSOR_AGENT_PATH",
+    "HERMES_CURSOR_ACP_ARGS", "CURSOR_ACP_BASE_URL",
 )
 
 
@@ -198,6 +203,10 @@ class TestResolveProvider:
     def test_alias_github_copilot_acp(self):
         assert resolve_provider("github-copilot-acp") == "copilot-acp"
         assert resolve_provider("copilot-acp-agent") == "copilot-acp"
+
+    def test_alias_cursor(self):
+        assert resolve_provider("cursor") == "cursor-acp"
+        assert resolve_provider("cursor-agent") == "cursor-acp"
 
     def test_unknown_provider_raises(self):
         with pytest.raises(AuthError):
@@ -313,6 +322,20 @@ class TestApiKeyProviderStatus:
         assert status["configured"] is True
         assert status["provider"] == "copilot-acp"
 
+    def test_cursor_acp_status_detects_local_cli(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CURSOR_ACP_COMMAND", "cursor-agent")
+        monkeypatch.setenv("HERMES_CURSOR_ACP_ARGS", "acp --debug")
+        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+
+        status = get_external_process_provider_status("cursor-acp")
+
+        assert status["configured"] is True
+        assert status["logged_in"] is True
+        assert status["command"] == "cursor-agent"
+        assert status["resolved_command"] == "/usr/local/bin/cursor-agent"
+        assert status["args"] == ["acp", "--debug"]
+        assert status["base_url"] == "acp://cursor"
+
     def test_non_api_key_provider(self):
         status = get_api_key_provider_status("nous")
         assert status["configured"] is False
@@ -385,6 +408,20 @@ class TestResolveApiKeyProviderCredentials:
         assert creds["base_url"] == "acp://copilot"
         assert creds["command"] == "/usr/local/bin/copilot"
         assert creds["args"] == ["--acp", "--stdio"]
+        assert creds["source"] == "process"
+
+    def test_resolve_cursor_acp_with_local_cli(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CURSOR_ACP_COMMAND", "cursor-agent")
+        monkeypatch.setenv("HERMES_CURSOR_ACP_ARGS", "acp")
+        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+
+        creds = resolve_external_process_provider_credentials("cursor-acp")
+
+        assert creds["provider"] == "cursor-acp"
+        assert creds["api_key"] == "cursor-acp"
+        assert creds["base_url"] == "acp://cursor"
+        assert creds["command"] == "/usr/local/bin/cursor-agent"
+        assert creds["args"] == ["acp"]
         assert creds["source"] == "process"
 
     def test_resolve_kimi_with_key(self, monkeypatch):
@@ -561,6 +598,22 @@ class TestRuntimeProviderResolution:
         assert result["command"] == "/usr/local/bin/copilot"
         assert result["args"] == ["--acp", "--stdio", "--debug"]
 
+    def test_runtime_cursor_acp_uses_process_runtime(self, monkeypatch):
+        monkeypatch.setenv("HERMES_CURSOR_ACP_COMMAND", "cursor-agent")
+        monkeypatch.setenv("HERMES_CURSOR_ACP_ARGS", "acp --debug")
+        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        result = resolve_runtime_provider(requested="cursor-acp")
+
+        assert result["provider"] == "cursor-acp"
+        assert result["api_mode"] == "chat_completions"
+        assert result["api_key"] == "cursor-acp"
+        assert result["base_url"] == "acp://cursor"
+        assert result["command"] == "/usr/local/bin/cursor-agent"
+        assert result["args"] == ["acp", "--debug"]
+
 
 # =============================================================================
 # _has_any_provider_configured tests
@@ -597,6 +650,33 @@ class TestHasAnyProviderConfigured:
         monkeypatch.setattr(config_module, "get_hermes_home", lambda: hermes_home)
         from hermes_cli.main import _has_any_provider_configured
         assert _has_any_provider_configured() is True
+
+    def test_cursor_acp_command_counts(self, monkeypatch, tmp_path):
+        from hermes_cli import config as config_module
+
+        monkeypatch.setenv("HERMES_CURSOR_ACP_COMMAND", "cursor-agent")
+        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setattr(config_module, "get_env_path", lambda: hermes_home / ".env")
+        monkeypatch.setattr(config_module, "get_hermes_home", lambda: hermes_home)
+        from hermes_cli.main import _has_any_provider_configured
+
+        assert _has_any_provider_configured() is True
+
+    def test_cursor_api_key_alone_does_not_count(self, monkeypatch, tmp_path):
+        from hermes_cli import config as config_module
+
+        monkeypatch.setenv("CURSOR_API_KEY", "test-key")
+        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: None)
+        monkeypatch.setattr("hermes_cli.auth.get_auth_status", lambda provider_id=None: {"logged_in": False})
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        monkeypatch.setattr(config_module, "get_env_path", lambda: hermes_home / ".env")
+        monkeypatch.setattr(config_module, "get_hermes_home", lambda: hermes_home)
+        from hermes_cli.main import _has_any_provider_configured
+
+        assert _has_any_provider_configured() is False
 
 
 # =============================================================================

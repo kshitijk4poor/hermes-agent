@@ -34,6 +34,7 @@ def _clear_provider_env(monkeypatch):
         "OPENROUTER_API_KEY",
         "GITHUB_TOKEN",
         "GH_TOKEN",
+        "CURSOR_API_KEY",
         "GLM_API_KEY",
         "KIMI_API_KEY",
         "MINIMAX_API_KEY",
@@ -379,6 +380,50 @@ def test_setup_copilot_acp_uses_model_picker_and_saves_provider(tmp_path, monkey
     assert reloaded["model"]["provider"] == "copilot-acp"
     assert reloaded["model"]["base_url"] == "acp://copilot"
     assert reloaded["model"]["default"] == "gpt-5.4"
+    assert reloaded["model"]["api_mode"] == "chat_completions"
+
+
+def test_setup_cursor_acp_uses_model_picker_and_saves_provider(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _clear_provider_env(monkeypatch)
+
+    config = load_config()
+
+    def fake_prompt_choice(question, choices, default=0):
+        if question == "Select your inference provider:":
+            assert "Cursor ACP (spawns `agent acp` or `cursor-agent`)" in choices
+            return choices.index("Cursor ACP (spawns `agent acp` or `cursor-agent`)")
+        if question == "Select default model:":
+            assert "gpt-5" in choices
+            assert "claude-4-sonnet" in choices
+            return choices.index("gpt-5")
+        if question == "Configure vision:":
+            return len(choices) - 1
+        tts_idx = _maybe_keep_current_tts(question, choices)
+        if tts_idx is not None:
+            return tts_idx
+        raise AssertionError(f"Unexpected prompt_choice call: {question}")
+
+    def fake_prompt(message, *args, **kwargs):
+        raise AssertionError(f"Unexpected prompt call: {message}")
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", fake_prompt_choice)
+    monkeypatch.setattr("hermes_cli.setup.prompt", fake_prompt)
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda *args, **kwargs: False)
+    monkeypatch.setattr("hermes_cli.auth.get_active_provider", lambda: None)
+    monkeypatch.setattr("hermes_cli.auth.detect_external_credentials", lambda: [])
+    monkeypatch.setattr("hermes_cli.auth.get_auth_status", lambda provider_id: {"logged_in": provider_id == "cursor-acp"})
+    monkeypatch.setattr("hermes_cli.models._fetch_cursor_models", lambda timeout=5.0: ["gpt-5", "claude-4-sonnet"])
+    monkeypatch.setattr("agent.auxiliary_client.get_available_vision_backends", lambda: [])
+
+    setup_model_provider(config)
+    save_config(config)
+
+    reloaded = load_config()
+
+    assert reloaded["model"]["provider"] == "cursor-acp"
+    assert reloaded["model"]["base_url"] == "acp://cursor"
+    assert reloaded["model"]["default"] == "gpt-5"
     assert reloaded["model"]["api_mode"] == "chat_completions"
 
 

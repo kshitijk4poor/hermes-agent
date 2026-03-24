@@ -160,6 +160,14 @@ hermes chat --provider copilot-acp --model copilot-acp
 # Requires the GitHub Copilot CLI in PATH and an existing `copilot login` session
 ```
 
+**`cursor-acp` — Cursor ACP agent backend**. Spawns the local Cursor CLI as a subprocess:
+
+```bash
+hermes chat --provider cursor-acp --model gpt-5
+# Tries `cursor-agent acp` first, then `agent acp`
+# Use HERMES_CURSOR_ACP_COMMAND or CURSOR_AGENT_PATH to override the binary
+```
+
 **Permanent config:**
 ```yaml
 model:
@@ -172,6 +180,10 @@ model:
 | `COPILOT_GITHUB_TOKEN` | GitHub token for Copilot API (first priority) |
 | `HERMES_COPILOT_ACP_COMMAND` | Override the Copilot CLI binary path (default: `copilot`) |
 | `HERMES_COPILOT_ACP_ARGS` | Override ACP args (default: `--acp --stdio`) |
+| `CURSOR_API_KEY` | Optional Cursor API key for model discovery |
+| `HERMES_CURSOR_ACP_COMMAND` | Override the Cursor CLI binary path |
+| `CURSOR_AGENT_PATH` | Alternate env var for the Cursor CLI binary path |
+| `HERMES_CURSOR_ACP_ARGS` | Override ACP args (default: `acp`) |
 
 ### First-Class Chinese AI Providers
 

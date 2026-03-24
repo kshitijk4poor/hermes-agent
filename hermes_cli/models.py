@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 COPILOT_BASE_URL = "https://api.githubcopilot.com"
 COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
+CURSOR_MODELS_URL = "https://api.cursor.com/v0/models"
 COPILOT_EDITOR_VERSION = "vscode/1.104.1"
 COPILOT_REASONING_EFFORTS_GPT5 = ["minimal", "low", "medium", "high"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
@@ -68,6 +69,11 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     ],
     "copilot-acp": [
         "copilot-acp",
+    ],
+    "cursor-acp": [
+        "gpt-5",
+        "claude-4-sonnet",
+        "gemini-2.5-pro",
     ],
     "copilot": [
         "gpt-5.4",
@@ -205,6 +211,7 @@ _PROVIDER_LABELS = {
     "openrouter": "OpenRouter",
     "openai-codex": "OpenAI Codex",
     "copilot-acp": "GitHub Copilot ACP",
+    "cursor-acp": "Cursor ACP",
     "nous": "Nous Portal",
     "copilot": "GitHub Copilot",
     "zai": "Z.AI / GLM",
@@ -232,6 +239,8 @@ _PROVIDER_ALIASES = {
     "github-model": "copilot",
     "github-copilot-acp": "copilot-acp",
     "copilot-acp-agent": "copilot-acp",
+    "cursor": "cursor-acp",
+    "cursor-agent": "cursor-acp",
     "kimi": "kimi-coding",
     "moonshot": "kimi-coding",
     "minimax-china": "minimax-cn",
@@ -285,7 +294,7 @@ def list_available_providers() -> list[dict[str, str]]:
     """
     # Canonical providers in display order
     _PROVIDER_ORDER = [
-        "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
+        "openrouter", "nous", "openai-codex", "copilot", "copilot-acp", "cursor-acp",
         "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic", "alibaba",
         "opencode-zen", "opencode-go",
         "ai-gateway", "deepseek", "custom",
@@ -558,6 +567,10 @@ def provider_model_ids(provider: Optional[str]) -> list[str]:
             pass
         if normalized == "copilot-acp":
             return list(_PROVIDER_MODELS.get("copilot", []))
+    if normalized == "cursor-acp":
+        live = _fetch_cursor_models()
+        if live:
+            return live
     if normalized == "nous":
         # Try live Nous Portal /models endpoint
         try:
@@ -745,6 +758,47 @@ def _fetch_github_models(api_key: Optional[str] = None, timeout: float = 5.0) ->
     if not catalog:
         return None
     return [item.get("id", "") for item in catalog if item.get("id")]
+
+
+def _fetch_cursor_models(timeout: float = 5.0) -> Optional[list[str]]:
+    """Fetch available models from Cursor's public models endpoint."""
+    api_key = os.getenv("CURSOR_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    req = urllib.request.Request(
+        CURSOR_MODELS_URL,
+        headers={"Authorization": f"Bearer {api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            models: list[str] = []
+            seen: set[str] = set()
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                items = data.get("data") or data.get("models") or data.get("items") or []
+            else:
+                items = []
+            for item in items:
+                model_id = ""
+                if isinstance(item, str):
+                    model_id = item.strip()
+                elif isinstance(item, dict):
+                    model_id = str(
+                        item.get("id")
+                        or item.get("name")
+                        or item.get("model")
+                        or ""
+                    ).strip()
+                if not model_id or model_id in seen:
+                    continue
+                seen.add(model_id)
+                models.append(model_id)
+            return models or None
+    except Exception:
+        return None
 
 
 _COPILOT_MODEL_ALIASES = {

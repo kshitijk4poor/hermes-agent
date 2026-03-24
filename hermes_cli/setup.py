@@ -58,6 +58,11 @@ _DEFAULT_PROVIDER_MODELS = {
     "copilot-acp": [
         "copilot-acp",
     ],
+    "cursor-acp": [
+        "gpt-5",
+        "claude-4-sonnet",
+        "gemini-2.5-pro",
+    ],
     "copilot": [
         "gpt-5.4",
         "gpt-5.4-mini",
@@ -148,12 +153,14 @@ def _setup_provider_model_selection(config, provider_id, current_model, prompt_c
     from hermes_cli.models import (
         copilot_model_api_mode,
         fetch_api_models,
+        _fetch_cursor_models,
         fetch_github_model_catalog,
         normalize_copilot_model_id,
     )
 
     pconfig = PROVIDER_REGISTRY[provider_id]
     is_copilot_catalog_provider = provider_id in {"copilot", "copilot-acp"}
+    is_cursor_catalog_provider = provider_id == "cursor-acp"
 
     # Resolve API key and base URL for the probe
     if is_copilot_catalog_provider:
@@ -175,6 +182,10 @@ def _setup_provider_model_selection(config, provider_id, current_model, prompt_c
             catalog=catalog,
             api_key=api_key,
         ) or current_model
+    elif is_cursor_catalog_provider:
+        api_key = get_env_value("CURSOR_API_KEY") or os.getenv("CURSOR_API_KEY", "")
+        base_url = pconfig.inference_base_url
+        catalog = None
     else:
         api_key = ""
         for ev in pconfig.api_key_env_vars:
@@ -188,6 +199,8 @@ def _setup_provider_model_selection(config, provider_id, current_model, prompt_c
     # Try live /models endpoint
     if is_copilot_catalog_provider and catalog:
         live_models = [item.get("id", "") for item in catalog if item.get("id")]
+    elif is_cursor_catalog_provider:
+        live_models = _fetch_cursor_models()
     else:
         live_models = fetch_api_models(api_key, base_url)
 
@@ -823,6 +836,7 @@ def setup_model_provider(config: dict):
     existing_custom = get_env_value("OPENAI_BASE_URL")
     copilot_status = get_auth_status("copilot")
     copilot_acp_status = get_auth_status("copilot-acp")
+    cursor_acp_status = get_auth_status("cursor-acp")
 
     model_cfg = config.get("model") if isinstance(config.get("model"), dict) else {}
     current_config_provider = str(model_cfg.get("provider") or "").strip().lower() or None
@@ -849,6 +863,7 @@ def setup_model_provider(config: dict):
         or existing_or
         or copilot_status.get("logged_in")
         or copilot_acp_status.get("logged_in")
+        or cursor_acp_status.get("logged_in")
     )
 
     # Build "keep current" label
@@ -889,6 +904,7 @@ def setup_model_provider(config: dict):
         "OpenCode Go (open models, $10/month subscription)",
         "GitHub Copilot (uses GITHUB_TOKEN or gh auth token)",
         "GitHub Copilot ACP (spawns `copilot --acp --stdio`)",
+        "Cursor ACP (spawns `agent acp` or `cursor-agent`)",
     ]
     if keep_label:
         provider_choices.append(keep_label)
@@ -1533,7 +1549,24 @@ def setup_model_provider(config: dict):
         _set_model_provider(config, "copilot-acp", pconfig.inference_base_url)
         selected_base_url = pconfig.inference_base_url
 
-    # else: provider_idx == 16 (Keep current) — only shown when a provider already exists
+    elif provider_idx == 16:  # Cursor ACP
+        selected_provider = "cursor-acp"
+        print()
+        print_header("Cursor ACP")
+        pconfig = PROVIDER_REGISTRY["cursor-acp"]
+        print_info("Hermes will start Cursor over ACP for each request.")
+        print_info("It will try `agent acp` first, then `cursor-agent acp`.")
+        print_info("Use HERMES_CURSOR_ACP_COMMAND or CURSOR_AGENT_PATH to override the command.")
+        print_info(f"Base marker: {pconfig.inference_base_url}")
+        print()
+
+        if existing_custom:
+            save_env_value("OPENAI_BASE_URL", "")
+            save_env_value("OPENAI_API_KEY", "")
+        _set_model_provider(config, "cursor-acp", pconfig.inference_base_url)
+        selected_base_url = pconfig.inference_base_url
+
+    # else: provider_idx == 17 (Keep current) — only shown when a provider already exists
     # Normalize "keep current" to an explicit provider so downstream logic
     # doesn't fall back to the generic OpenRouter/static-model path.
     if selected_provider is None:
@@ -1567,6 +1600,7 @@ def setup_model_provider(config: dict):
             "nous-api": "Nous Portal API key",
             "copilot": "GitHub Copilot",
             "copilot-acp": "GitHub Copilot ACP",
+            "cursor-acp": "Cursor ACP",
             "zai": "Z.AI / GLM",
             "kimi-coding": "Kimi / Moonshot",
             "minimax": "MiniMax",
@@ -1706,7 +1740,7 @@ def setup_model_provider(config: dict):
                     _set_default_model(config, custom)
             _update_config_for_provider("openai-codex", DEFAULT_CODEX_BASE_URL)
             _set_model_provider(config, "openai-codex", DEFAULT_CODEX_BASE_URL)
-        elif selected_provider == "copilot-acp":
+        elif selected_provider in ("copilot-acp", "cursor-acp"):
             _setup_provider_model_selection(
                 config, selected_provider, current_model,
                 prompt_choice, prompt,
@@ -1775,7 +1809,7 @@ def setup_model_provider(config: dict):
     # Write provider+base_url to config.yaml only after model selection is complete.
     # This prevents a race condition where the gateway picks up a new provider
     # before the model name has been updated to match.
-    if selected_provider in ("copilot-acp", "copilot", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic") and selected_base_url is not None:
+    if selected_provider in ("copilot-acp", "cursor-acp", "copilot", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic") and selected_base_url is not None:
         _update_config_for_provider(selected_provider, selected_base_url)
 
     save_config(config)

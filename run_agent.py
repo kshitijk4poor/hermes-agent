@@ -719,9 +719,11 @@ class AIAgent:
                 # Explicit credentials from CLI/gateway — construct directly.
                 # The runtime provider resolver already handled auth for us.
                 client_kwargs = {"api_key": api_key, "base_url": base_url}
-                if self.provider == "copilot-acp":
-                    client_kwargs["command"] = self.acp_command
-                    client_kwargs["args"] = self.acp_args
+                if str(base_url).startswith("acp://") or (self.provider or "").endswith("-acp"):
+                    if self.acp_command:
+                        client_kwargs["command"] = self.acp_command
+                    if self.acp_args:
+                        client_kwargs["args"] = self.acp_args
                 effective_base = base_url
                 if "openrouter" in effective_base.lower():
                     client_kwargs["default_headers"] = {
@@ -3146,6 +3148,17 @@ class AIAgent:
             client = CopilotACPClient(**client_kwargs)
             logger.info(
                 "Copilot ACP client created (%s, shared=%s) %s",
+                reason,
+                shared,
+                self._client_log_context(),
+            )
+            return client
+        if self.provider == "cursor-acp" or str(client_kwargs.get("base_url", "")).startswith("acp://cursor"):
+            from agent.cursor_acp_client import CursorACPClient
+
+            client = CursorACPClient(**client_kwargs)
+            logger.info(
+                "Cursor ACP client created (%s, shared=%s) %s",
                 reason,
                 shared,
                 self._client_log_context(),

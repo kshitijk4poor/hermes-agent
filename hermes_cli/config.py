@@ -510,6 +510,14 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "provider",
     },
+    "CURSOR_API_KEY": {
+        "description": "Cursor API key for model discovery and Cursor ACP sessions",
+        "prompt": "Cursor API key",
+        "url": "https://docs.cursor.com/en/cli/reference/authentication",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
     "DASHSCOPE_API_KEY": {
         "description": "Alibaba Cloud DashScope API key for Qwen models",
         "prompt": "DashScope API Key",

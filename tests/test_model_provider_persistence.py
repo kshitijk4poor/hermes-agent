@@ -210,3 +210,46 @@ class TestProviderPersistsAfterModelSave:
         assert model.get("base_url") == "acp://copilot"
         assert model.get("default") == "gpt-5.4"
         assert model.get("api_mode") == "chat_completions"
+
+    def test_cursor_acp_provider_saved_when_selected(self, config_home):
+        """_model_flow_cursor_acp should persist provider/base_url/model together."""
+        from hermes_cli.main import _model_flow_cursor_acp
+        from hermes_cli.config import load_config
+
+        with patch(
+            "hermes_cli.auth.get_external_process_provider_status",
+            return_value={
+                "resolved_command": "/usr/local/bin/cursor-agent",
+                "command": "cursor-agent",
+                "base_url": "acp://cursor",
+            },
+        ), patch(
+            "hermes_cli.auth.resolve_external_process_provider_credentials",
+            return_value={
+                "provider": "cursor-acp",
+                "api_key": "cursor-acp",
+                "base_url": "acp://cursor",
+                "command": "/usr/local/bin/cursor-agent",
+                "args": ["acp"],
+                "source": "process",
+            },
+        ), patch(
+            "hermes_cli.models._fetch_cursor_models",
+            return_value=["gpt-5", "claude-4-sonnet"],
+        ), patch(
+            "hermes_cli.auth._prompt_model_selection",
+            return_value="gpt-5",
+        ), patch(
+            "hermes_cli.auth.deactivate_provider",
+        ):
+            _model_flow_cursor_acp(load_config(), "old-model")
+
+        import yaml
+
+        config = yaml.safe_load((config_home / "config.yaml").read_text()) or {}
+        model = config.get("model")
+        assert isinstance(model, dict), f"model should be dict, got {type(model)}"
+        assert model.get("provider") == "cursor-acp"
+        assert model.get("base_url") == "acp://cursor"
+        assert model.get("default") == "gpt-5"
+        assert model.get("api_mode") == "chat_completions"
