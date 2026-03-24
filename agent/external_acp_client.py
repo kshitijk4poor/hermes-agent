@@ -11,7 +11,7 @@ import time
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 _DEFAULT_TIMEOUT_SECONDS = 900.0
 
@@ -96,6 +96,49 @@ def _format_messages_as_prompt(
     return "\n\n".join(section.strip() for section in sections if section and section.strip())
 
 
+def _acp_estimate_usage_enabled() -> bool:
+    return os.getenv("HERMES_ACP_ESTIMATE_USAGE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _finalize_acp_usage(
+    prompt_text: str,
+    response_text: str,
+    reasoning_text: str,
+    usage_from_result: dict[str, int] | None,
+) -> dict[str, int] | None:
+    """Prefer real usage from ACP; optionally fill with a char/4 heuristic (not billing-grade)."""
+    if usage_from_result and any(
+        int(usage_from_result.get(k) or 0) for k in ("prompt_tokens", "completion_tokens", "total_tokens")
+    ):
+        return usage_from_result
+    if not _acp_estimate_usage_enabled():
+        return usage_from_result
+    pi = max(0, len(prompt_text) // 4)
+    ci = max(0, (len(response_text) + len(reasoning_text)) // 4)
+    return {"prompt_tokens": pi, "completion_tokens": ci, "total_tokens": pi + ci}
+
+
+def _usage_from_acp_prompt_result(result: Any) -> dict[str, int] | None:
+    """If the ACP `session/prompt` result includes usage, map it for OpenAI-style clients."""
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("usage")
+    data: dict[str, Any] = raw if isinstance(raw, dict) else result
+    prompt = data.get("prompt_tokens")
+    if prompt is None:
+        prompt = data.get("input_tokens")
+    completion = data.get("completion_tokens")
+    if completion is None:
+        completion = data.get("output_tokens")
+    total = data.get("total_tokens")
+    if prompt is None and completion is None and total is None:
+        return None
+    pi = int(prompt or 0)
+    ci = int(completion or 0)
+    ti = int(total if total is not None else pi + ci)
+    return {"prompt_tokens": pi, "completion_tokens": ci, "total_tokens": ti}
+
+
 def _ensure_path_within_cwd(path_text: str, cwd: str) -> Path:
     candidate = Path(path_text)
     if not candidate.is_absolute():
@@ -176,22 +219,30 @@ class ExternalACPClient:
         model: str | None = None,
         messages: list[dict[str, Any]] | None = None,
         timeout: float | None = None,
-        **_: Any,
+        **extra: Any,
     ) -> Any:
+        on_text_delta = extra.pop("_hermes_acp_text_delta", None)
+        on_reasoning_delta = extra.pop("_hermes_acp_reasoning_delta", None)
         prompt_text = _format_messages_as_prompt(
             messages or [],
             provider_name=self._provider_name,
             model=model,
         )
-        response_text, reasoning_text = self._run_prompt(
+        response_text, reasoning_text, usage_nums = self._run_prompt(
             prompt_text,
             timeout_seconds=float(timeout or _DEFAULT_TIMEOUT_SECONDS),
+            on_text_delta=on_text_delta if callable(on_text_delta) else None,
+            on_reasoning_delta=on_reasoning_delta if callable(on_reasoning_delta) else None,
         )
+        usage_nums = _finalize_acp_usage(prompt_text, response_text, reasoning_text, usage_nums)
 
+        pt = usage_nums.get("prompt_tokens", 0) if usage_nums else 0
+        ct = usage_nums.get("completion_tokens", 0) if usage_nums else 0
+        tt = usage_nums.get("total_tokens", 0) if usage_nums else 0
         usage = SimpleNamespace(
-            prompt_tokens=0,
-            completion_tokens=0,
-            total_tokens=0,
+            prompt_tokens=pt,
+            completion_tokens=ct,
+            total_tokens=tt,
             prompt_tokens_details=SimpleNamespace(cached_tokens=0),
         )
         assistant_message = SimpleNamespace(
@@ -208,7 +259,14 @@ class ExternalACPClient:
             model=model or self._provider_id,
         )
 
-    def _run_prompt(self, prompt_text: str, *, timeout_seconds: float) -> tuple[str, str]:
+    def _run_prompt(
+        self,
+        prompt_text: str,
+        *,
+        timeout_seconds: float,
+        on_text_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
+    ) -> tuple[str, str, dict[str, int] | None]:
         try:
             proc = subprocess.Popen(
                 [self._acp_command] + self._acp_args,
@@ -261,6 +319,8 @@ class ExternalACPClient:
             *,
             text_parts: list[str] | None = None,
             reasoning_parts: list[str] | None = None,
+            text_delta_cb: Callable[[str], None] | None = None,
+            reasoning_delta_cb: Callable[[str], None] | None = None,
         ) -> Any:
             nonlocal next_id
             next_id += 1
@@ -289,6 +349,8 @@ class ExternalACPClient:
                     cwd=self._acp_cwd,
                     text_parts=text_parts,
                     reasoning_parts=reasoning_parts,
+                    on_text_delta=text_delta_cb,
+                    on_reasoning_delta=reasoning_delta_cb,
                 ):
                     continue
 
@@ -337,7 +399,7 @@ class ExternalACPClient:
 
             text_parts: list[str] = []
             reasoning_parts: list[str] = []
-            _request(
+            prompt_result = _request(
                 "session/prompt",
                 {
                     "sessionId": session_id,
@@ -350,8 +412,11 @@ class ExternalACPClient:
                 },
                 text_parts=text_parts,
                 reasoning_parts=reasoning_parts,
+                text_delta_cb=on_text_delta,
+                reasoning_delta_cb=on_reasoning_delta,
             )
-            return "".join(text_parts), "".join(reasoning_parts)
+            usage_nums = _usage_from_acp_prompt_result(prompt_result)
+            return "".join(text_parts), "".join(reasoning_parts), usage_nums
         finally:
             self.close()
 
@@ -363,6 +428,8 @@ class ExternalACPClient:
         cwd: str,
         text_parts: list[str] | None,
         reasoning_parts: list[str] | None,
+        on_text_delta: Callable[[str], None] | None = None,
+        on_reasoning_delta: Callable[[str], None] | None = None,
     ) -> bool:
         method = msg.get("method")
         if not isinstance(method, str):
@@ -378,8 +445,18 @@ class ExternalACPClient:
                 chunk_text = str(content.get("text") or "")
             if kind == "agent_message_chunk" and chunk_text and text_parts is not None:
                 text_parts.append(chunk_text)
+                if on_text_delta:
+                    try:
+                        on_text_delta(chunk_text)
+                    except Exception:
+                        pass
             elif kind == "agent_thought_chunk" and chunk_text and reasoning_parts is not None:
                 reasoning_parts.append(chunk_text)
+                if on_reasoning_delta:
+                    try:
+                        on_reasoning_delta(chunk_text)
+                    except Exception:
+                        pass
             return True
 
         if process.stdin is None:

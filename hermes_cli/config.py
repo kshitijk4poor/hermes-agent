@@ -896,6 +896,14 @@ OPTIONAL_ENV_VARS = {
         "password": False,
         "category": "setting",
     },
+    "HERMES_ACP_ESTIMATE_USAGE": {
+        "description": "When using cursor-acp/copilot-acp, approximate token counts (chars/4) if the ACP result omits usage — not billing-grade",
+        "prompt": "ACP approximate usage (true/false)",
+        "url": None,
+        "password": False,
+        "category": "setting",
+        "advanced": True,
+    },
 }
 
 

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 from agent.usage_pricing import (
     CanonicalUsage,
     estimate_usage_cost,
+    format_token_count_compact,
     get_pricing_entry,
     normalize_usage,
 )
@@ -123,3 +124,7 @@ def test_custom_endpoint_models_api_pricing_is_supported(monkeypatch):
 
     assert float(entry.input_cost_per_million) == 0.5
     assert float(entry.output_cost_per_million) == 2.0
+
+
+def test_format_token_count_compact_keeps_whole_tens_intact():
+    assert format_token_count_compact(10_000) == "10K"

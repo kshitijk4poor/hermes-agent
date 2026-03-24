@@ -262,12 +262,22 @@ class HermesACPAgent(acp.Agent):
             step_cb = None
             message_cb = None
             approval_cb = None
+        streamed_message = {"sent": False}
+
+        def _stream_message(text: str) -> None:
+            if not text:
+                return
+            streamed_message["sent"] = True
+            if message_cb:
+                message_cb(text)
 
         agent = state.agent
         agent.tool_progress_callback = tool_progress_cb
         agent.thinking_callback = thinking_cb
         agent.step_callback = step_cb
-        agent.message_callback = message_cb
+        # AIAgent streams via stream_delta_callback / _fire_stream_delta only;
+        # message_callback is not read by run_conversation.
+        agent.stream_delta_callback = _stream_message if conn else None
 
         if approval_cb:
             try:
@@ -308,19 +318,44 @@ class HermesACPAgent(acp.Agent):
             self.session_manager.save_session(session_id)
 
         final_response = result.get("final_response", "")
-        if final_response and conn:
+        if final_response and conn and not streamed_message["sent"]:
             update = acp.update_agent_message_text(final_response)
             await conn.session_update(session_id, update)
 
         usage = None
         usage_data = result.get("usage")
-        if usage_data and isinstance(usage_data, dict):
+        if not isinstance(usage_data, dict):
+            usage_data = {}
+        # run_conversation returns token counts on the result dict itself,
+        # not under "usage"; merge so Cursor gets PromptResponse.usage.
+        prompt_tok = usage_data.get("prompt_tokens")
+        if prompt_tok is None:
+            prompt_tok = result.get("prompt_tokens")
+        if prompt_tok is None:
+            prompt_tok = result.get("input_tokens")
+        comp_tok = usage_data.get("completion_tokens")
+        if comp_tok is None:
+            comp_tok = result.get("completion_tokens")
+        if comp_tok is None:
+            comp_tok = result.get("output_tokens")
+        total_tok = usage_data.get("total_tokens")
+        if total_tok is None:
+            total_tok = result.get("total_tokens")
+        if total_tok is None and (prompt_tok is not None or comp_tok is not None):
+            total_tok = int(prompt_tok or 0) + int(comp_tok or 0)
+        thought = usage_data.get("reasoning_tokens")
+        if thought is None:
+            thought = result.get("reasoning_tokens")
+        cached = usage_data.get("cached_tokens")
+        if cached is None:
+            cached = result.get("cache_read_tokens")
+        if prompt_tok or comp_tok or total_tok:
             usage = Usage(
-                input_tokens=usage_data.get("prompt_tokens", 0),
-                output_tokens=usage_data.get("completion_tokens", 0),
-                total_tokens=usage_data.get("total_tokens", 0),
-                thought_tokens=usage_data.get("reasoning_tokens"),
-                cached_read_tokens=usage_data.get("cached_tokens"),
+                input_tokens=int(prompt_tok or 0),
+                output_tokens=int(comp_tok or 0),
+                total_tokens=int(total_tok or 0),
+                thought_tokens=thought,
+                cached_read_tokens=cached,
             )
 
         stop_reason = "cancelled" if state.cancel_event and state.cancel_event.is_set() else "end_turn"

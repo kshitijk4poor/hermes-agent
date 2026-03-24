@@ -3550,6 +3550,36 @@ class AIAgent:
             or getattr(self, "_stream_callback", None) is not None
         )
 
+    def _attach_acp_subprocess_stream_kwargs(self, api_kwargs: dict) -> None:
+        """Bridge Cursor/Copilot ACP JSON-RPC chunks to stream/thinking callbacks.
+
+        ExternalACPClient consumes session/update incrementally; OpenAI-style
+        streaming is unavailable, so we inject private kwargs the client pops.
+        """
+        if not self._has_stream_consumers():
+            return
+        if self.api_mode != "chat_completions":
+            return
+        prov = (self.provider or "").strip().lower()
+        base = str(getattr(self, "base_url", "") or "").lower()
+        if prov not in ("cursor-acp", "copilot-acp") and not base.startswith(
+            ("acp://cursor", "acp://copilot")
+        ):
+            return
+        api_kwargs["_hermes_acp_text_delta"] = self._fire_stream_delta
+
+        def _thought_delta(text: str) -> None:
+            if not text:
+                return
+            if self.thinking_callback:
+                try:
+                    self.thinking_callback(text)
+                except Exception:
+                    pass
+            self._fire_reasoning_delta(text)
+
+        api_kwargs["_hermes_acp_reasoning_delta"] = _thought_delta
+
     def _interruptible_streaming_api_call(
         self, api_kwargs: dict, *, on_first_delta: callable = None
     ):
@@ -3568,6 +3598,36 @@ class AIAgent:
         Falls back to _interruptible_api_call on provider errors indicating
         streaming is not supported.
         """
+        if "_hermes_acp_text_delta" in api_kwargs or "_hermes_acp_reasoning_delta" in api_kwargs:
+            first_delta_fired = {"done": False}
+
+            def _fire_first_delta() -> None:
+                if not first_delta_fired["done"] and on_first_delta:
+                    first_delta_fired["done"] = True
+                    try:
+                        on_first_delta()
+                    except Exception:
+                        pass
+
+            original_text_delta = api_kwargs.get("_hermes_acp_text_delta")
+            original_reasoning_delta = api_kwargs.get("_hermes_acp_reasoning_delta")
+
+            if callable(original_text_delta):
+                def _wrapped_text_delta(text: str) -> None:
+                    _fire_first_delta()
+                    original_text_delta(text)
+
+                api_kwargs["_hermes_acp_text_delta"] = _wrapped_text_delta
+
+            if callable(original_reasoning_delta):
+                def _wrapped_reasoning_delta(text: str) -> None:
+                    _fire_first_delta()
+                    original_reasoning_delta(text)
+
+                api_kwargs["_hermes_acp_reasoning_delta"] = _wrapped_reasoning_delta
+
+            return self._interruptible_api_call(api_kwargs)
+
         if self.api_mode == "codex_responses":
             # Codex streams internally via _run_codex_stream. The main dispatch
             # in _interruptible_api_call already calls it; we just need to
@@ -5772,6 +5832,7 @@ class AIAgent:
             while retry_count < max_retries:
                 try:
                     api_kwargs = self._build_api_kwargs(api_messages)
+                    self._attach_acp_subprocess_stream_kwargs(api_kwargs)
                     if self.api_mode == "codex_responses":
                         api_kwargs = self._preflight_codex_api_kwargs(api_kwargs, allow_stream=False)
 

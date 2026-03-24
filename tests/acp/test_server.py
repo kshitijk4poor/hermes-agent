@@ -265,6 +265,57 @@ class TestPrompt:
         assert update.session_update == "agent_message_chunk"
 
     @pytest.mark.asyncio
+    async def test_prompt_does_not_duplicate_final_message_when_streamed(self, agent):
+        """If text was already streamed, don't emit the full final response again."""
+        new_resp = await agent.new_session(cwd=".")
+        state = agent.session_manager.get_session(new_resp.session_id)
+
+        def _run_conversation(*args, **kwargs):
+            state.agent.stream_delta_callback("hello")
+            return {"final_response": "hello", "messages": []}
+
+        state.agent.run_conversation = MagicMock(side_effect=_run_conversation)
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        prompt = [TextContentBlock(type="text", text="help me")]
+        await agent.prompt(prompt=prompt, session_id=new_resp.session_id)
+
+        assert mock_conn.session_update.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_prompt_response_usage_merges_top_level_counts(self, agent):
+        """PromptResponse.usage should use top-level token counts from run_conversation()."""
+        new_resp = await agent.new_session(cwd=".")
+        state = agent.session_manager.get_session(new_resp.session_id)
+
+        state.agent.run_conversation = MagicMock(return_value={
+            "final_response": "done",
+            "messages": [],
+            "prompt_tokens": 12,
+            "completion_tokens": 8,
+            "total_tokens": 20,
+            "reasoning_tokens": 3,
+            "cache_read_tokens": 4,
+        })
+
+        mock_conn = MagicMock(spec=acp.Client)
+        mock_conn.session_update = AsyncMock()
+        agent._conn = mock_conn
+
+        prompt = [TextContentBlock(type="text", text="help me")]
+        resp = await agent.prompt(prompt=prompt, session_id=new_resp.session_id)
+
+        assert isinstance(resp.usage, Usage)
+        assert resp.usage.input_tokens == 12
+        assert resp.usage.output_tokens == 8
+        assert resp.usage.total_tokens == 20
+        assert resp.usage.thought_tokens == 3
+        assert resp.usage.cached_read_tokens == 4
+
+    @pytest.mark.asyncio
     async def test_prompt_cancelled_returns_cancelled_stop_reason(self, agent):
         """If cancel is called during prompt, stop_reason should be 'cancelled'."""
         new_resp = await agent.new_session(cwd=".")

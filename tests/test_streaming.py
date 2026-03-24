@@ -481,6 +481,51 @@ class TestReasoningStreaming:
         assert response.choices[0].message.reasoning_content == "Let me think about this"
         assert response.choices[0].message.content == "The answer is 42"
 
+    def test_acp_streaming_uses_callback_bridge_instead_of_openai_iterator(self):
+        """ACP-backed providers should stream through injected callbacks, not stream=True iteration."""
+        from run_agent import AIAgent
+
+        text_deltas = []
+        reasoning_deltas = []
+        first_delta_calls = []
+
+        agent = AIAgent(
+            model="test/model",
+            api_key="cursor-acp",
+            provider="cursor-acp",
+            base_url="acp://cursor",
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            stream_delta_callback=lambda t: text_deltas.append(t),
+            reasoning_callback=lambda t: reasoning_deltas.append(t),
+        )
+        agent.api_mode = "chat_completions"
+        agent._interrupt_requested = False
+
+        api_kwargs = {}
+        agent._attach_acp_subprocess_stream_kwargs(api_kwargs)
+
+        def _fake_interruptible_api_call(kwargs):
+            kwargs["_hermes_acp_reasoning_delta"]("thinking")
+            kwargs["_hermes_acp_text_delta"]("hello")
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="hello", reasoning_content="thinking"))],
+                usage=None,
+            )
+
+        with patch.object(agent, "_interruptible_api_call", side_effect=_fake_interruptible_api_call) as mock_call:
+            response = agent._interruptible_streaming_api_call(
+                api_kwargs,
+                on_first_delta=lambda: first_delta_calls.append(True),
+            )
+
+        mock_call.assert_called_once()
+        assert first_delta_calls == [True]
+        assert reasoning_deltas == ["thinking"]
+        assert text_deltas == ["hello"]
+        assert response.choices[0].message.content == "hello"
+
 
 # ── Test: _has_stream_consumers ──────────────────────────────────────────
 
