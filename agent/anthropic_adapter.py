@@ -210,7 +210,6 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
 
     Returns the new access token, or None if refresh fails.
     """
-    import urllib.parse
     import urllib.request
 
     refresh_token = creds.get("refreshToken", "")
@@ -218,20 +217,17 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
         logger.debug("No refresh token available — cannot refresh")
         return None
 
-    # Client ID used by Claude Code's OAuth flow
-    CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-
-    data = urllib.parse.urlencode({
+    data = json.dumps({
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "client_id": CLIENT_ID,
+        "client_id": _OAUTH_CLIENT_ID,
     }).encode()
 
     req = urllib.request.Request(
-        "https://console.anthropic.com/v1/oauth/token",
+        _OAUTH_TOKEN_URL,
         data=data,
         headers={
-            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Type": "application/json",
             "User-Agent": f"claude-cli/{_CLAUDE_CODE_VERSION} (external, cli)",
         },
         method="POST",
@@ -447,9 +443,9 @@ def run_oauth_setup_token() -> Optional[str]:
 # Stores credentials in ~/.hermes/.anthropic_oauth.json (our own file).
 
 _OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-_OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
-_OAUTH_REDIRECT_URI = "https://console.anthropic.com/oauth/code/callback"
-_OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
+_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+_OAUTH_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
+_OAUTH_SCOPES = "org:create_api_key user:profile user:inference user:file_upload user:mcp_servers user:sessions"
 _HERMES_OAUTH_FILE = Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))) / ".anthropic_oauth.json"
 
 
@@ -491,7 +487,7 @@ def run_hermes_oauth_login() -> Optional[str]:
         "state": verifier,
     }
     from urllib.parse import urlencode
-    auth_url = f"https://claude.ai/oauth/authorize?{urlencode(params)}"
+    auth_url = f"https://platform.claude.com/oauth/authorize?{urlencode(params)}"
 
     print()
     print("Authorize Hermes with your Claude Pro/Max subscription.")
