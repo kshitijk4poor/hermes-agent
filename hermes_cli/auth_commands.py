@@ -190,7 +190,7 @@ def auth_list_command(args) -> None:
         entries = pool.entries()
         if not entries:
             continue
-        current = pool.select()
+        current = pool.peek()
         print(f"{provider} ({len(entries)} credentials):")
         for idx, entry in enumerate(entries, start=1):
             marker = "  "

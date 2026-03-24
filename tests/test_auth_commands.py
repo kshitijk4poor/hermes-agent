@@ -312,3 +312,39 @@ def test_clear_provider_auth_removes_provider_pool_entries(tmp_path, monkeypatch
     assert "anthropic" not in payload.get("providers", {})
     assert "anthropic" not in payload.get("credential_pool", {})
     assert "openrouter" in payload.get("credential_pool", {})
+
+
+def test_auth_list_does_not_call_mutating_select(monkeypatch, capsys):
+    from hermes_cli.auth_commands import auth_list_command
+
+    class _Entry:
+        id = "cred-1"
+        label = "primary"
+        auth_type = "api_key"
+        source = "manual"
+        last_status = None
+        last_error_code = None
+
+    class _Pool:
+        def entries(self):
+            return [_Entry()]
+
+        def peek(self):
+            return _Entry()
+
+        def select(self):
+            raise AssertionError("auth_list_command should not call select()")
+
+    monkeypatch.setattr(
+        "hermes_cli.auth_commands.load_pool",
+        lambda provider: _Pool() if provider == "openrouter" else type("_EmptyPool", (), {"entries": lambda self: []})(),
+    )
+
+    class _Args:
+        provider = "openrouter"
+
+    auth_list_command(_Args())
+
+    out = capsys.readouterr().out
+    assert "openrouter (1 credentials):" in out
+    assert "primary" in out

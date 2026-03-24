@@ -245,6 +245,19 @@ class CredentialPool:
         self._current_id = None
         return None
 
+    def peek(self) -> Optional[PooledCredential]:
+        current = self.current()
+        if current is not None:
+            return current
+
+        now = time.time()
+        for entry in sorted(self._entries, key=lambda item: item.priority):
+            if entry.last_status == "exhausted":
+                if entry.last_status_at and now - entry.last_status_at < EXHAUSTED_TTL_SECONDS:
+                    continue
+            return entry
+        return None
+
     def mark_exhausted_and_rotate(self, *, status_code: Optional[int]) -> Optional[PooledCredential]:
         entry = self.current() or self.select()
         if entry is None:

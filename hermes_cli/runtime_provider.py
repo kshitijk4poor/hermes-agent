@@ -378,7 +378,7 @@ def resolve_runtime_provider(
             has_custom_endpoint = True
         has_runtime_override = bool(explicit_api_key or explicit_base_url)
         should_use_pool = (
-            requested_provider == "openrouter"
+            requested_provider in {"openrouter", "auto"}
             and not has_custom_endpoint
             and not has_runtime_override
         )
