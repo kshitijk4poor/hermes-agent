@@ -6,7 +6,7 @@ import os
 from typing import Any, Dict, Optional
 
 from hermes_cli import auth as auth_mod
-from agent.credential_pool import load_pool
+from agent.credential_pool import CredentialPool, PooledCredential, load_pool
 from hermes_cli.auth import (
     AuthError,
     DEFAULT_CODEX_BASE_URL,
@@ -111,10 +111,10 @@ def _parse_api_mode(raw: Any) -> Optional[str]:
 def _resolve_runtime_from_pool_entry(
     *,
     provider: str,
-    entry: Any,
+    entry: PooledCredential,
     requested_provider: str,
     model_cfg: Optional[Dict[str, Any]] = None,
-    pool: Any = None,
+    pool: Optional[CredentialPool] = None,
 ) -> Dict[str, Any]:
     model_cfg = model_cfg or _get_model_config()
     base_url = (getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or "").rstrip("/")
@@ -456,7 +456,6 @@ def resolve_runtime_provider(
         # Allow base URL override from config.yaml model.base_url, but only
         # when the configured provider is anthropic — otherwise a non-Anthropic
         # base_url (e.g. Codex endpoint) would leak into Anthropic requests.
-        model_cfg = _get_model_config()
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = ""
         if cfg_provider == "anthropic":

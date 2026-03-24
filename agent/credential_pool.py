@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 import os
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, List, Optional
 
 from hermes_constants import OPENROUTER_BASE_URL
 import hermes_cli.auth as auth_mod
+
+logger = logging.getLogger(__name__)
 from hermes_cli.auth import (
     ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
@@ -25,7 +28,22 @@ from hermes_cli.auth import (
     write_credential_pool,
 )
 
-EXHAUSTED_TTL_SECONDS = 24 * 60 * 60
+
+# --- Status and type constants ---
+
+STATUS_OK = "ok"
+STATUS_EXHAUSTED = "exhausted"
+
+AUTH_TYPE_OAUTH = "oauth"
+AUTH_TYPE_API_KEY = "api_key"
+
+SOURCE_MANUAL = "manual"
+
+# Cooldown before retrying an exhausted credential.
+# 429 (rate-limited) cools down faster since quotas reset frequently.
+# 402 (billing/quota) and other codes use a longer default.
+EXHAUSTED_TTL_429_SECONDS = 60 * 60          # 1 hour
+EXHAUSTED_TTL_DEFAULT_SECONDS = 24 * 60 * 60 # 24 hours
 
 
 @dataclass
@@ -66,9 +84,9 @@ class PooledCredential:
         data = {k: payload.get(k) for k in allowed if k in payload}
         data.setdefault("id", uuid.uuid4().hex[:6])
         data.setdefault("label", payload.get("source", provider))
-        data.setdefault("auth_type", "api_key")
+        data.setdefault("auth_type", AUTH_TYPE_API_KEY)
         data.setdefault("priority", 0)
-        data.setdefault("source", "manual")
+        data.setdefault("source", SOURCE_MANUAL)
         data.setdefault("access_token", "")
         return cls(provider=provider, **data)
 
@@ -112,7 +130,14 @@ def _next_priority(entries: List[PooledCredential]) -> int:
 
 def _is_manual_source(source: str) -> bool:
     normalized = (source or "").strip().lower()
-    return normalized == "manual" or normalized.startswith("manual:")
+    return normalized == SOURCE_MANUAL or normalized.startswith(f"{SOURCE_MANUAL}:")
+
+
+def _exhausted_ttl(error_code: Optional[int]) -> int:
+    """Return cooldown seconds based on the HTTP status that caused exhaustion."""
+    if error_code == 429:
+        return EXHAUSTED_TTL_429_SECONDS
+    return EXHAUSTED_TTL_DEFAULT_SECONDS
 
 
 class CredentialPool:
@@ -125,27 +150,39 @@ class CredentialPool:
         return bool(self._entries)
 
     def entries(self) -> List[PooledCredential]:
-        return list(sorted(self._entries, key=lambda entry: entry.priority))
+        return list(self._entries)
 
     def current(self) -> Optional[PooledCredential]:
         if not self._current_id:
             return None
         return next((entry for entry in self._entries if entry.id == self._current_id), None)
 
+    def _replace_entry(self, old: PooledCredential, new: PooledCredential) -> None:
+        """Swap an entry in-place by id, preserving sort order."""
+        for idx, entry in enumerate(self._entries):
+            if entry.id == old.id:
+                self._entries[idx] = new
+                return
+
     def _persist(self) -> None:
         write_credential_pool(
             self.provider,
-            [entry.to_dict() for entry in sorted(self._entries, key=lambda item: item.priority)],
+            [entry.to_dict() for entry in self._entries],
         )
 
-    def _mark_exhausted(self, entry: PooledCredential, status_code: Optional[int]) -> None:
-        entry.last_status = "exhausted"
-        entry.last_status_at = time.time()
-        entry.last_error_code = status_code
+    def _mark_exhausted(self, entry: PooledCredential, status_code: Optional[int]) -> PooledCredential:
+        updated = replace(
+            entry,
+            last_status=STATUS_EXHAUSTED,
+            last_status_at=time.time(),
+            last_error_code=status_code,
+        )
+        self._replace_entry(entry, updated)
         self._persist()
+        return updated
 
     def _refresh_entry(self, entry: PooledCredential, *, force: bool) -> Optional[PooledCredential]:
-        if entry.auth_type != "oauth" or not entry.refresh_token:
+        if entry.auth_type != AUTH_TYPE_OAUTH or not entry.refresh_token:
             if force:
                 self._mark_exhausted(entry, None)
             return None
@@ -158,51 +195,61 @@ class CredentialPool:
                     entry.refresh_token,
                     use_json=entry.source.endswith("hermes_pkce"),
                 )
-                entry.access_token = refreshed["access_token"]
-                entry.refresh_token = refreshed["refresh_token"]
-                entry.expires_at_ms = refreshed["expires_at_ms"]
+                updated = replace(
+                    entry,
+                    access_token=refreshed["access_token"],
+                    refresh_token=refreshed["refresh_token"],
+                    expires_at_ms=refreshed["expires_at_ms"],
+                )
             elif self.provider == "openai-codex":
                 refreshed = auth_mod.refresh_codex_oauth_pure(
                     entry.access_token,
                     entry.refresh_token,
                 )
-                entry.access_token = refreshed["access_token"]
-                entry.refresh_token = refreshed["refresh_token"]
-                entry.last_refresh = refreshed.get("last_refresh")
+                updated = replace(
+                    entry,
+                    access_token=refreshed["access_token"],
+                    refresh_token=refreshed["refresh_token"],
+                    last_refresh=refreshed.get("last_refresh"),
+                )
             elif self.provider == "nous":
-                refreshed = auth_mod.refresh_nous_oauth_pure(
-                    entry.access_token,
-                    entry.refresh_token,
-                    entry.client_id or "hermes-cli",
-                    entry.portal_base_url or "https://portal.nousresearch.com",
-                    entry.inference_base_url or "https://inference-api.nousresearch.com/v1",
-                    token_type=entry.token_type or "Bearer",
-                    scope=entry.scope or "",
-                    obtained_at=entry.obtained_at,
-                    expires_at=entry.expires_at,
-                    agent_key=entry.agent_key,
-                    agent_key_expires_at=entry.agent_key_expires_at,
+                nous_state = {
+                    "access_token": entry.access_token,
+                    "refresh_token": entry.refresh_token,
+                    "client_id": entry.client_id,
+                    "portal_base_url": entry.portal_base_url,
+                    "inference_base_url": entry.inference_base_url,
+                    "token_type": entry.token_type,
+                    "scope": entry.scope,
+                    "obtained_at": entry.obtained_at,
+                    "expires_at": entry.expires_at,
+                    "agent_key": entry.agent_key,
+                    "agent_key_expires_at": entry.agent_key_expires_at,
+                    "tls": entry.tls,
+                }
+                refreshed = auth_mod.refresh_nous_oauth_from_state(
+                    nous_state,
                     min_key_ttl_seconds=DEFAULT_AGENT_KEY_MIN_TTL_SECONDS,
                     force_refresh=force,
                     force_mint=force,
                 )
-                for key, value in refreshed.items():
-                    if hasattr(entry, key):
-                        setattr(entry, key, value)
+                # Apply all returned fields that match dataclass fields
+                updates = {k: v for k, v in refreshed.items() if hasattr(entry, k)}
+                updated = replace(entry, **updates)
             else:
                 return entry
-        except Exception:
+        except Exception as exc:
+            logger.debug("Credential refresh failed for %s/%s: %s", self.provider, entry.id, exc)
             self._mark_exhausted(entry, None)
             return None
 
-        entry.last_status = "ok"
-        entry.last_status_at = None
-        entry.last_error_code = None
+        updated = replace(updated, last_status=STATUS_OK, last_status_at=None, last_error_code=None)
+        self._replace_entry(entry, updated)
         self._persist()
-        return entry
+        return updated
 
     def _entry_needs_refresh(self, entry: PooledCredential) -> bool:
-        if entry.auth_type != "oauth":
+        if entry.auth_type != AUTH_TYPE_OAUTH:
             return False
         if self.provider == "anthropic":
             if entry.expires_at_ms is None:
@@ -227,13 +274,13 @@ class CredentialPool:
 
     def select(self) -> Optional[PooledCredential]:
         now = time.time()
-        for entry in sorted(self._entries, key=lambda item: item.priority):
-            if entry.last_status == "exhausted":
-                if entry.last_status_at and now - entry.last_status_at < EXHAUSTED_TTL_SECONDS:
+        for idx, entry in enumerate(self._entries):
+            if entry.last_status == STATUS_EXHAUSTED:
+                ttl = _exhausted_ttl(entry.last_error_code)
+                if entry.last_status_at and now - entry.last_status_at < ttl:
                     continue
-                entry.last_status = "ok"
-                entry.last_status_at = None
-                entry.last_error_code = None
+                entry = replace(entry, last_status=STATUS_OK, last_status_at=None, last_error_code=None)
+                self._entries[idx] = entry
                 self._persist()
             if self._entry_needs_refresh(entry):
                 refreshed = self._refresh_entry(entry, force=False)
@@ -251,9 +298,10 @@ class CredentialPool:
             return current
 
         now = time.time()
-        for entry in sorted(self._entries, key=lambda item: item.priority):
-            if entry.last_status == "exhausted":
-                if entry.last_status_at and now - entry.last_status_at < EXHAUSTED_TTL_SECONDS:
+        for entry in self._entries:
+            if entry.last_status == STATUS_EXHAUSTED:
+                ttl = _exhausted_ttl(entry.last_error_code)
+                if entry.last_status_at and now - entry.last_status_at < ttl:
                     continue
             return entry
         return None
@@ -277,31 +325,33 @@ class CredentialPool:
 
     def reset_statuses(self) -> int:
         count = 0
+        new_entries = []
         for entry in self._entries:
             if entry.last_status or entry.last_status_at or entry.last_error_code:
-                entry.last_status = None
-                entry.last_status_at = None
-                entry.last_error_code = None
+                new_entries.append(replace(entry, last_status=None, last_status_at=None, last_error_code=None))
                 count += 1
+            else:
+                new_entries.append(entry)
         if count:
+            self._entries = new_entries
             self._persist()
         return count
 
     def remove_index(self, index: int) -> Optional[PooledCredential]:
-        ordered = sorted(self._entries, key=lambda item: item.priority)
-        if index < 1 or index > len(ordered):
+        if index < 1 or index > len(self._entries):
             return None
-        removed = ordered.pop(index - 1)
-        for new_priority, entry in enumerate(ordered):
-            entry.priority = new_priority
-        self._entries = ordered
+        removed = self._entries.pop(index - 1)
+        self._entries = [
+            replace(entry, priority=new_priority)
+            for new_priority, entry in enumerate(self._entries)
+        ]
         self._persist()
         if self._current_id == removed.id:
             self._current_id = None
         return removed
 
     def add_entry(self, entry: PooledCredential) -> PooledCredential:
-        entry.priority = _next_priority(self._entries)
+        entry = replace(entry, priority=_next_priority(self._entries))
         self._entries.append(entry)
         self._persist()
         return entry
@@ -316,16 +366,19 @@ def _upsert_entry(entries: List[PooledCredential], provider: str, source: str, p
         entries.append(PooledCredential.from_dict(provider, payload))
         return True
 
-    changed = False
+    updates = {}
     for key, value in payload.items():
         if key in {"id", "priority"} or value is None:
             continue
         if key == "label" and existing.label:
             continue
         if hasattr(existing, key) and getattr(existing, key) != value:
-            setattr(existing, key, value)
-            changed = True
-    return changed
+            updates[key] = value
+    if updates:
+        idx = entries.index(existing)
+        entries[idx] = replace(existing, **updates)
+        return True
+    return False
 
 
 def _seed_from_env(provider: str, entries: List[PooledCredential]) -> bool:
@@ -339,7 +392,7 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> bool:
                 "env:OPENROUTER_API_KEY",
                 {
                     "source": "env:OPENROUTER_API_KEY",
-                    "auth_type": "api_key",
+                    "auth_type": AUTH_TYPE_API_KEY,
                     "access_token": token,
                     "base_url": OPENROUTER_BASE_URL,
                     "label": "OPENROUTER_API_KEY",
@@ -367,7 +420,7 @@ def _seed_from_env(provider: str, entries: List[PooledCredential]) -> bool:
         token = os.getenv(env_var, "").strip()
         if not token:
             continue
-        auth_type = "oauth" if provider == "anthropic" and not token.startswith("sk-ant-api") else "api_key"
+        auth_type = AUTH_TYPE_OAUTH if provider == "anthropic" and not token.startswith("sk-ant-api") else AUTH_TYPE_API_KEY
         base_url = env_url or pconfig.inference_base_url
         changed |= _upsert_entry(
             entries,
@@ -408,11 +461,14 @@ def _normalize_pool_priorities(provider: str, entries: List[PooledCredential]) -
         ),
     )
 
+    ordered = [*manual_entries, *seeded_entries]
     changed = False
-    for new_priority, entry in enumerate([*manual_entries, *seeded_entries]):
+    for new_priority, entry in enumerate(ordered):
         if entry.priority != new_priority:
-            entry.priority = new_priority
             changed = True
+    if changed:
+        for idx, entry in enumerate(ordered):
+            entries[entries.index(entry)] = replace(entry, priority=idx)
     return changed
 
 
@@ -431,7 +487,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                 "hermes_pkce",
                 {
                     "source": "hermes_pkce",
-                    "auth_type": "oauth",
+                    "auth_type": AUTH_TYPE_OAUTH,
                     "access_token": hermes_creds.get("accessToken", ""),
                     "refresh_token": hermes_creds.get("refreshToken"),
                     "expires_at_ms": hermes_creds.get("expiresAt"),
@@ -446,7 +502,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                 "claude_code",
                 {
                     "source": "claude_code",
-                    "auth_type": "oauth",
+                    "auth_type": AUTH_TYPE_OAUTH,
                     "access_token": claude_creds.get("accessToken", ""),
                     "refresh_token": claude_creds.get("refreshToken"),
                     "expires_at_ms": claude_creds.get("expiresAt"),
@@ -463,7 +519,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                 "device_code",
                 {
                     "source": "device_code",
-                    "auth_type": "oauth",
+                    "auth_type": AUTH_TYPE_OAUTH,
                     "access_token": state.get("access_token", ""),
                     "refresh_token": state.get("refresh_token"),
                     "expires_at": state.get("expires_at"),
@@ -488,7 +544,7 @@ def _seed_from_singletons(provider: str, entries: List[PooledCredential]) -> boo
                 "device_code",
                 {
                     "source": "device_code",
-                    "auth_type": "oauth",
+                    "auth_type": AUTH_TYPE_OAUTH,
                     "access_token": tokens.get("access_token", ""),
                     "refresh_token": tokens.get("refresh_token"),
                     "base_url": "https://chatgpt.com/backend-api/codex",

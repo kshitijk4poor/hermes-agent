@@ -116,24 +116,24 @@ def _select_pool_entry(provider: str) -> Tuple[bool, Optional[Any]]:
 def _pool_runtime_api_key(entry: Any) -> str:
     if entry is None:
         return ""
-    return str(
-        getattr(entry, "runtime_api_key", None)
-        or getattr(entry, "agent_key", None)
-        or getattr(entry, "access_token", "")
-        or ""
-    ).strip()
+    # Use the PooledCredential.runtime_api_key property which handles
+    # provider-specific fallback (e.g. agent_key for nous).
+    key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
+    return str(key or "").strip()
 
 
 def _pool_runtime_base_url(entry: Any, fallback: str = "") -> str:
     if entry is None:
         return str(fallback or "").strip().rstrip("/")
-    return str(
+    # runtime_base_url handles provider-specific logic (e.g. nous prefers inference_base_url).
+    # Fall back through inference_base_url and base_url for non-PooledCredential entries.
+    url = (
         getattr(entry, "runtime_base_url", None)
         or getattr(entry, "inference_base_url", None)
         or getattr(entry, "base_url", None)
         or fallback
-        or ""
-    ).strip().rstrip("/")
+    )
+    return str(url or "").strip().rstrip("/")
 
 
 # ── Codex Responses → chat.completions adapter ─────────────────────────────

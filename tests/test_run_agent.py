@@ -1546,7 +1546,7 @@ class TestCredentialPoolRecovery:
 
         recovered, retry_same = agent._recover_with_credential_pool(
             status_code=402,
-            retry_429_with_same_cred=False,
+            has_retried_429=False,
         )
 
         assert recovered is True
@@ -1569,7 +1569,7 @@ class TestCredentialPoolRecovery:
 
         recovered, retry_same = agent._recover_with_credential_pool(
             status_code=429,
-            retry_429_with_same_cred=False,
+            has_retried_429=False,
         )
         assert recovered is False
         assert retry_same is True
@@ -1577,7 +1577,7 @@ class TestCredentialPoolRecovery:
 
         recovered, retry_same = agent._recover_with_credential_pool(
             status_code=429,
-            retry_429_with_same_cred=True,
+            has_retried_429=True,
         )
         assert recovered is True
         assert retry_same is False

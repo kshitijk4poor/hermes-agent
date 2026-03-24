@@ -1442,6 +1442,37 @@ def refresh_nous_oauth_pure(
     return state
 
 
+def refresh_nous_oauth_from_state(
+    state: Dict[str, Any],
+    *,
+    min_key_ttl_seconds: int = DEFAULT_AGENT_KEY_MIN_TTL_SECONDS,
+    timeout_seconds: float = 15.0,
+    force_refresh: bool = False,
+    force_mint: bool = False,
+) -> Dict[str, Any]:
+    """Refresh Nous OAuth from a state dict. Thin wrapper around refresh_nous_oauth_pure."""
+    tls = state.get("tls") or {}
+    return refresh_nous_oauth_pure(
+        state.get("access_token", ""),
+        state.get("refresh_token", ""),
+        state.get("client_id", "hermes-cli"),
+        state.get("portal_base_url", DEFAULT_NOUS_PORTAL_URL),
+        state.get("inference_base_url", DEFAULT_NOUS_INFERENCE_URL),
+        token_type=state.get("token_type", "Bearer"),
+        scope=state.get("scope", DEFAULT_NOUS_SCOPE),
+        obtained_at=state.get("obtained_at"),
+        expires_at=state.get("expires_at"),
+        agent_key=state.get("agent_key"),
+        agent_key_expires_at=state.get("agent_key_expires_at"),
+        min_key_ttl_seconds=min_key_ttl_seconds,
+        timeout_seconds=timeout_seconds,
+        insecure=tls.get("insecure"),
+        ca_bundle=tls.get("ca_bundle"),
+        force_refresh=force_refresh,
+        force_mint=force_mint,
+    )
+
+
 def resolve_nous_runtime_credentials(
     *,
     min_key_ttl_seconds: int = DEFAULT_AGENT_KEY_MIN_TTL_SECONDS,
@@ -2417,22 +2448,10 @@ def _nous_device_code_login(
         "agent_key_reused": None,
         "agent_key_obtained_at": None,
     }
-    return refresh_nous_oauth_pure(
-        auth_state["access_token"],
-        auth_state["refresh_token"],
-        auth_state["client_id"],
-        auth_state["portal_base_url"],
-        auth_state["inference_base_url"],
-        token_type=auth_state["token_type"],
-        scope=auth_state["scope"],
-        obtained_at=auth_state["obtained_at"],
-        expires_at=auth_state["expires_at"],
-        agent_key=auth_state["agent_key"],
-        agent_key_expires_at=auth_state["agent_key_expires_at"],
+    return refresh_nous_oauth_from_state(
+        auth_state,
         min_key_ttl_seconds=min_key_ttl_seconds,
         timeout_seconds=timeout_seconds,
-        insecure=insecure,
-        ca_bundle=ca_bundle,
         force_refresh=False,
         force_mint=True,
     )

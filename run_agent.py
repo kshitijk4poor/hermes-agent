@@ -3470,21 +3470,29 @@ class AIAgent:
         self,
         *,
         status_code: Optional[int],
-        retry_429_with_same_cred: bool,
+        has_retried_429: bool,
     ) -> tuple[bool, bool]:
+        """Attempt credential recovery via pool rotation.
+
+        Returns (recovered, has_retried_429).
+        On 429: first occurrence retries same credential (sets flag True).
+                second consecutive 429 rotates to next credential (resets flag).
+        On 402: immediately rotates (billing exhaustion won't resolve with retry).
+        On 401: attempts token refresh before rotating.
+        """
         pool = getattr(self, "_credential_pool", None)
         if pool is None or status_code is None:
-            return False, retry_429_with_same_cred
+            return False, has_retried_429
 
         if status_code == 402:
             next_entry = pool.mark_exhausted_and_rotate(status_code=402)
             if next_entry is not None:
                 self._swap_credential(next_entry)
                 return True, False
-            return False, retry_429_with_same_cred
+            return False, has_retried_429
 
         if status_code == 429:
-            if not retry_429_with_same_cred:
+            if not has_retried_429:
                 return False, True
             next_entry = pool.mark_exhausted_and_rotate(status_code=429)
             if next_entry is not None:
@@ -3496,9 +3504,9 @@ class AIAgent:
             refreshed = pool.try_refresh_current()
             if refreshed is not None:
                 self._swap_credential(refreshed)
-                return True, retry_429_with_same_cred
+                return True, has_retried_429
 
-        return False, retry_429_with_same_cred
+        return False, has_retried_429
 
     def _anthropic_messages_create(self, api_kwargs: dict):
         if self.api_mode == "anthropic_messages":
@@ -5804,7 +5812,7 @@ class AIAgent:
             codex_auth_retry_attempted = False
             anthropic_auth_retry_attempted = False
             nous_auth_retry_attempted = False
-            retry_429_with_same_cred = False
+            has_retried_429 = False
             restart_with_compressed_messages = False
             restart_with_length_continuation = False
 
@@ -6158,6 +6166,7 @@ class AIAgent:
                             if not self.quiet_mode:
                                 self._vprint(f"{self.log_prefix}   💾 Cache: {cached:,}/{prompt:,} tokens ({hit_pct:.0f}% hit, {written:,} written)")
                     
+                    has_retried_429 = False  # Reset on success
                     break  # Success, exit retry loop
 
                 except InterruptedError:
@@ -6182,9 +6191,9 @@ class AIAgent:
                         self.thinking_callback("")
 
                     status_code = getattr(api_error, "status_code", None)
-                    recovered_with_pool, retry_429_with_same_cred = self._recover_with_credential_pool(
+                    recovered_with_pool, has_retried_429 = self._recover_with_credential_pool(
                         status_code=status_code,
-                        retry_429_with_same_cred=retry_429_with_same_cred,
+                        has_retried_429=has_retried_429,
                     )
                     if recovered_with_pool:
                         continue

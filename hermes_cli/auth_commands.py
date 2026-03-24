@@ -5,9 +5,18 @@ from __future__ import annotations
 from getpass import getpass
 import uuid
 
-from agent.credential_pool import PooledCredential, load_pool
+from agent.credential_pool import (
+    AUTH_TYPE_API_KEY,
+    AUTH_TYPE_OAUTH,
+    SOURCE_MANUAL,
+    STATUS_EXHAUSTED,
+    PooledCredential,
+    _label_from_token,
+    load_pool,
+)
 import hermes_cli.auth as auth_mod
 from hermes_cli.auth import PROVIDER_REGISTRY
+from hermes_constants import OPENROUTER_BASE_URL
 
 
 def _normalize_provider(provider: str) -> str:
@@ -19,18 +28,9 @@ def _normalize_provider(provider: str) -> str:
 
 def _provider_base_url(provider: str) -> str:
     if provider == "openrouter":
-        return "https://openrouter.ai/api/v1"
+        return OPENROUTER_BASE_URL
     pconfig = PROVIDER_REGISTRY.get(provider)
     return pconfig.inference_base_url if pconfig else ""
-
-
-def _derive_label(token: str, fallback: str) -> str:
-    claims = auth_mod._decode_jwt_claims(token)
-    for key in ("email", "preferred_username", "upn"):
-        value = claims.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return fallback
 
 
 def _oauth_default_label(provider: str, count: int) -> str:
@@ -51,14 +51,14 @@ def auth_add_command(args) -> None:
         raise SystemExit(f"Unknown provider: {provider}")
 
     requested_type = str(getattr(args, "auth_type", "") or "").strip().lower()
-    if requested_type in {"api_key", "api-key"}:
-        requested_type = "api_key"
+    if requested_type in {AUTH_TYPE_API_KEY, "api-key"}:
+        requested_type = AUTH_TYPE_API_KEY
     if not requested_type:
-        requested_type = "oauth" if provider in {"anthropic", "nous", "openai-codex"} else "api_key"
+        requested_type = AUTH_TYPE_OAUTH if provider in {"anthropic", "nous", "openai-codex"} else AUTH_TYPE_API_KEY
 
     pool = load_pool(provider)
 
-    if requested_type == "api_key":
+    if requested_type == AUTH_TYPE_API_KEY:
         token = (getattr(args, "api_key", None) or "").strip()
         if not token:
             token = getpass("Paste your API key: ").strip()
@@ -72,9 +72,9 @@ def auth_add_command(args) -> None:
             provider=provider,
             id=uuid.uuid4().hex[:6],
             label=label,
-            auth_type="api_key",
+            auth_type=AUTH_TYPE_API_KEY,
             priority=0,
-            source="manual",
+            source=SOURCE_MANUAL,
             access_token=token,
             base_url=_provider_base_url(provider),
         )
@@ -88,7 +88,7 @@ def auth_add_command(args) -> None:
         creds = anthropic_mod.run_hermes_oauth_login_pure()
         if not creds:
             raise SystemExit("Anthropic OAuth login did not return credentials.")
-        label = (getattr(args, "label", None) or "").strip() or _derive_label(
+        label = (getattr(args, "label", None) or "").strip() or _label_from_token(
             creds["access_token"],
             _oauth_default_label(provider, len(pool.entries()) + 1),
         )
@@ -96,9 +96,9 @@ def auth_add_command(args) -> None:
             provider=provider,
             id=uuid.uuid4().hex[:6],
             label=label,
-            auth_type="oauth",
+            auth_type=AUTH_TYPE_OAUTH,
             priority=0,
-            source="manual:hermes_pkce",
+            source=f"{SOURCE_MANUAL}:hermes_pkce",
             access_token=creds["access_token"],
             refresh_token=creds.get("refresh_token"),
             expires_at_ms=creds.get("expires_at_ms"),
@@ -120,43 +120,24 @@ def auth_add_command(args) -> None:
             ca_bundle=getattr(args, "ca_bundle", None),
             min_key_ttl_seconds=max(60, int(getattr(args, "min_key_ttl_seconds", 5 * 60))),
         )
-        label = (getattr(args, "label", None) or "").strip() or _derive_label(
+        label = (getattr(args, "label", None) or "").strip() or _label_from_token(
             creds.get("access_token", ""),
             _oauth_default_label(provider, len(pool.entries()) + 1),
         )
-        entry = PooledCredential(
-            provider=provider,
-            id=uuid.uuid4().hex[:6],
-            label=label,
-            auth_type="oauth",
-            priority=0,
-            source="manual:device_code",
-            access_token=creds["access_token"],
-            refresh_token=creds.get("refresh_token"),
-            expires_at=creds.get("expires_at"),
-            token_type=creds.get("token_type"),
-            scope=creds.get("scope"),
-            client_id=creds.get("client_id"),
-            portal_base_url=creds.get("portal_base_url"),
-            inference_base_url=creds.get("inference_base_url"),
-            obtained_at=creds.get("obtained_at"),
-            expires_in=creds.get("expires_in"),
-            agent_key=creds.get("agent_key"),
-            agent_key_id=creds.get("agent_key_id"),
-            agent_key_expires_at=creds.get("agent_key_expires_at"),
-            agent_key_expires_in=creds.get("agent_key_expires_in"),
-            agent_key_reused=creds.get("agent_key_reused"),
-            agent_key_obtained_at=creds.get("agent_key_obtained_at"),
-            tls=creds.get("tls"),
-            base_url=creds.get("inference_base_url"),
-        )
+        entry = PooledCredential.from_dict(provider, {
+            **creds,
+            "label": label,
+            "auth_type": AUTH_TYPE_OAUTH,
+            "source": f"{SOURCE_MANUAL}:device_code",
+            "base_url": creds.get("inference_base_url"),
+        })
         pool.add_entry(entry)
         print(f'Added {provider} OAuth credential #{len(pool.entries())}: "{entry.label}"')
         return
 
     if provider == "openai-codex":
         creds = auth_mod._codex_device_code_login()
-        label = (getattr(args, "label", None) or "").strip() or _derive_label(
+        label = (getattr(args, "label", None) or "").strip() or _label_from_token(
             creds["tokens"]["access_token"],
             _oauth_default_label(provider, len(pool.entries()) + 1),
         )
@@ -164,9 +145,9 @@ def auth_add_command(args) -> None:
             provider=provider,
             id=uuid.uuid4().hex[:6],
             label=label,
-            auth_type="oauth",
+            auth_type=AUTH_TYPE_OAUTH,
             priority=0,
-            source="manual:device_code",
+            source=f"{SOURCE_MANUAL}:device_code",
             access_token=creds["tokens"]["access_token"],
             refresh_token=creds["tokens"].get("refresh_token"),
             base_url=creds.get("base_url"),
@@ -197,7 +178,7 @@ def auth_list_command(args) -> None:
             if current is not None and entry.id == current.id:
                 marker = "← "
             status = ""
-            if entry.last_status == "exhausted":
+            if entry.last_status == STATUS_EXHAUSTED:
                 status = f" exhausted ({entry.last_error_code})"
             source = _display_source(entry.source)
             print(f"  #{idx}  {entry.label:<20} {entry.auth_type:<7} {source}{status} {marker}".rstrip())
