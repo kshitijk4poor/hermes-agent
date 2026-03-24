@@ -451,10 +451,7 @@ class GatewayConfig:
     def get_message_coalescing(self, platform: Optional[Platform] = None) -> MessageCoalescingConfig:
         """Return the effective coalescing config for a platform."""
         if not platform:
-            return MessageCoalescingConfig.from_dict(
-                self.message_coalescing.to_dict(),
-                defaults=self.message_coalescing,
-            )
+            return self.message_coalescing
 
         platform_cfg = self.platforms.get(platform)
         platform_override = None

@@ -368,6 +368,7 @@ class BasePlatformAdapter(ABC):
         self._pending_messages: Dict[str, MessageEvent] = {}
         self._pending_coalesced_messages: Dict[str, PendingCoalescedMessages] = {}
         self._pending_coalescing_tasks: Dict[str, asyncio.Task] = {}
+        self._coalescing_config: MessageCoalescingConfig = self._resolve_coalescing_config()
         # Background message-processing tasks spawned by handle_message().
         # Gateway shutdown cancels these so an old gateway instance doesn't keep
         # working on a task after --replace or manual restarts.
@@ -847,7 +848,7 @@ class BasePlatformAdapter(ABC):
             group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
         )
 
-        coalescing = self._get_message_coalescing_config()
+        coalescing = self._coalescing_config
 
         if event.is_command():
             self._clear_coalesced_message(session_key)
@@ -874,8 +875,8 @@ class BasePlatformAdapter(ABC):
 
         await self._handle_message_now(event, session_key)
 
-    def _get_message_coalescing_config(self) -> MessageCoalescingConfig:
-        """Resolve adapter-level inbound message coalescing settings."""
+    def _resolve_coalescing_config(self) -> MessageCoalescingConfig:
+        """Parse the coalescing config from adapter extras (called once at init)."""
         raw = self.config.extra.get("message_coalescing")
         if raw is None:
             return MessageCoalescingConfig(enabled=False)
@@ -945,6 +946,7 @@ class BasePlatformAdapter(ABC):
         remaining_cap_ms = max(0, config.max_wait_ms - elapsed_ms)
         delay_ms = config.debounce_ms
         if len(batch.events) < config.min_messages:
+            # Short-circuit: don't hold a lone message for the full debounce window
             delay_ms = min(delay_ms, 350)
         if config.max_wait_ms > 0:
             delay_ms = min(delay_ms, remaining_cap_ms)
@@ -967,23 +969,23 @@ class BasePlatformAdapter(ABC):
                 self._pending_coalescing_tasks.pop(session_key, None)
 
     def _pop_coalesced_event(self, session_key: str) -> Optional[MessageEvent]:
-        """Return the current coalesced event and clear any pending timer."""
-        current_task = asyncio.current_task()
-        task = self._pending_coalescing_tasks.pop(session_key, None)
-        if task and task is not current_task and not task.done():
-            task.cancel()
-
-        batch = self._pending_coalesced_messages.pop(session_key, None)
+        """Pop and return the coalesced batch as a merged event; cancel any pending flush."""
+        batch = self._drain_coalesced_state(session_key)
         if batch is None:
             return None
         return self._build_coalesced_event(batch)
 
     def _clear_coalesced_message(self, session_key: str) -> None:
         """Drop any pending coalesced inbound batch for a session."""
-        self._pending_coalesced_messages.pop(session_key, None)
+        self._drain_coalesced_state(session_key)
+
+    def _drain_coalesced_state(self, session_key: str) -> Optional[PendingCoalescedMessages]:
+        """Remove coalesced batch and cancel its flush task. Returns the batch if present."""
+        batch = self._pending_coalesced_messages.pop(session_key, None)
         task = self._pending_coalescing_tasks.pop(session_key, None)
-        if task and not task.done():
+        if task and task is not asyncio.current_task() and not task.done():
             task.cancel()
+        return batch
 
     def _build_coalesced_event(self, batch: PendingCoalescedMessages) -> MessageEvent:
         """Format a pending batch into a single MessageEvent."""
@@ -992,7 +994,7 @@ class BasePlatformAdapter(ABC):
 
         latest = batch.events[-1]
         elapsed_seconds = max(0.0, batch.last_received_at - batch.first_received_at)
-        include_hint = self._get_message_coalescing_config().include_hint
+        include_hint = self._coalescing_config.include_hint
         unique_senders = {
             event.source.user_id or event.source.user_name or ""
             for event in batch.events
