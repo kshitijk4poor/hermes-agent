@@ -968,7 +968,10 @@ class BasePlatformAdapter(ABC):
 
     def _pop_coalesced_event(self, session_key: str) -> Optional[MessageEvent]:
         """Return the current coalesced event and clear any pending timer."""
-        current_task = asyncio.current_task()
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
         task = self._pending_coalescing_tasks.pop(session_key, None)
         if task and task is not current_task and not task.done():
             task.cancel()
@@ -1373,7 +1376,10 @@ class BasePlatformAdapter(ABC):
     
     def get_pending_message(self, session_key: str) -> Optional[MessageEvent]:
         """Get and clear any pending message for a session."""
-        return self._pending_messages.pop(session_key, None)
+        pending_message = self._pending_messages.pop(session_key, None)
+        if pending_message is not None:
+            return pending_message
+        return self._pop_coalesced_event(session_key)
     
     def build_source(
         self,

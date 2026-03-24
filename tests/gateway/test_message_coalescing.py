@@ -143,6 +143,23 @@ class TestMessageCoalescingConfig:
         assert created.extra["message_coalescing"]["debounce_ms"] == 1500
         assert created.extra["message_coalescing"]["max_wait_ms"] == 5000
 
+    def test_preserves_max_wait_below_debounce(self):
+        config = GatewayConfig.from_dict(
+            {
+                "message_coalescing": {
+                    "enabled": True,
+                    "debounce_ms": 1500,
+                    "max_wait_ms": 300,
+                    "min_messages": 2,
+                    "multi_user_only": True,
+                    "include_hint": True,
+                }
+            }
+        )
+
+        assert config.message_coalescing.debounce_ms == 1500
+        assert config.message_coalescing.max_wait_ms == 300
+
 
 class TestAdapterMessageCoalescing:
     @pytest.mark.asyncio
@@ -361,6 +378,34 @@ class TestAdapterMessageCoalescing:
         assert len(seen_texts) == 2
         assert "second" in seen_texts[1]
         assert "third" in seen_texts[1]
+
+    @pytest.mark.asyncio
+    async def test_get_pending_message_returns_coalesced_followup_for_interrupt_handoff(self):
+        adapter = DummyCoalescingAdapter(
+            extra={
+                "message_coalescing": {
+                    "enabled": True,
+                    "debounce_ms": 50,
+                    "max_wait_ms": 200,
+                    "min_messages": 2,
+                    "multi_user_only": True,
+                    "include_hint": True,
+                }
+            }
+        )
+        adapter.set_message_handler(AsyncMock(return_value=None))
+
+        follow_up = _make_event("follow-up", message_id="2")
+        session_key = build_session_key(follow_up.source)
+        adapter._active_sessions[session_key] = asyncio.Event()
+
+        await adapter.handle_message(follow_up)
+
+        pending = adapter.get_pending_message(session_key)
+
+        assert pending is not None
+        assert pending.text == "follow-up"
+        assert adapter.get_pending_message(session_key) is None
 
     @pytest.mark.asyncio
     async def test_cancel_background_tasks_clears_pending_coalescing(self):

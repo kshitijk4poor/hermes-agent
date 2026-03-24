@@ -253,9 +253,6 @@ class MessageCoalescingConfig:
         max_wait_ms = _coerce_non_negative_int(data.get("max_wait_ms"), base.max_wait_ms)
         min_messages = max(1, _coerce_non_negative_int(data.get("min_messages"), base.min_messages))
 
-        if max_wait_ms < debounce_ms:
-            max_wait_ms = debounce_ms
-
         return cls(
             enabled=_coerce_bool(data.get("enabled"), base.enabled),
             debounce_ms=debounce_ms,
@@ -891,4 +888,3 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
             config.default_reset_policy.at_hour = int(reset_hour)
         except ValueError:
             pass
-
