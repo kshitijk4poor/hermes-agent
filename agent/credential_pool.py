@@ -91,15 +91,14 @@ class PooledCredential:
         return cls(provider=provider, **data)
 
     def to_dict(self) -> Dict[str, Any]:
+        _ALWAYS_EMIT = {"last_status", "last_status_at", "last_error_code"}
         result: Dict[str, Any] = {}
         for field_def in fields(self):
             if field_def.name == "provider":
                 continue
             value = getattr(self, field_def.name)
-            if value is not None:
+            if value is not None or field_def.name in _ALWAYS_EMIT:
                 result[field_def.name] = value
-        for key in ("last_status", "last_status_at", "last_error_code"):
-            result.setdefault(key, getattr(self, key))
         return result
 
     @property
@@ -274,6 +273,7 @@ class CredentialPool:
 
     def select(self) -> Optional[PooledCredential]:
         now = time.time()
+        cleared_any = False
         for entry in self._entries:
             if entry.last_status == STATUS_EXHAUSTED:
                 ttl = _exhausted_ttl(entry.last_error_code)
@@ -282,14 +282,18 @@ class CredentialPool:
                 cleared = replace(entry, last_status=STATUS_OK, last_status_at=None, last_error_code=None)
                 self._replace_entry(entry, cleared)
                 entry = cleared
-                self._persist()
+                cleared_any = True
             if self._entry_needs_refresh(entry):
                 refreshed = self._refresh_entry(entry, force=False)
                 if refreshed is None:
                     continue
                 entry = refreshed
+            if cleared_any:
+                self._persist()
             self._current_id = entry.id
             return entry
+        if cleared_any:
+            self._persist()
         self._current_id = None
         return None
 

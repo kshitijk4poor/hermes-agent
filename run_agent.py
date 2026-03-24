@@ -3423,13 +3423,11 @@ class AIAgent:
         return True
 
     def _apply_client_headers_for_base_url(self, base_url: str) -> None:
+        from agent.auxiliary_client import _OR_HEADERS
+
         normalized = (base_url or "").lower()
         if "openrouter" in normalized:
-            self._client_kwargs["default_headers"] = {
-                "HTTP-Referer": "https://hermes-agent.nousresearch.com",
-                "X-OpenRouter-Title": "Hermes Agent",
-                "X-OpenRouter-Categories": "productivity,cli-agent",
-            }
+            self._client_kwargs["default_headers"] = dict(_OR_HEADERS)
         elif "api.githubcopilot.com" in normalized:
             from hermes_cli.models import copilot_default_headers
 
@@ -3480,13 +3478,14 @@ class AIAgent:
         On 402: immediately rotates (billing exhaustion won't resolve with retry).
         On 401: attempts token refresh before rotating.
         """
-        pool = getattr(self, "_credential_pool", None)
+        pool = self._credential_pool
         if pool is None or status_code is None:
             return False, has_retried_429
 
         if status_code == 402:
             next_entry = pool.mark_exhausted_and_rotate(status_code=402)
             if next_entry is not None:
+                logger.info(f"Credential 402 (billing) — rotated to pool entry {getattr(next_entry, 'id', '?')}")
                 self._swap_credential(next_entry)
                 return True, False
             return False, has_retried_429
@@ -3496,6 +3495,7 @@ class AIAgent:
                 return False, True
             next_entry = pool.mark_exhausted_and_rotate(status_code=429)
             if next_entry is not None:
+                logger.info(f"Credential 429 (rate limit) — rotated to pool entry {getattr(next_entry, 'id', '?')}")
                 self._swap_credential(next_entry)
                 return True, False
             return False, True
@@ -3503,6 +3503,7 @@ class AIAgent:
         if status_code == 401:
             refreshed = pool.try_refresh_current()
             if refreshed is not None:
+                logger.info(f"Credential 401 — refreshed pool entry {getattr(refreshed, 'id', '?')}")
                 self._swap_credential(refreshed)
                 return True, has_retried_429
 
