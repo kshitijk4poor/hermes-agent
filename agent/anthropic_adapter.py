@@ -201,21 +201,12 @@ def is_claude_code_token_valid(creds: Dict[str, Any]) -> bool:
     return now_ms < (expires_at - 60_000)
 
 
-def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
-    """Attempt to refresh an expired Claude Code OAuth token.
+def _exchange_refresh_token(refresh_token: str) -> Optional[Dict[str, Any]]:
+    """Exchange a refresh token for new credentials via the OAuth token endpoint.
 
-    Uses the same token endpoint and client_id as Claude Code / OpenCode.
-    Only works for credentials that have a refresh token (from claude /login
-    or claude setup-token with OAuth flow).
-
-    Returns the new access token, or None if refresh fails.
+    Returns dict with {access_token, refresh_token, expires_in} on success, None on failure.
     """
     import urllib.request
-
-    refresh_token = creds.get("refreshToken", "")
-    if not refresh_token:
-        logger.debug("No refresh token available — cannot refresh")
-        return None
 
     data = json.dumps({
         "grant_type": "refresh_token",
@@ -235,22 +226,34 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
 
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode())
-            new_access = result.get("access_token", "")
-            new_refresh = result.get("refresh_token", refresh_token)
-            expires_in = result.get("expires_in", 3600)  # seconds
-
-            if new_access:
-                import time
-                new_expires_ms = int(time.time() * 1000) + (expires_in * 1000)
-                # Write refreshed credentials back to ~/.claude/.credentials.json
-                _write_claude_code_credentials(new_access, new_refresh, new_expires_ms)
-                logger.debug("Successfully refreshed Claude Code OAuth token")
-                return new_access
+            return json.loads(resp.read().decode())
     except Exception as e:
-        logger.debug("Failed to refresh Claude Code token: %s", e)
+        logger.debug("OAuth token refresh failed: %s", e)
+        return None
 
-    return None
+
+def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
+    """Refresh an expired Claude Code OAuth token.
+
+    Returns the new access token, or None if refresh fails.
+    """
+    import time
+
+    refresh_token = creds.get("refreshToken", "")
+    if not refresh_token:
+        logger.debug("No refresh token available — cannot refresh")
+        return None
+
+    result = _exchange_refresh_token(refresh_token)
+    if not result or not result.get("access_token"):
+        return None
+
+    new_access = result["access_token"]
+    new_refresh = result.get("refresh_token", refresh_token)
+    new_expires_ms = int(time.time() * 1000) + (result.get("expires_in", 3600) * 1000)
+    _write_claude_code_credentials(new_access, new_refresh, new_expires_ms)
+    logger.debug("Successfully refreshed Claude Code OAuth token")
+    return new_access
 
 
 def _write_claude_code_credentials(access_token: str, refresh_token: str, expires_at_ms: int) -> None:
@@ -604,47 +607,22 @@ def refresh_hermes_oauth_token() -> Optional[str]:
     Returns the new access token, or None if refresh fails.
     """
     import time
-    import urllib.request
 
     creds = read_hermes_oauth_credentials()
     if not creds or not creds.get("refreshToken"):
         return None
 
-    try:
-        data = json.dumps({
-            "grant_type": "refresh_token",
-            "refresh_token": creds["refreshToken"],
-            "client_id": _OAUTH_CLIENT_ID,
-        }).encode()
+    result = _exchange_refresh_token(creds["refreshToken"])
+    if not result or not result.get("access_token"):
+        return None
 
-        req = urllib.request.Request(
-            _OAUTH_TOKEN_URL,
-            data=data,
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": f"claude-cli/{_CLAUDE_CODE_VERSION} (external, cli)",
-            },
-            method="POST",
-        )
-
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode())
-
-        new_access = result.get("access_token", "")
-        new_refresh = result.get("refresh_token", creds["refreshToken"])
-        expires_in = result.get("expires_in", 3600)
-
-        if new_access:
-            new_expires_ms = int(time.time() * 1000) + (expires_in * 1000)
-            _save_hermes_oauth_credentials(new_access, new_refresh, new_expires_ms)
-            # Also update Claude Code's credential file
-            _write_claude_code_credentials(new_access, new_refresh, new_expires_ms)
-            logger.debug("Successfully refreshed Hermes OAuth token")
-            return new_access
-    except Exception as e:
-        logger.debug("Failed to refresh Hermes OAuth token: %s", e)
-
-    return None
+    new_access = result["access_token"]
+    new_refresh = result.get("refresh_token", creds["refreshToken"])
+    new_expires_ms = int(time.time() * 1000) + (result.get("expires_in", 3600) * 1000)
+    _save_hermes_oauth_credentials(new_access, new_refresh, new_expires_ms)
+    _write_claude_code_credentials(new_access, new_refresh, new_expires_ms)
+    logger.debug("Successfully refreshed Hermes OAuth token")
+    return new_access
 
 
 # ---------------------------------------------------------------------------
