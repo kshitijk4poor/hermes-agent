@@ -2623,7 +2623,27 @@ class HermesCLI:
 
         _cprint(f"\n  {_DIM}Tip: Just type your message to chat with Hermes!{_RST}")
         _cprint(f"  {_DIM}Multi-line: Alt+Enter for a new line{_RST}")
-        _cprint(f"  {_DIM}Paste image: Alt+V (or /paste){_RST}\n")
+        _cprint(f"  {_DIM}Paste image: {self._paste_image_help_hint()} (or /paste){_RST}\n")
+
+    def _paste_shortcut_hint(self) -> str:
+        """Return the primary paste shortcut shown in CLI help."""
+        if sys.platform == "darwin":
+            return "Cmd+V"
+        if sys.platform.startswith("linux"):
+            try:
+                from hermes_cli.clipboard import _is_wsl
+                if _is_wsl():
+                    return "Alt+V"
+            except Exception:
+                pass
+        return "Ctrl+V"
+
+    def _paste_image_help_hint(self) -> str:
+        """Return the user-facing paste hint shown in help output."""
+        primary = self._paste_shortcut_hint()
+        if primary == "Alt+V":
+            return primary
+        return f"{primary} or Alt+V"
     
     def show_tools(self):
         """Display available tools with kawaii ASCII art."""
