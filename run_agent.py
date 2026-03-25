@@ -3806,10 +3806,8 @@ class AIAgent:
                         )
 
                         if _is_timeout or _is_conn_err:
-                            # Transient network / timeout error.  Retry the
-                            # streaming request with a fresh connection rather
-                            # than falling back to non-streaming (which would
-                            # hang for up to 15 min on the same dead server).
+                            # Transient network / timeout error. Retry the
+                            # streaming request with a fresh connection first.
                             if _stream_attempt < _max_stream_retries:
                                 logger.info(
                                     "Streaming attempt %s/%s failed (%s: %s), "
@@ -3827,30 +3825,22 @@ class AIAgent:
                                     )
                                     request_client_holder["client"] = None
                                 continue
-                            # Exhausted retries — propagate to outer loop
                             logger.warning(
-                                "Streaming exhausted %s retries on transient error: %s",
+                                "Streaming exhausted %s retries on transient error, "
+                                "falling back to non-streaming: %s",
                                 _max_stream_retries + 1,
                                 e,
                             )
-                            result["error"] = e
-                            return
-
-                        # Non-transient error (e.g. "streaming not supported",
-                        # auth error, 4xx).  Fall back to non-streaming once.
-                        err_msg = str(e).lower()
-                        if "stream" in err_msg and "not supported" in err_msg:
+                        else:
                             logger.info(
-                                "Streaming not supported, falling back to non-streaming: %s", e
+                                "Streaming failed before delivery, falling back to non-streaming: %s",
+                                e,
                             )
-                            try:
-                                result["response"] = self._interruptible_api_call(api_kwargs)
-                            except Exception as fallback_err:
-                                result["error"] = fallback_err
-                            return
 
-                        # Unknown error — propagate to outer retry loop
-                        result["error"] = e
+                        try:
+                            result["response"] = self._interruptible_api_call(api_kwargs)
+                        except Exception as fallback_err:
+                            result["error"] = fallback_err
                         return
             finally:
                 request_client = request_client_holder.get("client")
