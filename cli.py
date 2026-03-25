@@ -1068,11 +1068,13 @@ class HermesCLI:
         # Works for local AND remote endpoints (e.g. Ollama Cloud, self-hosted Ollama).
         if self.model == _FALLBACK_MODEL:
             _base_url = _model_config.get("base_url", "") if isinstance(_model_config, dict) else ""
-            if _base_url and "openrouter.ai" not in _base_url:
-                from hermes_cli.runtime_provider import _auto_detect_local_model
-                _detected = _auto_detect_local_model(_base_url)
-                if _detected:
-                    self.model = _detected
+            if _base_url:
+                from agent.model_metadata import _is_known_provider_base_url
+                if not _is_known_provider_base_url(_base_url):
+                    from hermes_cli.runtime_provider import _auto_detect_local_model
+                    _detected = _auto_detect_local_model(_base_url)
+                    if _detected:
+                        self.model = _detected
         # Track whether model was explicitly chosen by the user or fell back
         # to the global default.  Provider-specific normalisation may override
         # the default silently but should warn when overriding an explicit choice.

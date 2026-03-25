@@ -212,7 +212,7 @@ class TestGetModelContextLength:
 
     @patch("agent.model_metadata.fetch_model_metadata")
     @patch("agent.model_metadata.fetch_endpoint_model_metadata")
-    @patch("agent.model_metadata._query_local_context_length", return_value=None)
+    @patch("agent.model_metadata._query_server_context_length", return_value=None)
     def test_custom_endpoint_without_metadata_skips_name_based_default(self, mock_local_query, mock_endpoint_fetch, mock_fetch):
         mock_fetch.return_value = {}
         mock_endpoint_fetch.return_value = {}

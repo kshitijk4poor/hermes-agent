@@ -227,7 +227,7 @@ def is_local_endpoint(base_url: str) -> bool:
     return False
 
 
-def detect_local_server_type(base_url: str) -> Optional[str]:
+def detect_server_type(base_url: str, *, _is_local: Optional[bool] = None) -> Optional[str]:
     """Detect which server is running at base_url by probing known endpoints.
 
     Works for both local and remote (cloud) servers — e.g. Ollama Cloud,
@@ -242,8 +242,9 @@ def detect_local_server_type(base_url: str) -> Optional[str]:
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
 
-    # Use a longer timeout for remote/cloud endpoints
-    timeout = 2.0 if is_local_endpoint(base_url) else 5.0
+    if _is_local is None:
+        _is_local = is_local_endpoint(base_url)
+    timeout = 2.0 if _is_local else 5.0
 
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -596,11 +597,11 @@ def _model_id_matches(candidate_id: str, lookup_model: str) -> bool:
     return False
 
 
-def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
+def _query_server_context_length(model: str, base_url: str) -> Optional[int]:
     """Query a server for the model's context length.
 
-    Despite the name, works for both local and remote (cloud) servers
-    such as Ollama Cloud or self-hosted Ollama on a VPS.
+    Works for both local and remote (cloud) servers — e.g. Ollama Cloud,
+    self-hosted Ollama on a VPS, etc.
     """
     import httpx
 
@@ -613,13 +614,14 @@ def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
 
+    _is_local = is_local_endpoint(base_url)
+
     try:
-        server_type = detect_local_server_type(base_url)
+        server_type = detect_server_type(base_url, _is_local=_is_local)
     except Exception:
         server_type = None
 
-    # Use a longer timeout for remote/cloud endpoints
-    timeout = 3.0 if is_local_endpoint(base_url) else 8.0
+    timeout = 3.0 if _is_local else 8.0
 
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -825,20 +827,20 @@ def get_model_context_length(
             context_length = matched.get("context_length")
             if isinstance(context_length, int):
                 return context_length
-        if not _is_known_provider_base_url(base_url):
-            # 3. Try querying the server directly (local or remote — covers
-            #    Ollama Cloud, self-hosted Ollama on a VPS, etc.)
-            local_ctx = _query_local_context_length(model, base_url)
-            if local_ctx and local_ctx > 0:
-                save_context_length(model, base_url, local_ctx)
-                return local_ctx
-            logger.info(
-                "Could not detect context length for model %r at %s — "
-                "defaulting to %s tokens (probe-down). Set model.context_length "
-                "in config.yaml to override.",
-                model, base_url, f"{DEFAULT_FALLBACK_CONTEXT:,}",
-            )
-            return DEFAULT_FALLBACK_CONTEXT
+        # 3. Try querying the server directly (local or remote — covers
+        #    Ollama Cloud, self-hosted Ollama on a VPS, etc.)
+        #    Guard already checked by outer `not _is_known_provider_base_url`.
+        server_ctx = _query_server_context_length(model, base_url)
+        if server_ctx and server_ctx > 0:
+            save_context_length(model, base_url, server_ctx)
+            return server_ctx
+        logger.info(
+            "Could not detect context length for model %r at %s — "
+            "defaulting to %s tokens (probe-down). Set model.context_length "
+            "in config.yaml to override.",
+            model, base_url, f"{DEFAULT_FALLBACK_CONTEXT:,}",
+        )
+        return DEFAULT_FALLBACK_CONTEXT
 
     # 4. Anthropic /v1/models API (only for regular API keys, not OAuth)
     if provider == "anthropic" or (
@@ -886,14 +888,7 @@ def get_model_context_length(
         if default_model in model_lower:
             return length
 
-    # 9. Query server as last resort (local or remote custom endpoints)
-    if base_url and not _is_known_provider_base_url(base_url):
-        local_ctx = _query_local_context_length(model, base_url)
-        if local_ctx and local_ctx > 0:
-            save_context_length(model, base_url, local_ctx)
-            return local_ctx
-
-    # 10. Default fallback — 128K
+    # 9. Default fallback — 128K
     return DEFAULT_FALLBACK_CONTEXT
 
 
