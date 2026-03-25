@@ -50,6 +50,7 @@
   "compression.threshold",
   "delegation.api_key",
   "delegation.base_url",
+  "delegation.max_iterations",
   "delegation.model",
   "delegation.provider",
   "discord.auto_thread",
