@@ -369,6 +369,60 @@ class TestSkillsShSource:
         # Verify the tree-resolved identifier was used for the final GitHub fetch
         mock_fetch.assert_any_call("owner/repo/cli-tool/components/skills/development/my-skill")
 
+    @patch("tools.skills_hub._write_index_cache")
+    @patch("tools.skills_hub._read_index_cache", return_value=None)
+    @patch("tools.skills_hub.httpx.get")
+    @patch.object(GitHubSource, "fetch")
+    def test_fetch_uses_tree_tokens_to_disambiguate_duplicate_leaf_names(
+        self, mock_fetch, mock_get, _mock_read_cache, _mock_write_cache,
+    ):
+        tree_entries = [
+            {"path": "engineering/product-designer/SKILL.md", "type": "blob"},
+            {"path": "design/product-designer/SKILL.md", "type": "blob"},
+        ]
+
+        def _httpx_get_side_effect(url, **kwargs):
+            resp = MagicMock()
+            if url.endswith("/contents/"):
+                resp.status_code = 200
+                resp.json = lambda: []
+                return resp
+            if "/contents/" in url:
+                resp.status_code = 404
+                return resp
+            if url.endswith("owner/repo"):
+                resp.status_code = 200
+                resp.json = lambda: {"default_branch": "main"}
+                return resp
+            if "/git/trees/main" in url:
+                resp.status_code = 200
+                resp.json = lambda: {"tree": tree_entries}
+                return resp
+            resp.status_code = 200
+            resp.text = '''
+                <h1>product-designer</h1>
+                <code>$ npx skills add https://github.com/owner/repo --skill product-designer</code>
+                <div class="prose"><h1>Design/Product Designer</h1><p>Design workflows.</p></div>
+            '''
+            return resp
+
+        mock_get.side_effect = _httpx_get_side_effect
+
+        resolved_bundle = SkillBundle(
+            name="product-designer",
+            files={"SKILL.md": "# Product Designer"},
+            source="github",
+            identifier="owner/repo/design/product-designer",
+            trust_level="community",
+        )
+        mock_fetch.side_effect = lambda ident: resolved_bundle if ident == resolved_bundle.identifier else None
+
+        bundle = self._source().fetch("skills-sh/owner/repo/product-designer")
+
+        assert bundle is not None
+        mock_fetch.assert_any_call("owner/repo/design/product-designer")
+        assert ("owner/repo/engineering/product-designer",) not in [call.args for call in mock_fetch.call_args_list]
+
 
 class TestFindSkillInRepoTree:
     """Tests for GitHubSource._find_skill_in_repo_tree."""
@@ -425,6 +479,34 @@ class TestFindSkillInRepoTree:
 
         result = self._source()._find_skill_in_repo_tree("owner/repo", "my-skill")
         assert result == "owner/repo/my-skill"
+
+    @patch("tools.skills_hub.httpx.get")
+    def test_prefers_tree_match_with_parent_path_tokens(self, mock_get):
+        tree_entries = [
+            {"path": "design/product-designer/SKILL.md", "type": "blob"},
+            {"path": "engineering/product-designer/SKILL.md", "type": "blob"},
+        ]
+
+        def _side_effect(url, **kwargs):
+            resp = MagicMock()
+            if "/contents" not in url and "/git/" not in url:
+                resp.status_code = 200
+                resp.json = lambda: {"default_branch": "main"}
+            elif "/git/trees/main" in url:
+                resp.status_code = 200
+                resp.json = lambda: {"tree": tree_entries}
+            else:
+                resp.status_code = 404
+            return resp
+
+        mock_get.side_effect = _side_effect
+
+        result = self._source()._find_skill_in_repo_tree(
+            "owner/repo",
+            "product-designer",
+            ["product-designer", "design-system", "design"],
+        )
+        assert result == "owner/repo/design/product-designer"
 
     @patch("tools.skills_hub.httpx.get")
     def test_returns_none_when_skill_not_found(self, mock_get):

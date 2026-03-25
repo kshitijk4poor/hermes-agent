@@ -500,13 +500,22 @@ class GitHubSource(SkillSource):
 
         return files
 
-    def _find_skill_in_repo_tree(self, repo: str, skill_name: str) -> Optional[str]:
+    def _find_skill_in_repo_tree(
+        self,
+        repo: str,
+        skill_name: str,
+        skill_tokens: Optional[List[str]] = None,
+    ) -> Optional[str]:
         """Use the GitHub Trees API to find a skill directory anywhere in the repo.
 
         Returns the full identifier (``repo/path/to/skill``) or ``None``.
         This is a single API call regardless of repo depth, so it efficiently
         handles deeply nested directory structures like
         ``cli-tool/components/skills/development/<skill>/SKILL.md``.
+
+        When multiple directories share the same final skill name, optional
+        ``skill_tokens`` are used to prefer the path whose parent directories
+        best match the skills.sh alias/detail-page tokens.
         """
         # Get default branch
         try:
@@ -539,6 +548,7 @@ class GitHubSource(SkillSource):
 
         # Look for SKILL.md files inside directories named <skill_name>
         skill_md_suffix = f"/{skill_name}/SKILL.md"
+        matches: List[str] = []
         for entry in tree_data.get("tree", []):
             if entry.get("type") != "blob":
                 continue
@@ -546,9 +556,48 @@ class GitHubSource(SkillSource):
             if path.endswith(skill_md_suffix) or path == f"{skill_name}/SKILL.md":
                 # Strip /SKILL.md to get the skill directory path
                 skill_dir = path[: -len("/SKILL.md")]
-                return f"{repo}/{skill_dir}"
+                matches.append(skill_dir)
 
-        return None
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return f"{repo}/{matches[0]}"
+
+        token_variants = {
+            variant
+            for token in (skill_tokens or [])
+            for variant in SkillsShSource._token_variants(token)
+        }
+        if token_variants:
+            ranked = sorted(
+                matches,
+                key=lambda path: (
+                    -self._score_tree_skill_match(path, token_variants),
+                    len(path.split("/")),
+                    path,
+                ),
+            )
+            return f"{repo}/{ranked[0]}"
+
+        return f"{repo}/{matches[0]}"
+
+    @staticmethod
+    def _score_tree_skill_match(path: str, token_variants: set[str]) -> int:
+        path_lower = path.lower()
+        segments = [segment for segment in path_lower.split("/")[:-1] if segment]
+        segment_variants = set(segments)
+        for segment in segments:
+            segment_variants.update(SkillsShSource._token_variants(segment))
+
+        score = 0
+        for token in token_variants:
+            if token in segment_variants:
+                score += 4
+            if token and f"/{token}/" in f"/{path_lower}/":
+                score += 2
+            if token and token in path_lower:
+                score += 1
+        return score
 
     def _fetch_file_content(self, repo: str, path: str) -> Optional[str]:
         """Fetch a single file's content from GitHub."""
@@ -1134,7 +1183,7 @@ class SkillsShSource(SkillSource):
         # in the repo tree.  This handles deeply nested structures like
         # cli-tool/components/skills/development/<skill>/ that the shallow
         # scan above can't reach.
-        tree_result = self.github._find_skill_in_repo_tree(repo, skill_token)
+        tree_result = self.github._find_skill_in_repo_tree(repo, skill_token, tokens)
         if tree_result:
             return tree_result
 
