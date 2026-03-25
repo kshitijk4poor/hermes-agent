@@ -97,7 +97,17 @@ def _format_messages_as_prompt(
 
 
 def _acp_estimate_usage_enabled() -> bool:
-    return os.getenv("HERMES_ACP_ESTIMATE_USAGE", "").strip().lower() in {"1", "true", "yes", "on"}
+    """Approximate tokens (chars/4) when ACP omits usage.
+
+    Default on so UIs (e.g. Cursor composer context bar) get non-zero PromptResponse.usage.
+    Set HERMES_ACP_ESTIMATE_USAGE=0/false/off/no to disable.
+    """
+    raw = os.getenv("HERMES_ACP_ESTIMATE_USAGE", "").strip().lower()
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    return True
 
 
 def _finalize_acp_usage(

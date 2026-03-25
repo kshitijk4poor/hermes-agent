@@ -44,8 +44,14 @@ def test_finalize_acp_usage_heuristic_when_enabled(monkeypatch):
     assert out == {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
 
 
-def test_finalize_acp_usage_no_heuristic_when_disabled(monkeypatch):
+def test_finalize_acp_usage_heuristic_default_when_env_unset(monkeypatch):
     monkeypatch.delenv("HERMES_ACP_ESTIMATE_USAGE", raising=False)
+    out = _finalize_acp_usage("abcd" * 10, "xy" * 6, "", None)
+    assert out == {"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
+
+
+def test_finalize_acp_usage_no_heuristic_when_disabled(monkeypatch):
+    monkeypatch.setenv("HERMES_ACP_ESTIMATE_USAGE", "0")
     assert _finalize_acp_usage("abcd" * 100, "x", "", None) is None
 
 
