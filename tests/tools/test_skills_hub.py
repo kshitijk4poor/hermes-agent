@@ -309,6 +309,40 @@ class TestSkillsShSource:
 
     @patch("tools.skills_hub._write_index_cache")
     @patch("tools.skills_hub._read_index_cache", return_value=None)
+    @patch.object(SkillsShSource, "_discover_identifier")
+    @patch.object(SkillsShSource, "_fetch_detail_page")
+    @patch.object(GitHubSource, "fetch")
+    def test_fetch_downloads_only_the_resolved_identifier(
+        self,
+        mock_fetch,
+        mock_detail,
+        mock_discover,
+        _mock_read_cache,
+        _mock_write_cache,
+    ):
+        resolved_identifier = "owner/repo/product-team/product-designer"
+        mock_detail.return_value = {"repo": "owner/repo", "install_skill": "product-designer"}
+        mock_discover.return_value = resolved_identifier
+        resolved_bundle = SkillBundle(
+            name="product-designer",
+            files={"SKILL.md": "# Product Designer"},
+            source="github",
+            identifier=resolved_identifier,
+            trust_level="community",
+        )
+        mock_fetch.side_effect = lambda identifier: resolved_bundle if identifier == resolved_identifier else None
+
+        bundle = self._source().fetch("skills-sh/owner/repo/product-designer")
+
+        assert bundle is not None
+        assert bundle.identifier == "skills-sh/owner/repo/product-designer"
+        assert mock_fetch.call_args_list == [
+            (("owner/repo/product-designer",), {}),
+            ((resolved_identifier,), {}),
+        ]
+
+    @patch("tools.skills_hub._write_index_cache")
+    @patch("tools.skills_hub._read_index_cache", return_value=None)
     @patch("tools.skills_hub.httpx.get")
     @patch.object(GitHubSource, "fetch")
     def test_fetch_falls_back_to_tree_search_for_deeply_nested_skills(
@@ -368,6 +402,36 @@ class TestSkillsShSource:
         assert bundle.files["SKILL.md"] == "# My Skill"
         # Verify the tree-resolved identifier was used for the final GitHub fetch
         mock_fetch.assert_any_call("owner/repo/cli-tool/components/skills/development/my-skill")
+
+    @patch.object(GitHubSource, "_find_skill_in_repo_tree")
+    @patch.object(GitHubSource, "_list_skills_in_repo")
+    @patch("tools.skills_hub.httpx.get")
+    def test_discover_identifier_uses_tree_search_before_root_scan(
+        self,
+        mock_get,
+        mock_list_skills,
+        mock_find_in_tree,
+    ):
+        root_url = "https://api.github.com/repos/owner/repo/contents/"
+        mock_list_skills.return_value = []
+        mock_find_in_tree.return_value = "owner/repo/product-team/product-designer"
+
+        def _httpx_get_side_effect(url, **kwargs):
+            resp = MagicMock()
+            if url == root_url:
+                resp.status_code = 200
+                resp.json = lambda: []
+                return resp
+            resp.status_code = 404
+            return resp
+
+        mock_get.side_effect = _httpx_get_side_effect
+
+        result = self._source()._discover_identifier("owner/repo/product-designer")
+
+        assert result == "owner/repo/product-team/product-designer"
+        requested_urls = [call.args[0] for call in mock_get.call_args_list]
+        assert root_url not in requested_urls
 
 
 class TestFindSkillInRepoTree:

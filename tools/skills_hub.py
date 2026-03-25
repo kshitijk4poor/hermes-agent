@@ -904,16 +904,16 @@ class SkillsShSource(SkillSource):
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
         canonical = self._normalize_identifier(identifier)
         detail = self._fetch_detail_page(canonical)
-        for candidate in self._candidate_identifiers(canonical):
-            bundle = self.github.fetch(candidate)
-            if bundle:
-                bundle.source = "skills.sh"
-                bundle.identifier = self._wrap_identifier(canonical)
-                bundle.metadata.update(self._detail_to_metadata(canonical, detail))
-                return bundle
+        direct_candidate = self._candidate_identifiers(canonical)[0]
+        bundle = self.github.fetch(direct_candidate)
+        if bundle:
+            bundle.source = "skills.sh"
+            bundle.identifier = self._wrap_identifier(canonical)
+            bundle.metadata.update(self._detail_to_metadata(canonical, detail))
+            return bundle
 
         resolved = self._discover_identifier(canonical, detail=detail)
-        if resolved:
+        if resolved and resolved != direct_candidate:
             bundle = self.github.fetch(resolved)
             if bundle:
                 bundle.source = "skills.sh"
@@ -924,19 +924,10 @@ class SkillsShSource(SkillSource):
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         canonical = self._normalize_identifier(identifier)
-        detail: Optional[dict] = None
-        for candidate in self._candidate_identifiers(canonical):
-            meta = self.github.inspect(candidate)
-            if meta:
-                detail = self._fetch_detail_page(canonical)
-                return self._finalize_inspect_meta(meta, canonical, detail)
-
         detail = self._fetch_detail_page(canonical)
-        resolved = self._discover_identifier(canonical, detail=detail)
-        if resolved:
-            meta = self.github.inspect(resolved)
-            if meta:
-                return self._finalize_inspect_meta(meta, canonical, detail)
+        meta = self._resolve_github_meta(canonical, detail=detail)
+        if meta:
+            return self._finalize_inspect_meta(meta, canonical, detail)
         return None
 
     def _featured_skills(self, limit: int) -> List[SkillMeta]:
@@ -1098,6 +1089,13 @@ class SkillsShSource(SkillSource):
                 if self._matches_skill_tokens(meta, tokens):
                     return meta.identifier
 
+        # Prefer a single recursive tree lookup before brute-forcing every
+        # top-level directory. This avoids large request bursts on categorized
+        # repos like borghei/claude-skills.
+        tree_result = self.github._find_skill_in_repo_tree(repo, skill_token)
+        if tree_result:
+            return tree_result
+
         # Fallback: scan repo root for directories that might contain skills
         try:
             root_url = f"https://api.github.com/repos/{repo}/contents/"
@@ -1130,14 +1128,17 @@ class SkillsShSource(SkillSource):
         except Exception:
             pass
 
-        # Final fallback: use the GitHub Trees API to find the skill anywhere
-        # in the repo tree.  This handles deeply nested structures like
-        # cli-tool/components/skills/development/<skill>/ that the shallow
-        # scan above can't reach.
-        tree_result = self.github._find_skill_in_repo_tree(repo, skill_token)
-        if tree_result:
-            return tree_result
+        return None
 
+    def _resolve_github_meta(self, identifier: str, detail: Optional[dict] = None) -> Optional[SkillMeta]:
+        for candidate in self._candidate_identifiers(identifier):
+            meta = self.github.inspect(candidate)
+            if meta:
+                return meta
+
+        resolved = self._discover_identifier(identifier, detail=detail)
+        if resolved:
+            return self.github.inspect(resolved)
         return None
 
     def _finalize_inspect_meta(self, meta: SkillMeta, canonical: str, detail: Optional[dict]) -> SkillMeta:
