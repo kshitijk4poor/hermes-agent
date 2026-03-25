@@ -1064,10 +1064,11 @@ class HermesCLI:
         _config_model = _model_config.get("default", "") if isinstance(_model_config, dict) else (_model_config or "")
         _FALLBACK_MODEL = "anthropic/claude-opus-4.6"
         self.model = model or _config_model or _FALLBACK_MODEL
-        # Auto-detect model from local server if still on fallback
+        # Auto-detect model from server if still on fallback.
+        # Works for local AND remote endpoints (e.g. Ollama Cloud, self-hosted Ollama).
         if self.model == _FALLBACK_MODEL:
             _base_url = _model_config.get("base_url", "") if isinstance(_model_config, dict) else ""
-            if "localhost" in _base_url or "127.0.0.1" in _base_url:
+            if _base_url and "openrouter.ai" not in _base_url:
                 from hermes_cli.runtime_provider import _auto_detect_local_model
                 _detected = _auto_detect_local_model(_base_url)
                 if _detected:

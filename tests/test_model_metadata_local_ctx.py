@@ -454,17 +454,35 @@ class TestGetModelContextLengthLocalFallback:
 
         assert result == CONTEXT_PROBE_TIERS[0]
 
-    def test_non_local_endpoint_does_not_query_local_server(self):
-        """For non-local endpoints, _query_local_context_length is not called."""
-        from agent.model_metadata import get_model_context_length, CONTEXT_PROBE_TIERS
+    def test_remote_custom_endpoint_queries_server(self):
+        """Remote custom endpoints (e.g. Ollama Cloud) ARE probed for context length."""
+        from agent.model_metadata import get_model_context_length
 
         with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
              patch("agent.model_metadata.fetch_endpoint_model_metadata", return_value={}), \
              patch("agent.model_metadata.fetch_model_metadata", return_value={}), \
              patch("agent.model_metadata.is_local_endpoint", return_value=False), \
+             patch("agent.model_metadata._is_known_provider_base_url", return_value=False), \
+             patch("agent.model_metadata.save_context_length"), \
+             patch("agent.model_metadata._query_local_context_length", return_value=32768) as mock_query:
+            result = get_model_context_length(
+                "llama3:8b", "https://ollama-cloud.example.com/v1"
+            )
+
+        mock_query.assert_called()
+        assert result == 32768
+
+    def test_known_provider_endpoint_does_not_query_server(self):
+        """Known provider endpoints (OpenRouter, etc.) are NOT probed via local query."""
+        from agent.model_metadata import get_model_context_length, DEFAULT_FALLBACK_CONTEXT
+
+        with patch("agent.model_metadata.get_cached_context_length", return_value=None), \
+             patch("agent.model_metadata.fetch_endpoint_model_metadata", return_value={}), \
+             patch("agent.model_metadata.fetch_model_metadata", return_value={}), \
+             patch("agent.model_metadata._is_known_provider_base_url", return_value=True), \
              patch("agent.model_metadata._query_local_context_length") as mock_query:
             result = get_model_context_length(
-                "unknown-model", "https://some-cloud-api.example.com/v1"
+                "unknown-model", "https://openrouter.ai/api/v1"
             )
 
         mock_query.assert_not_called()

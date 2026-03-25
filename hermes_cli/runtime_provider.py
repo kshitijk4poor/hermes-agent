@@ -65,9 +65,9 @@ def _get_model_config() -> Dict[str, Any]:
         cfg = dict(model_cfg)
         default = cfg.get("default", "").strip()
         base_url = cfg.get("base_url", "").strip()
-        is_local = "localhost" in base_url or "127.0.0.1" in base_url
+        is_custom_endpoint = base_url and "openrouter.ai" not in base_url
         is_fallback = not default or default == "anthropic/claude-opus-4.6"
-        if is_local and is_fallback and base_url:
+        if is_custom_endpoint and is_fallback:
             detected = _auto_detect_local_model(base_url)
             if detected:
                 cfg["default"] = detected

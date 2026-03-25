@@ -228,7 +228,10 @@ def is_local_endpoint(base_url: str) -> bool:
 
 
 def detect_local_server_type(base_url: str) -> Optional[str]:
-    """Detect which local server is running at base_url by probing known endpoints.
+    """Detect which server is running at base_url by probing known endpoints.
+
+    Works for both local and remote (cloud) servers — e.g. Ollama Cloud,
+    self-hosted Ollama on a VPS, etc.
 
     Returns one of: "ollama", "lm-studio", "vllm", "llamacpp", or None.
     """
@@ -239,8 +242,11 @@ def detect_local_server_type(base_url: str) -> Optional[str]:
     if server_url.endswith("/v1"):
         server_url = server_url[:-3]
 
+    # Use a longer timeout for remote/cloud endpoints
+    timeout = 2.0 if is_local_endpoint(base_url) else 5.0
+
     try:
-        with httpx.Client(timeout=2.0) as client:
+        with httpx.Client(timeout=timeout) as client:
             # LM Studio exposes /api/v1/models — check first (most specific)
             try:
                 r = client.get(f"{server_url}/api/v1/models")
@@ -591,7 +597,11 @@ def _model_id_matches(candidate_id: str, lookup_model: str) -> bool:
 
 
 def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
-    """Query a local server for the model's context length."""
+    """Query a server for the model's context length.
+
+    Despite the name, works for both local and remote (cloud) servers
+    such as Ollama Cloud or self-hosted Ollama on a VPS.
+    """
     import httpx
 
     # Strip recognised provider prefix (e.g., "local:model-name" → "model-name").
@@ -608,8 +618,11 @@ def _query_local_context_length(model: str, base_url: str) -> Optional[int]:
     except Exception:
         server_type = None
 
+    # Use a longer timeout for remote/cloud endpoints
+    timeout = 3.0 if is_local_endpoint(base_url) else 8.0
+
     try:
-        with httpx.Client(timeout=3.0) as client:
+        with httpx.Client(timeout=timeout) as client:
             # Ollama: /api/show returns model details with context info
             if server_type == "ollama":
                 resp = client.post(f"{server_url}/api/show", json={"name": model})
@@ -813,12 +826,12 @@ def get_model_context_length(
             if isinstance(context_length, int):
                 return context_length
         if not _is_known_provider_base_url(base_url):
-            # 3. Try querying local server directly
-            if is_local_endpoint(base_url):
-                local_ctx = _query_local_context_length(model, base_url)
-                if local_ctx and local_ctx > 0:
-                    save_context_length(model, base_url, local_ctx)
-                    return local_ctx
+            # 3. Try querying the server directly (local or remote — covers
+            #    Ollama Cloud, self-hosted Ollama on a VPS, etc.)
+            local_ctx = _query_local_context_length(model, base_url)
+            if local_ctx and local_ctx > 0:
+                save_context_length(model, base_url, local_ctx)
+                return local_ctx
             logger.info(
                 "Could not detect context length for model %r at %s — "
                 "defaulting to %s tokens (probe-down). Set model.context_length "
@@ -873,8 +886,8 @@ def get_model_context_length(
         if default_model in model_lower:
             return length
 
-    # 9. Query local server as last resort
-    if base_url and is_local_endpoint(base_url):
+    # 9. Query server as last resort (local or remote custom endpoints)
+    if base_url and not _is_known_provider_base_url(base_url):
         local_ctx = _query_local_context_length(model, base_url)
         if local_ctx and local_ctx > 0:
             save_context_length(model, base_url, local_ctx)
