@@ -4,6 +4,7 @@ import builtins
 import importlib
 import logging
 import sys
+import pytest
 
 from agent.prompt_builder import (
     _scan_context_content,
@@ -22,6 +23,12 @@ from agent.prompt_builder import (
     SESSION_SEARCH_GUIDANCE,
     PLATFORM_HINTS,
 )
+
+
+def _filesystem_is_case_sensitive(path):
+    probe_lower = path / "case-probe"
+    probe_lower.write_text("x")
+    return not (path / "CASE-PROBE").exists()
 
 
 # =========================================================================
@@ -561,6 +568,8 @@ class TestBuildContextFilesPrompt:
         assert "Lowercase claude rules" in result
 
     def test_claude_md_uppercase_takes_priority(self, tmp_path):
+        if not _filesystem_is_case_sensitive(tmp_path):
+            pytest.skip("Case-insensitive filesystems cannot represent both CLAUDE.md and claude.md")
         (tmp_path / "CLAUDE.md").write_text("From uppercase.")
         (tmp_path / "claude.md").write_text("From lowercase.")
         result = build_context_files_prompt(cwd=str(tmp_path))

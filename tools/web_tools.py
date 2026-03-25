@@ -126,12 +126,23 @@ def _get_firecrawl_client():
 _parallel_client = None
 _async_parallel_client = None
 
+def _import_parallel_clients():
+    """Import Parallel SDK classes with a consistent install hint."""
+    try:
+        from parallel import AsyncParallel, Parallel
+    except ImportError as exc:
+        raise ImportError(
+            "Parallel web backend requires the 'parallel-web' package. "
+            "Install it with: pip install 'parallel-web>=0.4.2,<1'"
+        ) from exc
+    return Parallel, AsyncParallel
+
+
 def _get_parallel_client():
     """Get or create the Parallel sync client (lazy initialization).
 
     Requires PARALLEL_API_KEY environment variable.
     """
-    from parallel import Parallel
     global _parallel_client
     if _parallel_client is None:
         api_key = os.getenv("PARALLEL_API_KEY")
@@ -140,6 +151,7 @@ def _get_parallel_client():
                 "PARALLEL_API_KEY environment variable not set. "
                 "Get your API key at https://parallel.ai"
             )
+        Parallel, _ = _import_parallel_clients()
         _parallel_client = Parallel(api_key=api_key)
     return _parallel_client
 
@@ -149,7 +161,6 @@ def _get_async_parallel_client():
 
     Requires PARALLEL_API_KEY environment variable.
     """
-    from parallel import AsyncParallel
     global _async_parallel_client
     if _async_parallel_client is None:
         api_key = os.getenv("PARALLEL_API_KEY")
@@ -158,6 +169,7 @@ def _get_async_parallel_client():
                 "PARALLEL_API_KEY environment variable not set. "
                 "Get your API key at https://parallel.ai"
             )
+        _, AsyncParallel = _import_parallel_clients()
         _async_parallel_client = AsyncParallel(api_key=api_key)
     return _async_parallel_client
 

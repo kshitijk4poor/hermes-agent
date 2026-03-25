@@ -114,9 +114,14 @@ def is_stt_enabled(stt_config: Optional[dict] = None) -> bool:
     return bool(enabled)
 
 
-def _resolve_openai_api_key() -> str:
-    """Prefer the voice-tools key, but fall back to the normal OpenAI key."""
-    return os.getenv("VOICE_TOOLS_OPENAI_KEY", "") or os.getenv("OPENAI_API_KEY", "")
+def _resolve_voice_tools_openai_api_key() -> str:
+    """Return the dedicated OpenAI key for Hermes voice features."""
+    return os.getenv("VOICE_TOOLS_OPENAI_KEY", "")
+
+
+def _resolve_auto_openai_api_key() -> str:
+    """Auto-detect may fall back to the general OpenAI key when voice key is unset."""
+    return _resolve_voice_tools_openai_api_key() or os.getenv("OPENAI_API_KEY", "")
 
 
 def _find_binary(binary_name: str) -> Optional[str]:
@@ -208,10 +213,10 @@ def _get_provider(stt_config: dict) -> str:
             return "none"
 
         if provider == "openai":
-            if _HAS_OPENAI and _resolve_openai_api_key():
+            if _HAS_OPENAI and _resolve_voice_tools_openai_api_key():
                 return "openai"
             logger.warning(
-                "STT provider 'openai' configured but no API key available"
+                "STT provider 'openai' configured but VOICE_TOOLS_OPENAI_KEY not set"
             )
             return "none"
 
@@ -226,7 +231,7 @@ def _get_provider(stt_config: dict) -> str:
     if _HAS_OPENAI and os.getenv("GROQ_API_KEY"):
         logger.info("No local STT available, using Groq Whisper API")
         return "groq"
-    if _HAS_OPENAI and _resolve_openai_api_key():
+    if _HAS_OPENAI and _resolve_auto_openai_api_key():
         logger.info("No local STT available, using OpenAI Whisper API")
         return "openai"
     return "none"
@@ -433,14 +438,14 @@ def _transcribe_groq(file_path: str, model_name: str) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _transcribe_openai(file_path: str, model_name: str) -> Dict[str, Any]:
+def _transcribe_openai(file_path: str, model_name: str, api_key: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe using OpenAI Whisper API (paid)."""
-    api_key = _resolve_openai_api_key()
+    api_key = api_key or _resolve_voice_tools_openai_api_key()
     if not api_key:
         return {
             "success": False,
             "transcript": "",
-            "error": "Neither VOICE_TOOLS_OPENAI_KEY nor OPENAI_API_KEY is set",
+            "error": "VOICE_TOOLS_OPENAI_KEY is not set",
         }
 
     if not _HAS_OPENAI:
@@ -539,7 +544,12 @@ def transcribe_audio(file_path: str, model: Optional[str] = None) -> Dict[str, A
     if provider == "openai":
         openai_cfg = stt_config.get("openai", {})
         model_name = model or openai_cfg.get("model", DEFAULT_STT_MODEL)
-        return _transcribe_openai(file_path, model_name)
+        openai_api_key = (
+            _resolve_voice_tools_openai_api_key()
+            if "provider" in stt_config
+            else _resolve_auto_openai_api_key()
+        )
+        return _transcribe_openai(file_path, model_name, api_key=openai_api_key)
 
     # No provider available
     return {

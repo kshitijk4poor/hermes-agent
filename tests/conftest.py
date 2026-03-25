@@ -72,6 +72,56 @@ def mock_config():
 def _timeout_handler(signum, frame):
     raise TimeoutError("Test exceeded 30 second timeout")
 
+
+def pytest_sessionstart(session):
+    """Raise the soft open-file limit for the test process when possible."""
+    try:
+        import resource
+    except ImportError:
+        return
+
+    try:
+        soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return
+
+    target_limit = 4096
+    if hard_limit == resource.RLIM_INFINITY:
+        new_soft_limit = max(soft_limit, target_limit)
+    else:
+        new_soft_limit = min(max(soft_limit, target_limit), hard_limit)
+
+    if new_soft_limit <= soft_limit:
+        return
+
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (new_soft_limit, hard_limit))
+    except (OSError, ValueError):
+        return
+
+
+def pytest_xdist_auto_num_workers(config):
+    """Cap xdist auto workers on hosts with low file-descriptor limits."""
+    try:
+        import resource
+    except ImportError:
+        return None
+
+    cpu_count = os.cpu_count() or 1
+    try:
+        soft_limit, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (OSError, ValueError):
+        return None
+
+    if soft_limit <= 0:
+        return None
+
+    reserve_fds = 128
+    estimated_fds_per_worker = 32
+    max_workers_by_fd = max(1, (soft_limit - reserve_fds) // estimated_fds_per_worker)
+    return max(1, min(cpu_count, max_workers_by_fd))
+
+
 @pytest.fixture(autouse=True)
 def _ensure_current_event_loop(request):
     """Provide a default event loop for sync tests that call get_event_loop().

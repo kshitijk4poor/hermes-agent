@@ -9,8 +9,27 @@ Coverage:
 """
 
 import os
+import sys
+import types
 import pytest
 from unittest.mock import patch, MagicMock
+
+
+def _install_fake_parallel_module(monkeypatch):
+    fake_module = types.ModuleType("parallel")
+
+    class FakeParallel:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+    class FakeAsyncParallel:
+        def __init__(self, api_key):
+            self.api_key = api_key
+
+    fake_module.Parallel = FakeParallel
+    fake_module.AsyncParallel = FakeAsyncParallel
+    monkeypatch.setitem(sys.modules, "parallel", fake_module)
+    return FakeParallel, FakeAsyncParallel
 
 
 class TestFirecrawlClientConfig:
@@ -252,14 +271,15 @@ class TestParallelClientConfig:
         tools.web_tools._parallel_client = None
         os.environ.pop("PARALLEL_API_KEY", None)
 
-    def test_creates_client_with_key(self):
+    def test_creates_client_with_key(self, monkeypatch):
         """PARALLEL_API_KEY set → creates Parallel client."""
+        FakeParallel, _ = _install_fake_parallel_module(monkeypatch)
         with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
             from tools.web_tools import _get_parallel_client
-            from parallel import Parallel
             client = _get_parallel_client()
             assert client is not None
-            assert isinstance(client, Parallel)
+            assert isinstance(client, FakeParallel)
+            assert client.api_key == "test-key"
 
     def test_no_key_raises_with_helpful_message(self):
         """No PARALLEL_API_KEY → ValueError with guidance."""
@@ -267,8 +287,17 @@ class TestParallelClientConfig:
         with pytest.raises(ValueError, match="PARALLEL_API_KEY"):
             _get_parallel_client()
 
-    def test_singleton_returns_same_instance(self):
+    def test_missing_sdk_with_key_raises_install_hint(self):
+        """Missing optional SDK with a key → ImportError with install guidance."""
+        with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
+            with patch("tools.web_tools._import_parallel_clients", side_effect=ImportError("parallel-web missing")):
+                from tools.web_tools import _get_parallel_client
+                with pytest.raises(ImportError, match="parallel-web"):
+                    _get_parallel_client()
+
+    def test_singleton_returns_same_instance(self, monkeypatch):
         """Second call returns cached client."""
+        _install_fake_parallel_module(monkeypatch)
         with patch.dict(os.environ, {"PARALLEL_API_KEY": "test-key"}):
             from tools.web_tools import _get_parallel_client
             client1 = _get_parallel_client()

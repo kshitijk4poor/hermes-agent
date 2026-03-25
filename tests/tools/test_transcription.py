@@ -211,6 +211,23 @@ class TestTranscribeAudio:
         assert result["success"] is True
         mock_openai.assert_called_once()
 
+    def test_auto_detect_openai_can_use_general_key(self, monkeypatch, tmp_path):
+        audio_file = tmp_path / "test.ogg"
+        audio_file.write_bytes(b"fake audio")
+        monkeypatch.delenv("VOICE_TOOLS_OPENAI_KEY", raising=False)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+        with patch("tools.transcription_tools._load_stt_config", return_value={}), \
+             patch("tools.transcription_tools._HAS_FASTER_WHISPER", False), \
+             patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("tools.transcription_tools._transcribe_openai",
+                   return_value={"success": True, "transcript": "hi"}) as mock_openai:
+            from tools.transcription_tools import transcribe_audio
+            result = transcribe_audio(str(audio_file))
+
+        assert result["success"] is True
+        mock_openai.assert_called_once()
+
     def test_no_provider_returns_error(self, tmp_path):
         audio_file = tmp_path / "test.ogg"
         audio_file.write_bytes(b"fake audio")
