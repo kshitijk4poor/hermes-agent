@@ -2,7 +2,8 @@
 Tests for document cache utilities in gateway/platforms/base.py.
 
 Covers: get_document_cache_dir, cache_document_from_bytes,
-        cleanup_document_cache, SUPPORTED_DOCUMENT_TYPES.
+        cleanup_document_cache, SUPPORTED_DOCUMENT_TYPES,
+        build_text_attachment_injection.
 """
 
 import os
@@ -13,6 +14,7 @@ import pytest
 
 from gateway.platforms.base import (
     SUPPORTED_DOCUMENT_TYPES,
+    build_text_attachment_injection,
     cache_document_from_bytes,
     cleanup_document_cache,
     get_document_cache_dir,
@@ -151,7 +153,21 @@ class TestSupportedDocumentTypes:
 
     @pytest.mark.parametrize(
         "ext",
-        [".pdf", ".md", ".txt", ".docx", ".xlsx", ".pptx"],
+        [".pdf", ".md", ".txt", ".csv", ".tsv", ".docx", ".xlsx", ".pptx"],
     )
     def test_expected_extensions_present(self, ext):
         assert ext in SUPPORTED_DOCUMENT_TYPES
+
+
+class TestBuildTextAttachmentInjection:
+    def test_large_csv_preview_is_char_bounded(self):
+        huge_cell = "x" * 50000
+        raw = f"region,revenue,notes\nwest,10,{huge_cell}\n".encode("utf-8")
+
+        result = build_text_attachment_injection(raw, "large.csv", ".csv")
+
+        assert result is not None
+        assert "[Preview of large.csv]:" in result
+        assert "The preview is truncated" in result
+        assert huge_cell not in result
+        assert len(result) < 20000

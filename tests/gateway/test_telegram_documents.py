@@ -220,6 +220,23 @@ class TestDocumentDownloadBlock:
         assert "# Title" in event.text
 
     @pytest.mark.asyncio
+    async def test_supported_csv_injects_content(self, adapter):
+        content = b"region,revenue\nwest,10\neast,20\n"
+        file_obj = _make_file_obj(content)
+        doc = _make_document(
+            file_name="data.csv", mime_type="text/csv",
+            file_size=len(content), file_obj=file_obj,
+        )
+        msg = _make_message(document=doc, caption="Summarize this CSV")
+        update = _make_update(msg)
+
+        await adapter._handle_media_message(update, MagicMock())
+        event = adapter.handle_message.call_args[0][0]
+        assert "[Content of data.csv]" in event.text
+        assert "region,revenue" in event.text
+        assert "Summarize this CSV" in event.text
+
+    @pytest.mark.asyncio
     async def test_caption_preserved_with_injection(self, adapter):
         content = b"file text"
         file_obj = _make_file_obj(content)

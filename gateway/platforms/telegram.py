@@ -11,7 +11,7 @@ import asyncio
 import logging
 import os
 import re
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
     cache_audio_from_bytes,
     cache_document_from_bytes,
+    build_text_attachment_injection,
     SUPPORTED_DOCUMENT_TYPES,
 )
 
@@ -1379,23 +1380,16 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_types = [mime_type]
                 logger.info("[Telegram] Cached user document at %s", cached_path)
 
-                # For text files, inject content into event.text (capped at 100 KB)
-                MAX_TEXT_INJECT_BYTES = 100 * 1024
-                if ext in (".md", ".txt") and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
-                    try:
-                        text_content = raw_bytes.decode("utf-8")
-                        display_name = original_filename or f"document{ext}"
-                        display_name = re.sub(r'[^\w.\- ]', '_', display_name)
-                        injection = f"[Content of {display_name}]:\n{text_content}"
-                        if event.text:
-                            event.text = f"{injection}\n\n{event.text}"
-                        else:
-                            event.text = injection
-                    except UnicodeDecodeError:
-                        logger.warning(
-                            "[Telegram] Could not decode text file as UTF-8, skipping content injection",
-                            exc_info=True,
-                        )
+                injection = build_text_attachment_injection(
+                    raw_bytes,
+                    original_filename or f"document{ext}",
+                    ext,
+                )
+                if injection:
+                    if event.text:
+                        event.text = f"{injection}\n\n{event.text}"
+                    else:
+                        event.text = injection
 
             except Exception as e:
                 logger.warning("[Telegram] Failed to cache document: %s", e, exc_info=True)

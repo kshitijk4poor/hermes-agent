@@ -12,7 +12,7 @@ import asyncio
 import logging
 import os
 import re
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 
 try:
     from slack_bolt.async_app import AsyncApp
@@ -36,7 +36,10 @@ from gateway.platforms.base import (
     MessageType,
     SendResult,
     SUPPORTED_DOCUMENT_TYPES,
+    build_text_attachment_injection,
     cache_document_from_bytes,
+    cache_image_from_url,
+    cache_audio_from_url,
 )
 
 
@@ -730,20 +733,16 @@ class SlackAdapter(BasePlatformAdapter):
                     msg_type = MessageType.DOCUMENT
                     logger.debug("[Slack] Cached user document: %s", cached_path)
 
-                    # Inject text content for .txt/.md files (capped at 100 KB)
-                    MAX_TEXT_INJECT_BYTES = 100 * 1024
-                    if ext in (".md", ".txt") and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
-                        try:
-                            text_content = raw_bytes.decode("utf-8")
-                            display_name = original_filename or f"document{ext}"
-                            display_name = re.sub(r'[^\w.\- ]', '_', display_name)
-                            injection = f"[Content of {display_name}]:\n{text_content}"
-                            if text:
-                                text = f"{injection}\n\n{text}"
-                            else:
-                                text = injection
-                        except UnicodeDecodeError:
-                            pass  # Binary content, skip injection
+                    injection = build_text_attachment_injection(
+                        raw_bytes,
+                        original_filename or f"document{ext}",
+                        ext,
+                    )
+                    if injection:
+                        if text:
+                            text = f"{injection}\n\n{text}"
+                        else:
+                            text = injection
 
                 except Exception as e:  # pragma: no cover - defensive logging
                     logger.warning("[Slack] Failed to cache document from %s: %s", url, e, exc_info=True)

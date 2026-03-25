@@ -20,7 +20,7 @@ import threading
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Dict, Optional, Any
+from typing import Callable, Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
     cache_audio_from_url,
     cache_document_from_bytes,
+    build_text_attachment_injection,
     SUPPORTED_DOCUMENT_TYPES,
 )
 
@@ -2071,20 +2072,16 @@ class DiscordAdapter(BasePlatformAdapter):
                             media_urls.append(cached_path)
                             media_types.append(doc_mime)
                             logger.info("[Discord] Cached user document: %s", cached_path)
-                            # Inject text content for .txt/.md files (capped at 100 KB)
-                            MAX_TEXT_INJECT_BYTES = 100 * 1024
-                            if ext in (".md", ".txt") and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
-                                try:
-                                    text_content = raw_bytes.decode("utf-8")
-                                    display_name = att.filename or f"document{ext}"
-                                    display_name = re.sub(r'[^\w.\- ]', '_', display_name)
-                                    injection = f"[Content of {display_name}]:\n{text_content}"
-                                    if pending_text_injection:
-                                        pending_text_injection = f"{pending_text_injection}\n\n{injection}"
-                                    else:
-                                        pending_text_injection = injection
-                                except UnicodeDecodeError:
-                                    pass
+                            injection = build_text_attachment_injection(
+                                raw_bytes,
+                                att.filename or f"document{ext}",
+                                ext,
+                            )
+                            if injection:
+                                if pending_text_injection:
+                                    pending_text_injection = f"{pending_text_injection}\n\n{injection}"
+                                else:
+                                    pending_text_injection = injection
                         except Exception as e:
                             logger.warning(
                                 "[Discord] Failed to cache document %s: %s",

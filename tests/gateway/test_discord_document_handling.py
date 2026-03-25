@@ -210,6 +210,23 @@ class TestIncomingDocumentHandling:
         assert "# Title" in event.text
 
     @pytest.mark.asyncio
+    async def test_csv_content_injected(self, adapter):
+        """A .csv file under 100KB should have its content injected."""
+        file_content = b"region,revenue\nwest,10\neast,20\n"
+
+        with _mock_aiohttp_download(file_content):
+            msg = make_message(
+                attachments=[make_attachment(filename="data.csv", content_type="text/csv")],
+                content="Summarize this CSV",
+            )
+            await adapter._handle_message(msg)
+
+        event = adapter.handle_message.call_args[0][0]
+        assert "[Content of data.csv]:" in event.text
+        assert "region,revenue" in event.text
+        assert "Summarize this CSV" in event.text
+
+    @pytest.mark.asyncio
     async def test_oversized_document_skipped(self, adapter):
         """A document over 20MB should be skipped — media_urls stays empty."""
         msg = make_message([

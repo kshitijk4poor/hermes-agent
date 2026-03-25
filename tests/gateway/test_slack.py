@@ -378,6 +378,29 @@ class TestIncomingDocumentHandling:
         assert "# Title" in msg_event.text
 
     @pytest.mark.asyncio
+    async def test_csv_document_injects_content(self, adapter):
+        """A .csv file under 100KB should have its content injected."""
+        content = b"region,revenue\nwest,10\neast,20\n"
+
+        with patch.object(adapter, "_download_slack_file_bytes", new_callable=AsyncMock) as dl:
+            dl.return_value = content
+            event = self._make_event(
+                text="Summarize this CSV",
+                files=[{
+                    "mimetype": "text/csv",
+                    "name": "data.csv",
+                    "url_private_download": "https://files.slack.com/data.csv",
+                    "size": len(content),
+                }],
+            )
+            await adapter._handle_slack_message(event)
+
+        msg_event = adapter.handle_message.call_args[0][0]
+        assert "[Content of data.csv]" in msg_event.text
+        assert "region,revenue" in msg_event.text
+        assert "Summarize this CSV" in msg_event.text
+
+    @pytest.mark.asyncio
     async def test_large_txt_not_injected(self, adapter):
         """A .txt file over 100KB should be cached but NOT injected."""
         content = b"x" * (200 * 1024)

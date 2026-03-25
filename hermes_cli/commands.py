@@ -13,7 +13,8 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from prompt_toolkit.auto_suggest import AutoSuggest, Suggestion
@@ -124,6 +125,8 @@ COMMAND_REGISTRY: list[CommandDef] = [
                args_hint="[days]"),
     CommandDef("platforms", "Show gateway/messaging platform status", "Info",
                cli_only=True, aliases=("gateway",)),
+    CommandDef("attach", "Attach local file(s) to the next message", "Info",
+               cli_only=True, args_hint="[clear|<path> ...]"),
     CommandDef("paste", "Check clipboard for an image and attach it", "Info",
                cli_only=True),
     CommandDef("update", "Update Hermes Agent to the latest version", "Info",
