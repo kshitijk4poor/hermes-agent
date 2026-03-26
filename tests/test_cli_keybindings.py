@@ -84,6 +84,18 @@ def test_select_terminal_keyboard_mode_returns_none_when_unsupported():
     assert tkbd.select_mode(tkbd.TerminalKeyboardCapabilities()) is None
 
 
+def test_should_enable_protocol_mode_skips_vscode_term_program():
+    assert tkbd.should_enable_protocol_mode({"TERM_PROGRAM": "vscode"}) is False
+
+
+def test_should_enable_protocol_mode_skips_vscode_pid():
+    assert tkbd.should_enable_protocol_mode({"VSCODE_PID": "12345"}) is False
+
+
+def test_should_enable_protocol_mode_allows_non_vscode_terminal():
+    assert tkbd.should_enable_protocol_mode({"TERM_PROGRAM": "WezTerm"}) is True
+
+
 @pytest.mark.parametrize(
     ("mode", "enable", "expected_sequence"),
     [

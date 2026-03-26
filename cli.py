@@ -7082,23 +7082,24 @@ class HermesCLI:
         pending_terminal_key_presses = []
         try:
             _tkbd.install_all()
-            terminal_keyboard_detection = _tkbd.detect_capabilities()
-            terminal_keyboard_mode = _tkbd.select_mode(
-                terminal_keyboard_detection.capabilities
-            )
-            pending_terminal_key_presses = _tkbd.parse_input_key_presses(
-                terminal_keyboard_detection.pending_input
-            )
-            if terminal_keyboard_mode:
-                _tkbd.set_mode(terminal_keyboard_mode, enable=True)
+            if _tkbd.should_enable_protocol_mode():
+                terminal_keyboard_detection = _tkbd.detect_capabilities()
+                terminal_keyboard_mode = _tkbd.select_mode(
+                    terminal_keyboard_detection.capabilities
+                )
+                pending_terminal_key_presses = _tkbd.parse_input_key_presses(
+                    terminal_keyboard_detection.pending_input
+                )
+                if terminal_keyboard_mode:
+                    _tkbd.set_mode(terminal_keyboard_mode, enable=True)
 
-                def terminal_keyboard_cleanup(
-                    mode=terminal_keyboard_mode,
-                ) -> None:
-                    _tkbd.set_mode(mode, enable=False)
+                    def terminal_keyboard_cleanup(
+                        mode=terminal_keyboard_mode,
+                    ) -> None:
+                        _tkbd.set_mode(mode, enable=False)
 
-                # Safety net for signal-based exits where the finally block may not run
-                atexit.register(terminal_keyboard_cleanup)
+                    # Safety net for signal-based exits where the finally block may not run
+                    atexit.register(terminal_keyboard_cleanup)
         except Exception:
             terminal_keyboard_cleanup = None
 

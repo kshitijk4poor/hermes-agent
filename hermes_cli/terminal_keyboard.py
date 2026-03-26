@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
@@ -107,6 +108,29 @@ def select_mode(
     if capabilities.modify_other_keys_supported:
         return MODE_MODIFY_OTHER_KEYS
     return None
+
+
+def should_enable_protocol_mode(
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Return whether Hermes should switch the terminal into an enhanced mode.
+
+    Hermes streams output through prompt_toolkit's ``print_formatted_text``
+    path, which temporarily suspends the application, waits for CPR state, and
+    toggles cooked/raw mode around writes. In xterm.js-based terminals such as
+    VS Code's integrated terminal, enabling Kitty/modifyOtherKeys has been
+    observed to stall streaming even though capability probing succeeds.
+
+    Keep the parser-side sequence registrations everywhere, but skip the
+    terminal-wide mode switch in those environments.
+    """
+    environ = os.environ if env is None else env
+    term_program = (environ.get("TERM_PROGRAM") or "").lower()
+    if term_program == "vscode":
+        return False
+    if environ.get("VSCODE_PID"):
+        return False
+    return True
 
 
 def write_sequence(
