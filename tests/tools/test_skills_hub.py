@@ -179,6 +179,24 @@ class TestSkillsShSource:
         assert bundle.identifier == "skills-sh/vercel-labs/agent-skills/vercel-react-best-practices"
         mock_fetch.assert_called_once_with("vercel-labs/agent-skills/vercel-react-best-practices")
 
+    @patch.object(GitHubSource, "fetch")
+    def test_fetch_accepts_common_skills_sh_prefix_typo(self, mock_fetch):
+        expected_identifier = "anthropics/skills/frontend-design"
+        mock_fetch.side_effect = lambda identifier: SkillBundle(
+            name="frontend-design",
+            files={"SKILL.md": "# Frontend Design"},
+            source="github",
+            identifier=expected_identifier,
+            trust_level="trusted",
+        ) if identifier == expected_identifier else None
+
+        bundle = self._source().fetch("skils-sh/anthropics/skills/frontend-design")
+
+        assert bundle is not None
+        assert bundle.source == "skills.sh"
+        assert bundle.identifier == "skills-sh/anthropics/skills/frontend-design"
+        assert mock_fetch.call_args_list[0] == ((expected_identifier,), {})
+
     @patch("tools.skills_hub._write_index_cache")
     @patch("tools.skills_hub._read_index_cache", return_value=None)
     @patch("tools.skills_hub.httpx.get")
@@ -212,6 +230,26 @@ class TestSkillsShSource:
         assert meta.extra["install_command"].endswith("--skill vercel-react-best-practices")
         assert meta.extra["security_audits"]["socket"] == "Pass"
         mock_inspect.assert_called_once_with("vercel-labs/agent-skills/vercel-react-best-practices")
+
+    @patch.object(GitHubSource, "inspect")
+    def test_inspect_accepts_common_skills_sh_prefix_typo(self, mock_inspect):
+        expected_identifier = "anthropics/skills/frontend-design"
+        mock_inspect.side_effect = lambda identifier: SkillMeta(
+            name="frontend-design",
+            description="Distinctive frontend interfaces.",
+            source="github",
+            identifier=expected_identifier,
+            trust_level="trusted",
+            repo="anthropics/skills",
+            path="frontend-design",
+        ) if identifier == expected_identifier else None
+
+        meta = self._source().inspect("skils-sh/anthropics/skills/frontend-design")
+
+        assert meta is not None
+        assert meta.source == "skills.sh"
+        assert meta.identifier == "skills-sh/anthropics/skills/frontend-design"
+        assert mock_inspect.call_args_list[0] == ((expected_identifier,), {})
 
     @patch.object(GitHubSource, "_list_skills_in_repo")
     @patch.object(GitHubSource, "inspect")

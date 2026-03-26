@@ -32,7 +32,7 @@ import httpx
 import yaml
 
 from tools.skills_guard import (
-    ScanResult, scan_skill, should_allow_install, content_hash, TRUSTED_REPOS,
+    ScanResult, content_hash, TRUSTED_REPOS,
 )
 
 logger = logging.getLogger(__name__)
@@ -1264,10 +1264,15 @@ class SkillsShSource(SkillSource):
 
     @staticmethod
     def _normalize_identifier(identifier: str) -> str:
-        if identifier.startswith("skills-sh/"):
-            return identifier[len("skills-sh/"):]
-        if identifier.startswith("skills.sh/"):
-            return identifier[len("skills.sh/"):]
+        prefix_aliases = (
+            "skills-sh/",
+            "skills.sh/",
+            "skils-sh/",
+            "skils.sh/",
+        )
+        for prefix in prefix_aliases:
+            if identifier.startswith(prefix):
+                return identifier[len(prefix):]
         return identifier
 
     @staticmethod
@@ -2021,8 +2026,8 @@ class LobeHubSource(SkillSource):
             "metadata:",
             "  hermes:",
             f"    tags: [{', '.join(str(t) for t in tag_list)}]",
-            f"  lobehub:",
-            f"    source: lobehub",
+            "  lobehub:",
+            "    source: lobehub",
             "---",
         ]
 
