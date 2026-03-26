@@ -257,7 +257,25 @@ def _resolve_runtime_agent_kwargs() -> dict:
     }
 
 
-def _resolve_gateway_model() -> str:
+def _platform_config_key(platform: "Platform") -> str:
+    """Map a Platform enum to its config.yaml key (LOCAL→"cli", rest→enum value)."""
+    return "cli" if platform == Platform.LOCAL else platform.value
+
+
+def _load_gateway_config() -> dict:
+    """Load and parse ~/.hermes/config.yaml, returning {} on any error."""
+    try:
+        config_path = _hermes_home / 'config.yaml'
+        if config_path.exists():
+            import yaml
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f) or {}
+    except Exception:
+        logger.debug("Could not load gateway config from %s", _hermes_home / 'config.yaml')
+    return {}
+
+
+def _resolve_gateway_model(config: dict | None = None) -> str:
     """Read model from env/config — mirrors the resolution in _run_agent_sync.
 
     Without this, temporary AIAgent instances (memory flush, /compress) fall
@@ -265,19 +283,12 @@ def _resolve_gateway_model() -> str:
     when the active provider is openai-codex.
     """
     model = os.getenv("HERMES_MODEL") or os.getenv("LLM_MODEL") or "anthropic/claude-opus-4.6"
-    try:
-        import yaml as _y
-        _cfg_path = _hermes_home / "config.yaml"
-        if _cfg_path.exists():
-            with open(_cfg_path, encoding="utf-8") as _f:
-                _cfg = _y.safe_load(_f) or {}
-            _model_cfg = _cfg.get("model", {})
-            if isinstance(_model_cfg, str):
-                model = _model_cfg
-            elif isinstance(_model_cfg, dict):
-                model = _model_cfg.get("default", model)
-    except Exception:
-        pass
+    cfg = config if config is not None else _load_gateway_config()
+    model_cfg = cfg.get("model", {})
+    if isinstance(model_cfg, str):
+        model = model_cfg
+    elif isinstance(model_cfg, dict):
+        model = model_cfg.get("default", model)
     return model
 
 
@@ -3571,33 +3582,12 @@ class GatewayRunner:
                 )
                 return
 
-            # Read model from config via shared helper
-            model = _resolve_gateway_model()
-
-            user_config = {}
-            try:
-                config_path = _hermes_home / 'config.yaml'
-                if config_path.exists():
-                    import yaml
-                    with open(config_path, 'r', encoding="utf-8") as f:
-                        user_config = yaml.safe_load(f) or {}
-            except Exception:
-                pass
-
-            platform_config_key = {
-                Platform.LOCAL: "cli",
-                Platform.TELEGRAM: "telegram",
-                Platform.DISCORD: "discord",
-                Platform.WHATSAPP: "whatsapp",
-                Platform.SLACK: "slack",
-                Platform.SIGNAL: "signal",
-                Platform.HOMEASSISTANT: "homeassistant",
-                Platform.EMAIL: "email",
-                Platform.DINGTALK: "dingtalk",
-            }.get(source.platform, "telegram")
+            user_config = _load_gateway_config()
+            model = _resolve_gateway_model(user_config)
+            platform_key = _platform_config_key(source.platform)
 
             from hermes_cli.tools_config import _get_platform_tools
-            enabled_toolsets = sorted(_get_platform_tools(user_config, platform_config_key))
+            enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
 
             platform_key = "cli" if source.platform == Platform.LOCAL else source.platform.value
 
@@ -4717,47 +4707,16 @@ class GatewayRunner:
         from run_agent import AIAgent
         import queue
         
-        # Try to load platform_toolsets from config
-        user_config = {}
-        try:
-            config_path = _hermes_home / 'config.yaml'
-            if config_path.exists():
-                import yaml
-                with open(config_path, 'r', encoding="utf-8") as f:
-                    user_config = yaml.safe_load(f) or {}
-        except Exception as e:
-            logger.debug("Could not load platform_toolsets config: %s", e)
+        user_config = _load_gateway_config()
+        platform_key = _platform_config_key(source.platform)
 
-        # Map platform enum to config key
-        platform_config_key = {
-            Platform.LOCAL: "cli",
-            Platform.TELEGRAM: "telegram",
-            Platform.DISCORD: "discord",
-            Platform.WHATSAPP: "whatsapp",
-            Platform.SLACK: "slack",
-            Platform.SIGNAL: "signal",
-            Platform.HOMEASSISTANT: "homeassistant",
-            Platform.EMAIL: "email",
-            Platform.DINGTALK: "dingtalk",
-        }.get(source.platform, "telegram")
-        
         from hermes_cli.tools_config import _get_platform_tools
-        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_config_key))
-        
+        enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
+
         # Tool progress mode from config.yaml: "all", "new", "verbose", "off"
         # Falls back to env vars for backward compatibility
-        _progress_cfg = {}
-        try:
-            _tp_cfg_path = _hermes_home / "config.yaml"
-            if _tp_cfg_path.exists():
-                import yaml as _tp_yaml
-                with open(_tp_cfg_path, encoding="utf-8") as _tp_f:
-                    _tp_data = _tp_yaml.safe_load(_tp_f) or {}
-                _progress_cfg = _tp_data.get("display", {})
-        except Exception:
-            pass
         progress_mode = (
-            _progress_cfg.get("tool_progress")
+            user_config.get("display", {}).get("tool_progress")
             or os.getenv("HERMES_TOOL_PROGRESS_MODE")
             or "all"
         )
@@ -4980,7 +4939,7 @@ class GatewayRunner:
             except Exception:
                 pass
 
-            model = _resolve_gateway_model()
+            model = _resolve_gateway_model(user_config)
 
             try:
                 runtime_kwargs = _resolve_runtime_agent_kwargs()

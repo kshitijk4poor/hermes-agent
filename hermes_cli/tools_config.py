@@ -385,6 +385,8 @@ def _parse_enabled_flag(value, default: bool = True) -> bool:
         return default
     if isinstance(value, bool):
         return value
+    if isinstance(value, int):
+        return value != 0
     if isinstance(value, str):
         lowered = value.strip().lower()
         if lowered in {"true", "1", "yes", "on"}:
@@ -475,7 +477,10 @@ def _get_platform_tools(
     explicit_mcp_servers = explicit_passthrough & enabled_mcp_servers
     enabled_toolsets.update(explicit_passthrough - enabled_mcp_servers)
     if include_default_mcp_servers:
-        enabled_toolsets.update(explicit_mcp_servers or enabled_mcp_servers)
+        if explicit_mcp_servers:
+            enabled_toolsets.update(explicit_mcp_servers)
+        else:
+            enabled_toolsets.update(enabled_mcp_servers)
     else:
         enabled_toolsets.update(explicit_mcp_servers)
 
