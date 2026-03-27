@@ -95,6 +95,15 @@ def check_skill_manage_requirements() -> bool:
     return True
 
 
+def _clear_skills_prompt_cache(*, clear_snapshot: bool = False) -> None:
+    try:
+        from agent.prompt_builder import clear_skills_system_prompt_cache
+
+        clear_skills_system_prompt_cache(clear_snapshot=clear_snapshot)
+    except Exception as e:
+        logger.debug("Could not clear skills prompt cache: %s", e)
+
+
 # =============================================================================
 # Validation helpers
 # =============================================================================
@@ -546,6 +555,9 @@ def skill_manage(
 
     else:
         result = {"success": False, "error": f"Unknown action '{action}'. Use: create, edit, patch, delete, write_file, remove_file"}
+
+    if result.get("success"):
+        _clear_skills_prompt_cache(clear_snapshot=True)
 
     return json.dumps(result, ensure_ascii=False)
 

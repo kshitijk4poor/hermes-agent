@@ -4,6 +4,7 @@ import builtins
 import importlib
 import logging
 import sys
+import pytest
 
 from agent.prompt_builder import (
     _scan_context_content,
@@ -15,6 +16,7 @@ from agent.prompt_builder import (
     _find_git_root,
     _strip_yaml_frontmatter,
     build_skills_system_prompt,
+    clear_skills_system_prompt_cache,
     build_context_files_prompt,
     CONTEXT_FILE_MAX_CHARS,
     DEFAULT_AGENT_IDENTITY,
@@ -192,7 +194,7 @@ class TestParseSkillFile:
         )
         from unittest.mock import patch
 
-        with patch("tools.skills_tool.sys") as mock_sys:
+        with patch("agent.prompt_builder.sys") as mock_sys:
             mock_sys.platform = "linux"
             is_compat, _, _ = _parse_skill_file(skill_file)
         assert is_compat is False
@@ -283,7 +285,7 @@ class TestBuildSkillsSystemPrompt:
 
         from unittest.mock import patch
 
-        with patch("tools.skills_tool.sys") as mock_sys:
+        with patch("agent.prompt_builder.sys") as mock_sys:
             mock_sys.platform = "linux"
             result = build_skills_system_prompt()
 
@@ -302,12 +304,98 @@ class TestBuildSkillsSystemPrompt:
 
         from unittest.mock import patch
 
-        with patch("tools.skills_tool.sys") as mock_sys:
+        with patch("agent.prompt_builder.sys") as mock_sys:
             mock_sys.platform = "darwin"
             result = build_skills_system_prompt()
 
         assert "imessage" in result
         assert "Send iMessages" in result
+
+    def test_builds_index_without_importing_tools_package(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "coding" / "python-debug"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+
+        original_import = builtins.__import__
+
+        def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "tools" or name.startswith("tools."):
+                raise ModuleNotFoundError("simulated tools package import failure")
+            return original_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.delitem(sys.modules, "tools", raising=False)
+        monkeypatch.delitem(sys.modules, "tools.skills_tool", raising=False)
+        monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+        result = build_skills_system_prompt()
+
+        assert "python-debug" in result
+        assert "Debug Python scripts" in result
+
+    def test_reuses_cached_prompt_when_inputs_unchanged(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "coding" / "python-debug"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+
+        import agent.prompt_builder as prompt_builder
+
+        first = build_skills_system_prompt()
+
+        def fail_if_reparsed(*args, **kwargs):
+            raise AssertionError("expected cached skills prompt reuse")
+
+        monkeypatch.setattr(prompt_builder, "_parse_skill_file", fail_if_reparsed)
+
+        second = build_skills_system_prompt()
+
+        assert second == first
+
+    def test_clear_skills_prompt_cache_with_snapshot_clear_forces_reparse(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "coding" / "python-debug"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+
+        first = build_skills_system_prompt()
+        clear_skills_system_prompt_cache(clear_snapshot=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Reparsed description\n---\n"
+        )
+
+        second = build_skills_system_prompt()
+
+        assert second != first
+        assert "Reparsed description" in second
+
+    def test_uses_disk_snapshot_after_process_cache_clear(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skill_dir = tmp_path / "skills" / "coding" / "python-debug"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: python-debug\ndescription: Debug Python scripts\n---\n"
+        )
+
+        import agent.prompt_builder as prompt_builder
+
+        first = build_skills_system_prompt()
+        prompt_builder.clear_skills_system_prompt_cache()
+
+        def fail_if_reparsed(*args, **kwargs):
+            raise AssertionError("expected disk snapshot reuse")
+
+        monkeypatch.setattr(prompt_builder, "_parse_skill_file", fail_if_reparsed)
+
+        second = build_skills_system_prompt()
+
+        assert second == first
 
     def test_excludes_disabled_skills(self, monkeypatch, tmp_path):
         """Skills in the user's disabled list should not appear in the system prompt."""
@@ -330,7 +418,7 @@ class TestBuildSkillsSystemPrompt:
         from unittest.mock import patch
 
         with patch(
-            "tools.skills_tool._get_disabled_skill_names",
+            "agent.prompt_builder._get_disabled_skill_names",
             return_value={"old-tool"},
         ):
             result = build_skills_system_prompt()
@@ -561,10 +649,14 @@ class TestBuildContextFilesPrompt:
         result = build_context_files_prompt(cwd=str(tmp_path))
         assert "Lowercase claude rules" in result
 
-    def test_claude_md_uppercase_takes_priority(self, tmp_path):
-        (tmp_path / "CLAUDE.md").write_text("From uppercase.")
-        (tmp_path / "claude.md").write_text("From lowercase.")
-        result = build_context_files_prompt(cwd=str(tmp_path))
+    def test_claude_md_uppercase_takes_priority(self, monkeypatch, tmp_path):
+        upper = tmp_path / "CLAUDE.md"
+        lower = tmp_path / "claude.md"
+        upper.write_text("From uppercase.")
+        if lower.exists():
+            pytest.skip("case-insensitive filesystem cannot distinguish CLAUDE.md from claude.md")
+        lower.write_text("From lowercase.")
+        result = build_context_files_prompt(cwd=str(tmp_path), skip_soul=True)
         assert "From uppercase" in result
         assert "From lowercase" not in result
 

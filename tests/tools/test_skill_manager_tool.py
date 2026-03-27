@@ -371,3 +371,17 @@ class TestSkillManageDispatcher:
             raw = skill_manage(action="create", name="test-skill", content=VALID_SKILL_CONTENT)
         result = json.loads(raw)
         assert result["success"] is True
+
+    def test_successful_write_clears_skills_prompt_cache(self, tmp_path):
+        with (
+            patch("tools.skill_manager_tool.SKILLS_DIR", tmp_path),
+            patch("tools.skill_manager_tool._clear_skills_prompt_cache") as clear_cache,
+        ):
+            raw = skill_manage(
+                action="create",
+                name="test-skill",
+                content=VALID_SKILL_CONTENT,
+            )
+        result = json.loads(raw)
+        assert result["success"] is True
+        clear_cache.assert_called_once_with(clear_snapshot=True)
