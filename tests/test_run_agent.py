@@ -579,10 +579,16 @@ class TestBuildSystemPrompt:
         prompt = agent._build_system_prompt()
         assert MEMORY_GUIDANCE not in prompt
 
-    def test_includes_datetime(self, agent):
+    def test_cached_prompt_excludes_runtime_metadata(self, agent):
         prompt = agent._build_system_prompt()
-        # Should contain current date info like "Conversation started:"
-        assert "Conversation started:" in prompt
+        assert "Conversation started:" not in prompt
+        assert "Current date/time:" not in prompt
+
+    def test_runtime_context_note_includes_datetime(self, agent):
+        note = agent._build_runtime_context_note()
+        assert "Current date/time:" in note
+        assert f"Model: {agent.model}" in note
+        assert f"Provider: {agent.provider}" in note
 
 
 class TestInvalidateSystemPrompt:
@@ -1770,6 +1776,33 @@ class TestSystemPromptStability:
         assert "prior context" in current_user["content"]
         assert "Honcho memory was retrieved from prior sessions" in current_user["content"]
 
+    def test_runtime_context_stays_out_of_cached_system_prompt(self, agent):
+        captured = {}
+
+        def _fake_api_call(api_kwargs):
+            captured.update(api_kwargs)
+            return _mock_response(content="done", finish_reason="stop")
+
+        agent._use_prompt_caching = False
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_interruptible_api_call", side_effect=_fake_api_call),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        api_messages = captured["messages"]
+        assert api_messages[0]["role"] == "system"
+        assert "Current date/time:" not in api_messages[0]["content"]
+        current_user = api_messages[-1]
+        assert current_user["role"] == "user"
+        assert "hello" in current_user["content"]
+        assert "Current date/time:" in current_user["content"]
+        assert f"Model: {agent.model}" in current_user["content"]
+
     def test_honcho_prefetch_runs_on_first_turn(self):
         """Honcho prefetch should run when conversation_history is empty."""
         conversation_history = []
@@ -1804,7 +1837,7 @@ class TestSystemPromptStability:
             result = agent.run_conversation("synthetic flush turn", sync_honcho=False)
 
         assert result["completed"] is True
-        assert captured["messages"][-1]["content"] == "synthetic flush turn"
+        assert captured["messages"][-1]["content"].startswith("synthetic flush turn")
         mock_sync.assert_not_called()
         mock_prefetch.assert_not_called()
 
