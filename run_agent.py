@@ -62,7 +62,12 @@ else:
 
 
 # Import our tool system
-from model_tools import get_tool_definitions, handle_function_call, check_toolset_requirements
+from model_tools import (
+    get_tool_definitions,
+    get_toolset_for_tool,
+    handle_function_call,
+    check_toolset_requirements,
+)
 from tools.terminal_tool import cleanup_vm
 from tools.interrupt import set_interrupt as _set_interrupt
 from tools.browser_tool import cleanup_browser
@@ -345,6 +350,26 @@ def _inject_honcho_turn_context(content, turn_context: str):
         "sessions. It is continuity context for this turn only, not new user "
         "input.]\n\n"
         f"{turn_context}"
+    )
+
+    if isinstance(content, list):
+        return list(content) + [{"type": "text", "text": note}]
+
+    text = "" if content is None else str(content)
+    if not text.strip():
+        return note
+    return f"{text}\n\n{note}"
+
+
+def _inject_runtime_turn_context(content, runtime_context: str):
+    """Append runtime metadata to the current-turn user message only."""
+    if not runtime_context:
+        return content
+
+    note = (
+        "[System note: The following runtime metadata applies to this turn only. "
+        "It is not new user input.]\n\n"
+        f"{runtime_context}"
     )
 
     if isinstance(content, list):
@@ -2409,8 +2434,7 @@ class AIAgent:
         #   3. Persistent memory (frozen snapshot)
         #   4. Skills guidance (if skills tools are loaded)
         #   5. Context files (AGENTS.md, .cursorrules — SOUL.md excluded here when used as identity)
-        #   6. Current date & time (frozen at build time)
-        #   7. Platform-specific formatting hint
+        #   6. Platform-specific formatting hint
 
         # Try SOUL.md as primary identity (unless context files are skipped)
         _soul_loaded = False
@@ -2520,7 +2544,13 @@ class AIAgent:
 
         has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
         if has_skills_tools:
-            avail_toolsets = {ts for ts, avail in check_toolset_requirements().items() if avail}
+            avail_toolsets = {
+                toolset
+                for toolset in (
+                    get_toolset_for_tool(tool_name) for tool_name in self.valid_tool_names
+                )
+                if toolset
+            }
             skills_prompt = build_skills_system_prompt(
                 available_tools=self.valid_tool_names,
                 available_toolsets=avail_toolsets,
@@ -2541,17 +2571,6 @@ class AIAgent:
             if context_files_prompt:
                 prompt_parts.append(context_files_prompt)
 
-        from hermes_time import now as _hermes_now
-        now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
-        if self.pass_session_id and self.session_id:
-            timestamp_line += f"\nSession ID: {self.session_id}"
-        if self.model:
-            timestamp_line += f"\nModel: {self.model}"
-        if self.provider:
-            timestamp_line += f"\nProvider: {self.provider}"
-        prompt_parts.append(timestamp_line)
-
         # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
         # of the requested model. Inject explicit model identity into the system prompt
         # so the agent can correctly report which model it is (workaround for API bug).
@@ -2569,6 +2588,20 @@ class AIAgent:
             prompt_parts.append(PLATFORM_HINTS[platform_key])
 
         return "\n\n".join(prompt_parts)
+
+    def _build_runtime_context_note(self) -> str:
+        """Build per-turn runtime metadata outside the cached system prompt."""
+        from hermes_time import now as _hermes_now
+
+        now = _hermes_now()
+        lines = [f"Current date/time: {now.strftime('%A, %B %d, %Y %I:%M %p')}"]
+        if self.pass_session_id and self.session_id:
+            lines.append(f"Session ID: {self.session_id}")
+        if self.model:
+            lines.append(f"Model: {self.model}")
+        if self.provider:
+            lines.append(f"Provider: {self.provider}")
+        return "\n".join(lines)
 
     # =========================================================================
     # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
@@ -5866,6 +5899,7 @@ class AIAgent:
                         logger.debug("Session DB update_system_prompt failed: %s", e)
 
         active_system_prompt = self._cached_system_prompt
+        runtime_turn_context = self._build_runtime_context_note()
 
         # ── Preflight context compression ──
         # Before entering the main loop, check if the loaded conversation
@@ -5979,9 +6013,13 @@ class AIAgent:
             for idx, msg in enumerate(messages):
                 api_msg = msg.copy()
 
-                if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
-                    api_msg["content"] = _inject_honcho_turn_context(
-                        api_msg.get("content", ""), self._honcho_turn_context
+                if idx == current_turn_user_idx and msg.get("role") == "user":
+                    if self._honcho_turn_context:
+                        api_msg["content"] = _inject_honcho_turn_context(
+                            api_msg.get("content", ""), self._honcho_turn_context
+                        )
+                    api_msg["content"] = _inject_runtime_turn_context(
+                        api_msg.get("content", ""), runtime_turn_context
                     )
 
                 # For ALL assistant messages, pass reasoning back to the API
