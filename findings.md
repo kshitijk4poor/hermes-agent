@@ -267,11 +267,51 @@ Patterns worth stealing or keeping in mind:
 - OpenCode: bootstrap parallel fetches, render partial state early, keep background loading separate from first paint
 - Aider: defer slow imports into background work, keep stable prompt regions cache-friendly
 
-Hermes follow-up ideas from that comparison:
+### Patterns Hermes Already Stole
 
-- Move the live date/time out of the cached system prompt to improve provider-side prompt cache reuse across new sessions
-- Maintain a skill metadata snapshot instead of reparsing every `SKILL.md` on the first agent in a process
-- Consider parallelizing non-critical startup work where correctness does not depend on sequencing
+- Stable cached prompt prefix:
+  - We moved volatile runtime metadata out of `_build_system_prompt()` and into a per-turn runtime note.
+  - This follows the Claude Code / Aider style “keep the cacheable prefix stable” pattern.
+- Multi-layer skills caching:
+  - We now use both an in-process hot cache and a disk-backed snapshot for fresh processes.
+  - This is the same general idea as Codex/OpenCode style startup snapshots, adapted to Hermes skills metadata.
+- Lazy provider-specific work:
+  - We removed eager Anthropic Claude Code version detection and short-circuited vision backend probing.
+  - This matches the “do not pay optional-provider cost on the universal startup path” pattern seen across several other agent CLIs.
+- Shared startup state reuse:
+  - We stopped recomputing toolset availability during prompt building once the agent already knew which tools were valid.
+  - This is the Hermes version of “resolve once, reuse everywhere” for startup discovery.
+
+### Patterns Worth Prototyping Next
+
+- Persistent skill metadata index:
+  - The remaining cold-path bottleneck is still first-process `SKILL.md` frontmatter parsing.
+  - The next likely step is a maintained metadata index or more formal startup snapshot lifecycle.
+- Negative-result caching for discovery:
+  - Claude Code style caching of failed MCP/auth/provider probes is still attractive for Hermes optional integrations.
+  - This matters most when a machine has partially configured providers or broken local tooling.
+- Long-lived prewarmed clients:
+  - Codex/OpenCode style connection prewarm or shared long-lived provider clients may reduce first-dispatch variance further.
+  - This only makes sense if it does not complicate credential rotation or session isolation.
+- Keep the benchmark harnesses close to reality:
+  - The copied `HERMES_HOME` with `104` skills was materially more useful than synthetic microbenchmarks.
+  - Future TTFT work should keep using real skill inventories and fresh-process measurements.
+
+### Patterns We Explicitly Rejected
+
+- Startup parallelization after the snapshot work:
+  - We measured it directly instead of assuming it would help.
+  - The median gain was too small and the outliers got worse, so we did not keep it.
+- Heavy cache validation on the hot path:
+  - The first signature-validated skills cache design improved reuse but still cost enough on cold startup that it was the wrong trade-off.
+  - The lighter in-process cache plus disk snapshot was better.
+
+Remaining Hermes follow-up ideas from that comparison:
+
+- Replace first-process skill frontmatter reparsing with a more formal maintained metadata index
+- Cache negative discovery/probe results for optional providers, MCP servers, and auth paths
+- Evaluate long-lived prewarmed provider clients only if they preserve clean session isolation
+- Keep benchmarking with real copied `HERMES_HOME` state instead of only synthetic microbenchmarks
 
 ## Sources
 
