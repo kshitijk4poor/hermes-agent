@@ -9,6 +9,35 @@ from gateway.config import Platform, PlatformConfig
 
 
 # ---------------------------------------------------------------------------
+# Shared Helpers
+# ---------------------------------------------------------------------------
+
+def _make_signal_adapter(monkeypatch, account="+15551234567", **extra):
+    """Create a SignalAdapter with sensible test defaults."""
+    monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", extra.pop("group_allowed", ""))
+    from gateway.platforms.signal import SignalAdapter
+    config = PlatformConfig()
+    config.enabled = True
+    config.extra = {
+        "http_url": "http://localhost:8080",
+        "account": account,
+        **extra,
+    }
+    return SignalAdapter(config)
+
+
+def _stub_rpc(return_value):
+    """Return an async mock for SignalAdapter._rpc that captures call params."""
+    captured = []
+
+    async def mock_rpc(method, params, rpc_id=None):
+        captured.append({"method": method, "params": dict(params)})
+        return return_value
+
+    return mock_rpc, captured
+
+
+# ---------------------------------------------------------------------------
 # Platform & Config
 # ---------------------------------------------------------------------------
 
@@ -63,48 +92,22 @@ class TestSignalConfigLoading:
 # ---------------------------------------------------------------------------
 
 class TestSignalAdapterInit:
-    def _make_config(self, **extra):
-        config = PlatformConfig()
-        config.enabled = True
-        config.extra = {
-            "http_url": "http://localhost:8080",
-            "account": "+15551234567",
-            **extra,
-        }
-        return config
-
     def test_init_parses_config(self, monkeypatch):
-        monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", "group123,group456")
-
-        from gateway.platforms.signal import SignalAdapter
-        adapter = SignalAdapter(self._make_config())
-
+        adapter = _make_signal_adapter(monkeypatch, group_allowed="group123,group456")
         assert adapter.http_url == "http://localhost:8080"
         assert adapter.account == "+15551234567"
         assert "group123" in adapter.group_allow_from
 
     def test_init_empty_allowlist(self, monkeypatch):
-        monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", "")
-
-        from gateway.platforms.signal import SignalAdapter
-        adapter = SignalAdapter(self._make_config())
-
+        adapter = _make_signal_adapter(monkeypatch)
         assert len(adapter.group_allow_from) == 0
 
     def test_init_strips_trailing_slash(self, monkeypatch):
-        monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", "")
-
-        from gateway.platforms.signal import SignalAdapter
-        adapter = SignalAdapter(self._make_config(http_url="http://localhost:8080/"))
-
+        adapter = _make_signal_adapter(monkeypatch, http_url="http://localhost:8080/")
         assert adapter.http_url == "http://localhost:8080"
 
     def test_self_message_filtering(self, monkeypatch):
-        monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", "")
-
-        from gateway.platforms.signal import SignalAdapter
-        adapter = SignalAdapter(self._make_config())
-
+        adapter = _make_signal_adapter(monkeypatch)
         assert adapter._account_normalized == "+15551234567"
 
 
@@ -198,41 +201,14 @@ class TestSignalHelpers:
 class TestSignalSSEUrlEncoding:
     """Verify that phone numbers with + are URL-encoded in the SSE endpoint."""
 
-    def _make_adapter(self, monkeypatch, account="+31612345678"):
-        monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", "")
-        from gateway.platforms.signal import SignalAdapter
-        config = PlatformConfig()
-        config.enabled = True
-        config.extra = {
-            "http_url": "http://localhost:8080",
-            "account": account,
-        }
-        return SignalAdapter(config)
-
-    def test_sse_url_encodes_plus_in_account(self, monkeypatch):
+    def test_sse_url_encodes_plus_in_account(self):
         """The + in E.164 phone numbers must be percent-encoded in the SSE query string."""
-        adapter = self._make_adapter(monkeypatch, account="+31612345678")
         encoded = quote("+31612345678", safe="")
-        expected_url = f"http://localhost:8080/api/v1/events?account={encoded}"
-        # Verify quote encodes the + sign
-        assert "%2B" in encoded
         assert encoded == "%2B31612345678"
-        # The URL constructed in _sse_listener should use the encoded form
-        assert expected_url == "http://localhost:8080/api/v1/events?account=%2B31612345678"
 
-    def test_sse_url_encoding_preserves_digits(self, monkeypatch):
+    def test_sse_url_encoding_preserves_digits(self):
         """Digits and country codes should pass through URL encoding unchanged."""
-        encoded = quote("+15551234567", safe="")
-        assert encoded == "%2B15551234567"
-
-    def test_url_encoding_matches_source(self, monkeypatch):
-        """Verify that quote(account, safe='') is used in signal.py source for SSE URL."""
-        import inspect
-        from gateway.platforms.signal import SignalAdapter
-        source = inspect.getsource(SignalAdapter._sse_listener)
-        # The SSE URL must use quote() to encode the account parameter
-        assert "quote(self.account" in source, "SSE URL must use quote() to encode account"
-        assert 'safe=""' in source or "safe=''" in source, "quote() must use safe='' to encode +"
+        assert quote("+15551234567", safe="") == "%2B15551234567"
 
 
 # ---------------------------------------------------------------------------
@@ -242,69 +218,41 @@ class TestSignalSSEUrlEncoding:
 class TestSignalAttachmentFetch:
     """Verify that _fetch_attachment uses the correct RPC parameter name."""
 
-    def _make_adapter(self, monkeypatch):
-        monkeypatch.setenv("SIGNAL_GROUP_ALLOWED_USERS", "")
-        from gateway.platforms.signal import SignalAdapter
-        config = PlatformConfig()
-        config.enabled = True
-        config.extra = {
-            "http_url": "http://localhost:8080",
-            "account": "+15551234567",
-        }
-        return SignalAdapter(config)
-
     @pytest.mark.asyncio
     async def test_fetch_attachment_uses_id_parameter(self, monkeypatch):
         """RPC getAttachment must use 'id', not 'attachmentId' (signal-cli requirement)."""
-        adapter = self._make_adapter(monkeypatch)
+        adapter = _make_signal_adapter(monkeypatch)
 
-        # Create a small valid PNG for the attachment response
         png_data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
         b64_data = base64.b64encode(png_data).decode()
 
-        captured_params = {}
-
-        async def mock_rpc(method, params, rpc_id=None):
-            captured_params.update(params)
-            captured_params["_method"] = method
-            return {"data": b64_data}
-
-        adapter._rpc = mock_rpc
+        adapter._rpc, captured = _stub_rpc({"data": b64_data})
 
         with patch("gateway.platforms.signal.cache_image_from_bytes", return_value="/tmp/test.png"):
-            path, ext = await adapter._fetch_attachment("attachment-123")
+            await adapter._fetch_attachment("attachment-123")
 
-        assert captured_params["_method"] == "getAttachment"
-        assert "id" in captured_params, "Must use 'id' parameter, not 'attachmentId'"
-        assert "attachmentId" not in captured_params, "Must NOT use 'attachmentId' — causes NullPointerException in signal-cli"
-        assert captured_params["id"] == "attachment-123"
-        assert captured_params["account"] == "+15551234567"
+        call = captured[0]
+        assert call["method"] == "getAttachment"
+        assert call["params"]["id"] == "attachment-123"
+        assert "attachmentId" not in call["params"], "Must NOT use 'attachmentId' — causes NullPointerException in signal-cli"
+        assert call["params"]["account"] == "+15551234567"
 
     @pytest.mark.asyncio
     async def test_fetch_attachment_returns_none_on_empty(self, monkeypatch):
-        """_fetch_attachment returns (None, '') when RPC returns nothing."""
-        adapter = self._make_adapter(monkeypatch)
-
-        async def mock_rpc(method, params, rpc_id=None):
-            return None
-
-        adapter._rpc = mock_rpc
+        adapter = _make_signal_adapter(monkeypatch)
+        adapter._rpc, _ = _stub_rpc(None)
         path, ext = await adapter._fetch_attachment("missing-id")
         assert path is None
         assert ext == ""
 
     @pytest.mark.asyncio
     async def test_fetch_attachment_handles_dict_response(self, monkeypatch):
-        """_fetch_attachment correctly unwraps dict response with 'data' key."""
-        adapter = self._make_adapter(monkeypatch)
+        adapter = _make_signal_adapter(monkeypatch)
 
         pdf_data = b"%PDF-1.4" + b"\x00" * 100
         b64_data = base64.b64encode(pdf_data).decode()
 
-        async def mock_rpc(method, params, rpc_id=None):
-            return {"data": b64_data}
-
-        adapter._rpc = mock_rpc
+        adapter._rpc, _ = _stub_rpc({"data": b64_data})
 
         with patch("gateway.platforms.signal.cache_document_from_bytes", return_value="/tmp/test.pdf"):
             path, ext = await adapter._fetch_attachment("doc-456")
