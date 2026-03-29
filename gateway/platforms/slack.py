@@ -93,6 +93,17 @@ class SlackAdapter(BasePlatformAdapter):
             return False
 
         try:
+            # Acquire scoped lock to prevent duplicate app token usage
+            from gateway.status import acquire_scoped_lock
+            self._token_lock_identity = app_token
+            acquired, existing = acquire_scoped_lock('slack-app-token', app_token, metadata={'platform': 'slack'})
+            if not acquired:
+                owner_pid = existing.get('pid') if isinstance(existing, dict) else None
+                message = f'Slack app token already in use' + (f' (PID {owner_pid})' if owner_pid else '') + '. Stop the other gateway first.'
+                logger.error('[%s] %s', self.name, message)
+                self._set_fatal_error('slack_token_lock', message, retryable=False)
+                return False
+
             self._app = AsyncApp(token=bot_token)
 
             # Get our own bot user ID for mention detection
@@ -138,6 +149,16 @@ class SlackAdapter(BasePlatformAdapter):
             except Exception as e:  # pragma: no cover - defensive logging
                 logger.warning("[Slack] Error while closing Socket Mode handler: %s", e, exc_info=True)
         self._running = False
+
+        # Release the token lock (use stored identity, not re-read env)
+        try:
+            from gateway.status import release_scoped_lock
+            if getattr(self, '_token_lock_identity', None):
+                release_scoped_lock('slack-app-token', self._token_lock_identity)
+                self._token_lock_identity = None
+        except Exception:
+            pass
+
         logger.info("[Slack] Disconnected")
 
     async def send(
