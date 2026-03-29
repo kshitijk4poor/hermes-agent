@@ -486,6 +486,7 @@ class AIAgent:
         provider_data_collection: str = None,
         session_id: str = None,
         tool_progress_callback: callable = None,
+        tool_complete_callback: callable = None,
         thinking_callback: callable = None,
         reasoning_callback: callable = None,
         clarify_callback: callable = None,
@@ -534,6 +535,7 @@ class AIAgent:
             provider_sort (str): Sort providers by price/throughput/latency (optional)
             session_id (str): Pre-generated session ID for logging (optional, auto-generated if not provided)
             tool_progress_callback (callable): Callback function(tool_name, args_preview) for progress notifications
+            tool_complete_callback (callable): Callback function(tool_name, args, result) after a tool finishes
             clarify_callback (callable): Callback function(question, choices) -> str for interactive user questions.
                 Provided by the platform layer (CLI or gateway). If None, the clarify tool returns an error.
             max_tokens (int): Maximum tokens for model responses (optional, uses model default if not set)
@@ -616,6 +618,7 @@ class AIAgent:
             ).start()
 
         self.tool_progress_callback = tool_progress_callback
+        self.tool_complete_callback = tool_complete_callback
         self.thinking_callback = thinking_callback
         self.reasoning_callback = reasoning_callback
         self._reasoning_deltas_fired = False  # Set by _fire_reasoning_delta, reset per API call
@@ -5440,6 +5443,12 @@ class AIAgent:
                     response_preview = function_result[:self.log_prefix_chars] + "..." if len(function_result) > self.log_prefix_chars else function_result
                     print(f"  ✅ Tool {i+1} completed in {tool_duration:.2f}s - {response_preview}")
 
+            if self.tool_complete_callback:
+                try:
+                    self.tool_complete_callback(name, args, function_result)
+                except Exception as cb_err:
+                    logging.debug(f"Tool complete callback error: {cb_err}")
+
             # Truncate oversized results
             MAX_TOOL_RESULT_CHARS = 100_000
             if len(function_result) > MAX_TOOL_RESULT_CHARS:
@@ -5693,6 +5702,12 @@ class AIAgent:
             if self.verbose_logging:
                 logging.debug(f"Tool {function_name} completed in {tool_duration:.2f}s")
                 logging.debug(f"Tool result ({len(function_result)} chars): {function_result}")
+
+            if self.tool_complete_callback:
+                try:
+                    self.tool_complete_callback(function_name, function_args, function_result)
+                except Exception as cb_err:
+                    logging.debug(f"Tool complete callback error: {cb_err}")
 
             # Guard against tools returning absurdly large content that would
             # blow up the context window. 100K chars ≈ 25K tokens — generous

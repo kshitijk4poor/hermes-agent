@@ -7,7 +7,11 @@ Used by AIAgent._execute_tool_calls for CLI feedback.
 import json
 import logging
 import os
+import shlex
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -193,6 +197,83 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | N
     if len(preview) > max_len:
         preview = preview[:max_len - 3] + "..."
     return preview
+
+
+def extract_edit_diff(tool_name: str, result: str | None) -> str | None:
+    """Extract a unified diff from a file-edit tool result."""
+    if tool_name not in {"write_file", "patch"} or not result:
+        return None
+    try:
+        data = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    diff = data.get("diff")
+    if not isinstance(diff, str) or not diff.strip():
+        return None
+    return diff
+
+
+def _resolve_hunk_command() -> list[str] | None:
+    """Resolve the command used to launch hunk."""
+    override = os.getenv("HERMES_HUNK_COMMAND", "").strip()
+    if override:
+        return shlex.split(override)
+    if shutil.which("hunk"):
+        return ["hunk"]
+    if shutil.which("bunx"):
+        return ["bunx", "github:modem-dev/hunk"]
+    if shutil.which("npx"):
+        return ["npx", "-y", "github:modem-dev/hunk"]
+    return None
+
+
+def render_edit_diff_with_hunk(
+    tool_name: str,
+    result: str | None,
+    *,
+    print_fn=None,
+) -> bool:
+    """Render an edit diff with hunk when a TTY-backed CLI is available."""
+    diff = extract_edit_diff(tool_name, result)
+    if not diff or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+
+    command = _resolve_hunk_command()
+    if not command:
+        return False
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False, encoding="utf-8") as handle:
+            handle.write(diff)
+            temp_path = handle.name
+
+        if print_fn is not None:
+            try:
+                print_fn("  ┊ review diff")
+            except Exception:
+                pass
+
+        with open("/dev/tty", "rb", buffering=0) as tty_in, open("/dev/tty", "wb", buffering=0) as tty_out:
+            completed = subprocess.run(
+                [*command, "patch", temp_path, "--pager"],
+                stdin=tty_in,
+                stdout=tty_out,
+                stderr=tty_out,
+                check=False,
+            )
+        return completed.returncode == 0
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        logger.debug("Could not render diff with hunk: %s", exc)
+        return False
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 # =========================================================================

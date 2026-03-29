@@ -1,7 +1,13 @@
 """Tests for agent/display.py — build_tool_preview()."""
 
 import pytest
-from agent.display import build_tool_preview
+from unittest.mock import MagicMock, mock_open, patch
+
+from agent.display import (
+    build_tool_preview,
+    extract_edit_diff,
+    render_edit_diff_with_hunk,
+)
 
 
 class TestBuildToolPreview:
@@ -83,3 +89,58 @@ class TestBuildToolPreview:
         assert build_tool_preview("terminal", 0) is None
         assert build_tool_preview("terminal", "") is None
         assert build_tool_preview("terminal", []) is None
+
+
+class _FakeTTY:
+    def isatty(self):
+        return True
+
+
+class TestEditDiffPreview:
+    def test_extract_edit_diff_for_patch(self):
+        diff = extract_edit_diff("patch", '{"success": true, "diff": "--- a/x\\n+++ b/x\\n"}')
+        assert diff is not None
+        assert "+++ b/x" in diff
+
+    def test_extract_edit_diff_ignores_non_edit_tools(self):
+        assert extract_edit_diff("read_file", '{"diff": "--- a\\n+++ b\\n"}') is None
+
+    def test_render_edit_diff_with_hunk_invokes_pager(self, monkeypatch):
+        fake_run = MagicMock(return_value=MagicMock(returncode=0))
+        printer = MagicMock()
+
+        monkeypatch.setattr("agent.display._resolve_hunk_command", lambda: ["hunk"])
+        monkeypatch.setattr("agent.display.sys.stdin", _FakeTTY())
+        monkeypatch.setattr("agent.display.sys.stdout", _FakeTTY())
+
+        with patch("agent.display.subprocess.run", fake_run), patch("builtins.open", mock_open()) as mocked_open:
+            rendered = render_edit_diff_with_hunk(
+                "write_file",
+                '{"diff": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-old\\n+new\\n"}',
+                print_fn=printer,
+            )
+
+        assert rendered is True
+        printer.assert_called_once()
+        mocked_open.assert_any_call("/dev/tty", "rb", buffering=0)
+        args = fake_run.call_args.args[0]
+        assert args[:2] == ["hunk", "patch"]
+        assert args[-1] == "--pager"
+
+    def test_render_edit_diff_with_hunk_skips_without_tty(self, monkeypatch):
+        fake_run = MagicMock()
+        fake_stream = MagicMock()
+        fake_stream.isatty.return_value = False
+
+        monkeypatch.setattr("agent.display.sys.stdin", fake_stream)
+        monkeypatch.setattr("agent.display.sys.stdout", fake_stream)
+        monkeypatch.setattr("agent.display._resolve_hunk_command", lambda: ["hunk"])
+
+        with patch("agent.display.subprocess.run", fake_run):
+            rendered = render_edit_diff_with_hunk(
+                "patch",
+                '{"diff": "--- a/x\\n+++ b/x\\n"}',
+            )
+
+        assert rendered is False
+        fake_run.assert_not_called()
