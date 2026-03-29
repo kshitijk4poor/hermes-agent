@@ -102,8 +102,8 @@ class TestEditDiffPreview:
         assert "--no-gitconfig" in command
         assert "--true-color=always" in command
         assert "--line-numbers" in command
-        assert "--plus-style=green" in command
-        assert "--minus-style=red" in command
+        assert "--plus-style=green green" in command
+        assert "--minus-style=red red" in command
         assert "--hunk-header-style=syntax" in command
         assert "--hunk-header-decoration-style=none" in command
 
@@ -215,8 +215,8 @@ class TestEditDiffPreview:
         assert args[0] == "delta"
         assert "--paging=never" in args
         assert "--no-gitconfig" in args
-        assert "--plus-style=green" in args
-        assert "--minus-style=red" in args
+        assert "--plus-style=green green" in args
+        assert "--minus-style=red red" in args
 
     def test_render_edit_diff_with_delta_skips_without_diff(self, monkeypatch):
         fake_run = MagicMock()
