@@ -1,8 +1,7 @@
 """Tests for agent/display.py — build_tool_preview()."""
 
 import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, mock_open, patch
+from unittest.mock import MagicMock, patch
 
 from agent.display import (
     build_tool_preview,
@@ -91,11 +90,6 @@ class TestBuildToolPreview:
         assert build_tool_preview("terminal", 0) is None
         assert build_tool_preview("terminal", "") is None
         assert build_tool_preview("terminal", []) is None
-
-
-class _FakeTTY:
-    def isatty(self):
-        return True
 
 
 class TestEditDiffPreview:
@@ -189,14 +183,12 @@ class TestEditDiffPreview:
         assert "references/notes.md" in diff
 
     def test_render_edit_diff_with_delta_invokes_pager(self, monkeypatch):
-        fake_run = MagicMock(return_value=MagicMock(returncode=0))
+        fake_run = MagicMock(return_value=MagicMock(returncode=0, stdout="\x1b[32m+new\x1b[0m\n", stderr=""))
         printer = MagicMock()
 
-        monkeypatch.setattr("agent.display.sys.stdin", _FakeTTY())
-        monkeypatch.setattr("agent.display.sys.stdout", _FakeTTY())
         monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
 
-        with patch("agent.display.subprocess.run", fake_run), patch("builtins.open", mock_open()) as mocked_open:
+        with patch("agent.display.subprocess.run", fake_run):
             rendered = render_edit_diff_with_delta(
                 "patch",
                 '{"diff": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-old\\n+new\\n"}',
@@ -204,24 +196,18 @@ class TestEditDiffPreview:
             )
 
         assert rendered is True
-        printer.assert_called_once()
-        mocked_open.assert_any_call("/dev/tty", "wb", buffering=0)
+        assert printer.call_count >= 2
         args = fake_run.call_args.args[0]
-        assert args == ["delta", "--paging=always"]
+        assert args == ["delta", "--paging=never"]
 
-    def test_render_edit_diff_with_delta_skips_without_tty(self, monkeypatch):
+    def test_render_edit_diff_with_delta_skips_without_diff(self, monkeypatch):
         fake_run = MagicMock()
-        fake_stream = MagicMock()
-        fake_stream.isatty.return_value = False
-
-        monkeypatch.setattr("agent.display.sys.stdin", fake_stream)
-        monkeypatch.setattr("agent.display.sys.stdout", fake_stream)
         monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
 
         with patch("agent.display.subprocess.run", fake_run):
             rendered = render_edit_diff_with_delta(
                 "patch",
-                '{"diff": "--- a/x\\n+++ b/x\\n"}',
+                '{"success": true}',
             )
 
         assert rendered is False
@@ -230,30 +216,24 @@ class TestEditDiffPreview:
     def test_render_edit_diff_with_delta_falls_back_to_plain_diff_when_missing(self, monkeypatch):
         printer = MagicMock()
 
-        monkeypatch.setattr("agent.display.sys.stdin", _FakeTTY())
-        monkeypatch.setattr("agent.display.sys.stdout", _FakeTTY())
         monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: None)
 
-        with patch("agent.display._write_plain_diff_to_tty", return_value=True) as write_plain:
-            rendered = render_edit_diff_with_delta(
-                "patch",
-                '{"diff": "--- a/x\\n+++ b/x\\n"}',
-                print_fn=printer,
-            )
+        rendered = render_edit_diff_with_delta(
+            "patch",
+            '{"diff": "--- a/x\\n+++ b/x\\n"}',
+            print_fn=printer,
+        )
 
         assert rendered is True
-        write_plain.assert_called_once()
-        printer.assert_called_once()
+        assert printer.call_count >= 2
 
     def test_render_edit_diff_with_delta_falls_back_to_plain_diff_on_error(self, monkeypatch):
         fake_run = MagicMock(side_effect=OSError("boom"))
         printer = MagicMock()
 
-        monkeypatch.setattr("agent.display.sys.stdin", _FakeTTY())
-        monkeypatch.setattr("agent.display.sys.stdout", _FakeTTY())
         monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
 
-        with patch("agent.display.subprocess.run", fake_run), patch("agent.display._write_plain_diff_to_tty", return_value=True) as write_plain:
+        with patch("agent.display.subprocess.run", fake_run):
             rendered = render_edit_diff_with_delta(
                 "patch",
                 '{"diff": "--- a/x\\n+++ b/x\\n"}',
@@ -261,4 +241,4 @@ class TestEditDiffPreview:
             )
 
         assert rendered is True
-        write_plain.assert_called_once()
+        assert printer.call_count >= 2

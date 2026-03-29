@@ -9,7 +9,6 @@ import logging
 import os
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -363,21 +362,58 @@ def extract_edit_diff(
     return _diff_from_snapshot(snapshot)
 
 
-def _tty_output_path() -> str:
-    """Return the platform-specific controlling-terminal output path."""
-    return "CONOUT$" if os.name == "nt" else "/dev/tty"
-
-
-def _write_plain_diff_to_tty(diff: str) -> bool:
-    """Write a unified diff directly to the controlling TTY."""
-    try:
-        with open(_tty_output_path(), "w", encoding="utf-8", buffering=1) as tty_out:
-            tty_out.write(diff)
-            if diff and not diff.endswith("\n"):
-                tty_out.write("\n")
-        return True
-    except OSError:
+def _emit_inline_diff(diff_text: str, print_fn) -> bool:
+    """Emit rendered diff text through the CLI's prompt_toolkit-safe printer."""
+    if print_fn is None or not diff_text:
         return False
+    try:
+        print_fn("  ┊ review diff")
+        for line in diff_text.rstrip("\n").splitlines():
+            print_fn(line)
+        return True
+    except Exception:
+        return False
+
+
+def _normalize_delta_command(command: list[str]) -> list[str]:
+    """Force delta into inline rendering mode instead of launching a pager."""
+    normalized: list[str] = []
+    saw_paging = False
+    for part in command:
+        if part.startswith("--paging="):
+            normalized.append("--paging=never")
+            saw_paging = True
+        else:
+            normalized.append(part)
+    if not saw_paging:
+        normalized.append("--paging=never")
+    return normalized
+
+
+def _render_diff_with_delta_inline(diff: str, command: list[str]) -> str | None:
+    """Format a unified diff with delta and return ANSI text for inline display."""
+    try:
+        completed = subprocess.run(
+            _normalize_delta_command(command),
+            input=diff,
+            text=True,
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        logger.debug("Could not render diff with delta: %s", exc)
+        return None
+
+    if completed.returncode != 0:
+        logger.debug("delta exited with %s: %s", completed.returncode, completed.stderr)
+        return None
+
+    rendered = completed.stdout
+    if not rendered.strip():
+        return None
+    return rendered
 
 
 def render_edit_diff_with_delta(
@@ -388,68 +424,25 @@ def render_edit_diff_with_delta(
     snapshot: LocalEditSnapshot | None = None,
     print_fn=None,
 ) -> bool:
-    """Render an edit diff with delta when a TTY-backed CLI is available."""
+    """Render an edit diff inline without taking over the terminal UI."""
     diff = extract_edit_diff(
         tool_name,
         result,
         function_args=function_args,
         snapshot=snapshot,
     )
-    if not diff or not sys.stdin.isatty() or not sys.stdout.isatty():
+    if not diff:
         return False
 
     from tools.delta_bootstrap import resolve_delta_command
     command = resolve_delta_command()
     if not command:
-        if print_fn is not None:
-            try:
-                print_fn("  ┊ delta unavailable; showing plain diff")
-            except Exception:
-                pass
-        return _write_plain_diff_to_tty(diff)
+        return _emit_inline_diff(diff, print_fn)
 
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False, encoding="utf-8") as handle:
-            handle.write(diff)
-            temp_path = handle.name
-
-        if print_fn is not None:
-            try:
-                print_fn("  ┊ review diff")
-            except Exception:
-                pass
-
-        with open(temp_path, "rb", buffering=0) as diff_in, open(_tty_output_path(), "wb", buffering=0) as tty_out:
-            completed = subprocess.run(
-                command,
-                stdin=diff_in,
-                stdout=tty_out,
-                stderr=tty_out,
-                check=False,
-            )
-        if completed.returncode == 0:
-            return True
-        if print_fn is not None:
-            try:
-                print_fn("  ┊ delta failed; showing plain diff")
-            except Exception:
-                pass
-        return _write_plain_diff_to_tty(diff)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        logger.debug("Could not render diff with delta: %s", exc)
-        if print_fn is not None:
-            try:
-                print_fn("  ┊ delta failed; showing plain diff")
-            except Exception:
-                pass
-        return _write_plain_diff_to_tty(diff)
-    finally:
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+    rendered = _render_diff_with_delta_inline(diff, command)
+    if rendered:
+        return _emit_inline_diff(rendered, print_fn)
+    return _emit_inline_diff(diff, print_fn)
 
 
 # =========================================================================
