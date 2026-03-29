@@ -21,6 +21,13 @@ _RESET = "\033[0m"
 
 logger = logging.getLogger(__name__)
 
+_ANSI_RESET = "\033[0m"
+_ANSI_DIM = "\033[38;2;150;150;150m"
+_ANSI_FILE = "\033[38;2;180;160;255m"
+_ANSI_HUNK = "\033[38;2;120;120;140m"
+_ANSI_MINUS = "\033[38;2;255;255;255;48;2;120;20;20m"
+_ANSI_PLUS = "\033[38;2;255;255;255;48;2;20;90;20m"
+
 
 @dataclass
 class LocalEditSnapshot:
@@ -406,29 +413,36 @@ def _normalize_delta_command(command: list[str]) -> list[str]:
     return normalized
 
 
-def _render_diff_with_delta_inline(diff: str, command: list[str]) -> str | None:
-    """Format a unified diff with delta and return ANSI text for inline display."""
-    try:
-        completed = subprocess.run(
-            _normalize_delta_command(command),
-            input=diff,
-            text=True,
-            capture_output=True,
-            check=False,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        logger.debug("Could not render diff with delta: %s", exc)
-        return None
+def _render_inline_unified_diff(diff: str) -> list[str]:
+    """Render unified diff lines in Hermes' inline transcript style."""
+    rendered: list[str] = []
+    from_file = None
+    to_file = None
 
-    if completed.returncode != 0:
-        logger.debug("delta exited with %s: %s", completed.returncode, completed.stderr)
-        return None
+    for raw_line in diff.splitlines():
+        if raw_line.startswith("--- "):
+            from_file = raw_line[4:].strip()
+            continue
+        if raw_line.startswith("+++ "):
+            to_file = raw_line[4:].strip()
+            if from_file or to_file:
+                rendered.append(f"{_ANSI_FILE}{from_file or 'a/?'} → {to_file or 'b/?'}{_ANSI_RESET}")
+            continue
+        if raw_line.startswith("@@"):
+            rendered.append(f"{_ANSI_HUNK}{raw_line}{_ANSI_RESET}")
+            continue
+        if raw_line.startswith("-"):
+            rendered.append(f"{_ANSI_MINUS}{raw_line}{_ANSI_RESET}")
+            continue
+        if raw_line.startswith("+"):
+            rendered.append(f"{_ANSI_PLUS}{raw_line}{_ANSI_RESET}")
+            continue
+        if raw_line.startswith(" "):
+            rendered.append(f"{_ANSI_DIM}{raw_line}{_ANSI_RESET}")
+            continue
+        if raw_line:
+            rendered.append(raw_line)
 
-    rendered = completed.stdout
-    if not rendered.strip():
-        return None
     return rendered
 
 
@@ -452,13 +466,12 @@ def render_edit_diff_with_delta(
 
     from tools.delta_bootstrap import resolve_delta_command
     command = resolve_delta_command()
-    if not command:
-        return _emit_inline_diff(diff, print_fn)
-
-    rendered = _render_diff_with_delta_inline(diff, command)
-    if rendered:
-        return _emit_inline_diff(rendered, print_fn)
-    return _emit_inline_diff(diff, print_fn)
+    if command:
+        try:
+            _normalize_delta_command(command)
+        except Exception:
+            pass
+    return _emit_inline_diff("\n".join(_render_inline_unified_diff(diff)), print_fn)
 
 
 # =========================================================================

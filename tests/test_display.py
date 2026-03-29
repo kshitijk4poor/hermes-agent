@@ -8,6 +8,7 @@ from agent.display import (
     capture_local_edit_snapshot,
     extract_edit_diff,
     _normalize_delta_command,
+    _render_inline_unified_diff,
     render_edit_diff_with_delta,
 )
 
@@ -112,6 +113,22 @@ class TestEditDiffPreview:
         assert diff is not None
         assert "+++ b/x" in diff
 
+    def test_render_inline_unified_diff_colors_added_and_removed_lines(self):
+        rendered = _render_inline_unified_diff(
+            "--- a/cli.py\n"
+            "+++ b/cli.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            "-old line\n"
+            "+new line\n"
+            " context\n"
+        )
+
+        assert "a/cli.py" in rendered[0]
+        assert "b/cli.py" in rendered[0]
+        assert any("old line" in line for line in rendered)
+        assert any("new line" in line for line in rendered)
+        assert any("48;2;" in line for line in rendered)
+
     def test_extract_edit_diff_ignores_non_edit_tools(self):
         assert extract_edit_diff("write_file", '{"diff": "--- a\\n+++ b\\n"}') is None
 
@@ -197,39 +214,32 @@ class TestEditDiffPreview:
         assert "references/notes.md" in diff
 
     def test_render_edit_diff_with_delta_invokes_pager(self, monkeypatch):
-        fake_run = MagicMock(return_value=MagicMock(returncode=0, stdout="\x1b[32m+new\x1b[0m\n", stderr=""))
         printer = MagicMock()
 
         monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
 
-        with patch("agent.display.subprocess.run", fake_run):
-            rendered = render_edit_diff_with_delta(
-                "patch",
-                '{"diff": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-old\\n+new\\n"}',
-                print_fn=printer,
-            )
+        rendered = render_edit_diff_with_delta(
+            "patch",
+            '{"diff": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-old\\n+new\\n"}',
+            print_fn=printer,
+        )
 
         assert rendered is True
         assert printer.call_count >= 2
-        args = fake_run.call_args.args[0]
-        assert args[0] == "delta"
-        assert "--paging=never" in args
-        assert "--no-gitconfig" in args
-        assert "--plus-style=green green" in args
-        assert "--minus-style=red red" in args
+        calls = [call.args[0] for call in printer.call_args_list]
+        assert any("a/x" in line and "b/x" in line for line in calls)
+        assert any("old" in line for line in calls)
+        assert any("new" in line for line in calls)
 
     def test_render_edit_diff_with_delta_skips_without_diff(self, monkeypatch):
-        fake_run = MagicMock()
         monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
 
-        with patch("agent.display.subprocess.run", fake_run):
-            rendered = render_edit_diff_with_delta(
-                "patch",
-                '{"success": true}',
-            )
+        rendered = render_edit_diff_with_delta(
+            "patch",
+            '{"success": true}',
+        )
 
         assert rendered is False
-        fake_run.assert_not_called()
 
     def test_render_edit_diff_with_delta_falls_back_to_plain_diff_when_missing(self, monkeypatch):
         printer = MagicMock()
@@ -246,17 +256,16 @@ class TestEditDiffPreview:
         assert printer.call_count >= 2
 
     def test_render_edit_diff_with_delta_falls_back_to_plain_diff_on_error(self, monkeypatch):
-        fake_run = MagicMock(side_effect=OSError("boom"))
         printer = MagicMock()
 
         monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
+        monkeypatch.setattr("agent.display._normalize_delta_command", MagicMock(side_effect=RuntimeError("boom")))
 
-        with patch("agent.display.subprocess.run", fake_run):
-            rendered = render_edit_diff_with_delta(
-                "patch",
-                '{"diff": "--- a/x\\n+++ b/x\\n"}',
-                print_fn=printer,
-            )
+        rendered = render_edit_diff_with_delta(
+            "patch",
+            '{"diff": "--- a/x\\n+++ b/x\\n"}',
+            print_fn=printer,
+        )
 
         assert rendered is True
         assert printer.call_count >= 2
