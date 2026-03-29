@@ -2066,6 +2066,7 @@ class HermesCLI:
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
                 pass_session_id=self.pass_session_id,
                 tool_progress_callback=self._on_tool_progress,
+                tool_complete_callback=self._on_tool_complete,
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
             )
@@ -4796,6 +4797,16 @@ class HermesCLI:
             ).start()
         except Exception:
             pass
+
+    def _on_tool_complete(self, function_name: str, function_args: dict, function_result: str):
+        """Render file edits with delta after patch tools complete."""
+        if function_name != "patch":
+            return
+        try:
+            from agent.display import render_edit_diff_with_delta
+            render_edit_diff_with_delta(function_name, function_result, print_fn=_cprint)
+        except Exception:
+            logger.debug("Edit diff preview failed for %s", function_name, exc_info=True)
 
     # ====================================================================
     # Voice mode methods

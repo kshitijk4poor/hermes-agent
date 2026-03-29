@@ -7,7 +7,9 @@ Used by AIAgent._execute_tool_calls for CLI feedback.
 import json
 import logging
 import os
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -193,6 +195,104 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | N
     if len(preview) > max_len:
         preview = preview[:max_len - 3] + "..."
     return preview
+
+
+def extract_edit_diff(tool_name: str, result: str | None) -> str | None:
+    """Extract a unified diff from a file-edit tool result."""
+    if tool_name != "patch" or not result:
+        return None
+    try:
+        data = json.loads(result)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    diff = data.get("diff")
+    if not isinstance(diff, str) or not diff.strip():
+        return None
+    return diff
+
+
+def _tty_output_path() -> str:
+    """Return the platform-specific controlling-terminal output path."""
+    return "CONOUT$" if os.name == "nt" else "/dev/tty"
+
+
+def _write_plain_diff_to_tty(diff: str) -> bool:
+    """Write a unified diff directly to the controlling TTY."""
+    try:
+        with open(_tty_output_path(), "w", encoding="utf-8", buffering=1) as tty_out:
+            tty_out.write(diff)
+            if diff and not diff.endswith("\n"):
+                tty_out.write("\n")
+        return True
+    except OSError:
+        return False
+
+
+def render_edit_diff_with_delta(
+    tool_name: str,
+    result: str | None,
+    *,
+    print_fn=None,
+) -> bool:
+    """Render an edit diff with delta when a TTY-backed CLI is available."""
+    diff = extract_edit_diff(tool_name, result)
+    if not diff or not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+
+    from tools.delta_bootstrap import resolve_delta_command
+    command = resolve_delta_command()
+    if not command:
+        if print_fn is not None:
+            try:
+                print_fn("  ┊ delta unavailable; showing plain diff")
+            except Exception:
+                pass
+        return _write_plain_diff_to_tty(diff)
+
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False, encoding="utf-8") as handle:
+            handle.write(diff)
+            temp_path = handle.name
+
+        if print_fn is not None:
+            try:
+                print_fn("  ┊ review diff")
+            except Exception:
+                pass
+
+        with open(temp_path, "rb", buffering=0) as diff_in, open(_tty_output_path(), "wb", buffering=0) as tty_out:
+            completed = subprocess.run(
+                command,
+                stdin=diff_in,
+                stdout=tty_out,
+                stderr=tty_out,
+                check=False,
+            )
+        if completed.returncode == 0:
+            return True
+        if print_fn is not None:
+            try:
+                print_fn("  ┊ delta failed; showing plain diff")
+            except Exception:
+                pass
+        return _write_plain_diff_to_tty(diff)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        logger.debug("Could not render diff with delta: %s", exc)
+        if print_fn is not None:
+            try:
+                print_fn("  ┊ delta failed; showing plain diff")
+            except Exception:
+                pass
+        return _write_plain_diff_to_tty(diff)
+    finally:
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 # =========================================================================
