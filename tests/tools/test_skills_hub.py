@@ -9,6 +9,7 @@ import httpx
 from tools.skills_hub import (
     GitHubAuth,
     GitHubSource,
+    LocalTapSource,
     LobeHubSource,
     SkillsShSource,
     WellKnownSkillSource,
@@ -671,6 +672,20 @@ class TestCheckForSkillUpdates:
 
         assert bundle_content_hash(bundle) == content_hash(skill_dir)
 
+    def test_bundle_content_hash_accepts_binary_files(self):
+        bundle = SkillBundle(
+            name="binary-skill",
+            files={
+                "SKILL.md": b"binary safe",
+                "assets/logo.bin": b"\x00\x01\x02",
+            },
+            source="local",
+            identifier="local::/tmp/repo::binary-skill",
+            trust_level="trusted",
+        )
+
+        assert bundle_content_hash(bundle).startswith("sha256:")
+
     def test_reports_update_when_remote_hash_differs(self):
         lock = MagicMock()
         lock.list_installed.return_value = [{
@@ -730,6 +745,26 @@ class TestCreateSourceRouter:
     def test_includes_well_known_source(self):
         sources = create_source_router(auth=MagicMock(spec=GitHubAuth))
         assert any(isinstance(src, WellKnownSkillSource) for src in sources)
+
+    def test_includes_local_tap_source_when_local_taps_configured(self, monkeypatch, tmp_path):
+        import tools.skills_hub as hub
+
+        local_repo = tmp_path / "local-skills"
+        local_repo.mkdir()
+        monkeypatch.setattr(hub.TapsManager, "list_taps", lambda self: [
+            {"type": "local", "path": str(local_repo)},
+            {"type": "github", "repo": "owner/repo", "path": "skills/"},
+        ])
+
+        sources = create_source_router(auth=MagicMock(spec=GitHubAuth))
+
+        local_sources = [src for src in sources if isinstance(src, LocalTapSource)]
+        assert len(local_sources) == 1
+        assert local_sources[0].taps == [{"type": "local", "path": str(local_repo)}]
+
+        github_sources = [src for src in sources if isinstance(src, GitHubSource)]
+        assert len(github_sources) == 1
+        assert any(tap.get("repo") == "owner/repo" for tap in github_sources[0].taps)
 
 
 # ---------------------------------------------------------------------------
@@ -878,10 +913,29 @@ class TestTapsManager:
         assert mgr.add("owner/repo") is False
         assert len(mgr.load()) == 1
 
+    def test_add_local_tap(self, tmp_path):
+        local_repo = tmp_path / "local-skills"
+        local_repo.mkdir()
+        mgr = TapsManager(path=tmp_path / "taps.json")
+
+        assert mgr.add(str(local_repo)) is True
+
+        taps = mgr.load()
+        assert taps == [{"type": "local", "path": str(local_repo.resolve())}]
+
     def test_remove_existing_tap(self, tmp_path):
         mgr = TapsManager(path=tmp_path / "taps.json")
         mgr.add("owner/repo")
         assert mgr.remove("owner/repo") is True
+        assert mgr.load() == []
+
+    def test_remove_existing_local_tap(self, tmp_path):
+        local_repo = tmp_path / "local-skills"
+        local_repo.mkdir()
+        mgr = TapsManager(path=tmp_path / "taps.json")
+        mgr.add(str(local_repo))
+
+        assert mgr.remove(str(local_repo)) is True
         assert mgr.load() == []
 
     def test_remove_nonexistent_tap(self, tmp_path):
@@ -894,6 +948,81 @@ class TestTapsManager:
         mgr.add("repo-b/tools")
         taps = mgr.list_taps()
         assert len(taps) == 2
+
+
+# ---------------------------------------------------------------------------
+# LocalTapSource
+# ---------------------------------------------------------------------------
+
+
+class TestLocalTapSource:
+    def _marketplace_repo(self, tmp_path):
+        repo = tmp_path / "hermes-skills"
+        plugin_root = repo / "plugins" / "hermes-observability"
+        skill_dir = plugin_root / "skills" / "add-langfuse-tracing"
+
+        (repo / ".claude-plugin").mkdir(parents=True)
+        (plugin_root / ".claude-plugin").mkdir(parents=True)
+        skill_dir.mkdir(parents=True)
+
+        (repo / ".claude-plugin" / "marketplace.json").write_text(json.dumps({
+            "plugins": [
+                {"name": "hermes-observability", "source": "./plugins/hermes-observability"},
+            ]
+        }))
+        (plugin_root / ".claude-plugin" / "plugin.json").write_text(json.dumps({
+            "name": "hermes-observability",
+            "description": "Observability skills",
+            "version": "1.0.0",
+        }))
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: add-langfuse-tracing\n"
+            "description: Add optional Langfuse tracing to Hermes.\n"
+            "metadata:\n"
+            "  hermes:\n"
+            "    tags: [observability, tracing]\n"
+            "---\n\n"
+            "# Add Langfuse Tracing\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "README.md").write_text("helper docs\n", encoding="utf-8")
+        return repo
+
+    def test_search_marketplace_repo(self, tmp_path):
+        repo = self._marketplace_repo(tmp_path)
+        src = LocalTapSource([{"type": "local", "path": str(repo)}])
+
+        results = src.search("langfuse", limit=10)
+
+        assert len(results) == 1
+        assert results[0].name == "add-langfuse-tracing"
+        assert results[0].source == "local"
+        assert results[0].trust_level == "trusted"
+        assert results[0].identifier.startswith("local::")
+
+    def test_fetch_marketplace_repo_bundle(self, tmp_path):
+        repo = self._marketplace_repo(tmp_path)
+        src = LocalTapSource([{"type": "local", "path": str(repo)}])
+        meta = src.search("langfuse", limit=1)[0]
+
+        bundle = src.fetch(meta.identifier)
+
+        assert bundle is not None
+        assert bundle.source == "local"
+        assert bundle.files["SKILL.md"].startswith(b"---\n")
+        assert bundle.files["README.md"] == b"helper docs\n"
+
+    def test_inspect_marketplace_repo_bundle(self, tmp_path):
+        repo = self._marketplace_repo(tmp_path)
+        src = LocalTapSource([{"type": "local", "path": str(repo)}])
+        meta = src.search("langfuse", limit=1)[0]
+
+        inspected = src.inspect(meta.identifier)
+
+        assert inspected is not None
+        assert inspected.tags == ["observability", "tracing"]
+        assert inspected.path == "plugins/hermes-observability/skills/add-langfuse-tracing"
 
 
 # ---------------------------------------------------------------------------

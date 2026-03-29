@@ -200,7 +200,7 @@ def do_browse(page: int = 1, page_size: int = 20, source: str = "all",
     # Collect results from all (or filtered) sources
     # Use empty query to get everything; per-source limits prevent overload
     _TRUST_RANK = {"builtin": 3, "trusted": 2, "community": 1}
-    _PER_SOURCE_LIMIT = {"official": 100, "skills-sh": 100, "well-known": 25, "github": 100, "clawhub": 50,
+    _PER_SOURCE_LIMIT = {"official": 100, "local": 100, "skills-sh": 100, "well-known": 25, "github": 100, "clawhub": 50,
                          "claude-marketplace": 50, "lobehub": 50}
 
     all_results: list = []
@@ -640,7 +640,7 @@ def do_uninstall(name: str, console: Optional[Console] = None,
 
 
 def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> None:
-    """Manage taps (custom GitHub repo sources)."""
+    """Manage taps (custom GitHub repos or local skill repositories)."""
     from tools.skills_hub import TapsManager
 
     c = console or _console
@@ -652,17 +652,19 @@ def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> No
             c.print("[dim]No custom taps configured. Using default sources only.[/]\n")
             return
         table = Table(title="Configured Taps")
-        table.add_column("Repo", style="bold cyan")
+        table.add_column("Type", style="dim")
+        table.add_column("Source", style="bold cyan")
         table.add_column("Path", style="dim")
         for t in taps:
-            label = t.get("repo") or t.get("name") or t.get("path", "unknown")
-            table.add_row(label, t.get("path", "skills/"))
+            tap_type = t.get("type", "github" if t.get("repo") else "local")
+            label = t.get("repo") or t.get("path") or t.get("name") or "unknown"
+            table.add_row(tap_type, label, t.get("path", ""))
         c.print(table)
         c.print()
 
     elif action == "add":
         if not repo:
-            c.print("[bold red]Error:[/] Repo required. Usage: hermes skills tap add owner/repo\n")
+            c.print("[bold red]Error:[/] Source required. Usage: hermes skills tap add owner/repo | /path/to/repo\n")
             return
         if mgr.add(repo):
             c.print(f"[bold green]Added tap:[/] {repo}\n")
@@ -671,7 +673,7 @@ def do_tap(action: str, repo: str = "", console: Optional[Console] = None) -> No
 
     elif action == "remove":
         if not repo:
-            c.print("[bold red]Error:[/] Repo required. Usage: hermes skills tap remove owner/repo\n")
+            c.print("[bold red]Error:[/] Source required. Usage: hermes skills tap remove owner/repo | /path/to/repo\n")
             return
         if mgr.remove(repo):
             c.print(f"[bold green]Removed tap:[/] {repo}\n")
@@ -1005,7 +1007,9 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
         /skills uninstall my-skill
         /skills tap list
         /skills tap add owner/repo
+        /skills tap add /path/to/local-skills-repo
         /skills tap remove owner/repo
+        /skills tap remove /path/to/local-skills-repo
     """
     c = console or _console
     parts = cmd.strip().split()
@@ -1048,7 +1052,7 @@ def handle_skills_slash(cmd: str, console: Optional[Console] = None) -> None:
 
     elif action == "search":
         if not args:
-            c.print("[bold red]Usage:[/] /skills search <query> [--source skills-sh|well-known|github|official] [--limit N]\n")
+            c.print("[bold red]Usage:[/] /skills search <query> [--source local|skills-sh|well-known|github|official] [--limit N]\n")
             return
         source = "all"
         limit = 10
@@ -1165,7 +1169,7 @@ def _print_skills_help(console: Console) -> None:
     """Print help for the /skills slash command."""
     console.print(Panel(
         "[bold]Skills Hub Commands:[/]\n\n"
-        "  [cyan]browse[/] [--source official]   Browse all available skills (paginated)\n"
+        "  [cyan]browse[/] [--source local|official] Browse available skills (paginated)\n"
         "  [cyan]search[/] <query>              Search registries for skills\n"
         "  [cyan]install[/] <identifier>        Install a skill (with security scan)\n"
         "  [cyan]inspect[/] <identifier>        Preview a skill without installing\n"

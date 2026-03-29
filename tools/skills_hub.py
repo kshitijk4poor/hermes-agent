@@ -1886,6 +1886,227 @@ class ClaudeMarketplaceSource(SkillSource):
 
 
 # ---------------------------------------------------------------------------
+# Local tap source adapter
+# ---------------------------------------------------------------------------
+
+class LocalTapSource(SkillSource):
+    """
+    Discover skills from local filesystem taps.
+
+    Supported tap roots:
+      - A direct skill directory containing SKILL.md
+      - A repo with a top-level skills/ directory
+      - A Claude plugin repo with .claude-plugin/plugin.json + skills/
+      - A Claude marketplace repo with .claude-plugin/marketplace.json
+    """
+
+    def __init__(self, taps: Optional[List[Dict[str, Any]]] = None):
+        self.taps = taps or []
+
+    def source_id(self) -> str:
+        return "local"
+
+    def trust_level_for(self, identifier: str) -> str:
+        return "trusted"
+
+    def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
+        results: List[SkillMeta] = []
+        query_lower = query.lower()
+
+        for tap in self.taps:
+            for meta in self._scan_tap(tap):
+                searchable = f"{meta.name} {meta.description} {' '.join(meta.tags)}".lower()
+                if query_lower in searchable:
+                    results.append(meta)
+
+        deduped: List[SkillMeta] = []
+        seen: set[str] = set()
+        for result in results:
+            key = (result.identifier or result.name).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(result)
+
+        return deduped[:limit]
+
+    def fetch(self, identifier: str) -> Optional[SkillBundle]:
+        parsed = self._parse_identifier(identifier)
+        if not parsed:
+            return None
+
+        skill_dir = parsed["skill_dir"]
+        if not skill_dir.is_dir() or not (skill_dir / "SKILL.md").exists():
+            return None
+
+        files: Dict[str, Union[str, bytes]] = {}
+        for f in skill_dir.rglob("*"):
+            if (
+                f.is_file()
+                and not f.name.startswith(".")
+                and "__pycache__" not in f.parts
+                and f.suffix != ".pyc"
+            ):
+                rel_path = str(f.relative_to(skill_dir))
+                try:
+                    files[rel_path] = f.read_bytes()
+                except OSError:
+                    continue
+
+        if "SKILL.md" not in files:
+            return None
+
+        return SkillBundle(
+            name=skill_dir.name,
+            files=files,
+            source="local",
+            identifier=identifier,
+            trust_level="trusted",
+            metadata={"root": str(parsed["root"])},
+        )
+
+    def inspect(self, identifier: str) -> Optional[SkillMeta]:
+        parsed = self._parse_identifier(identifier)
+        if not parsed:
+            return None
+
+        skill_dir = parsed["skill_dir"]
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            return None
+
+        try:
+            content = skill_md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+
+        fm = GitHubSource._parse_frontmatter_quick(content)
+        skill_name = fm.get("name", skill_dir.name)
+        description = fm.get("description", "")
+
+        tags = []
+        metadata = fm.get("metadata", {})
+        if isinstance(metadata, dict):
+            hermes_meta = metadata.get("hermes", {})
+            if isinstance(hermes_meta, dict):
+                tags = hermes_meta.get("tags", [])
+        if not tags:
+            raw_tags = fm.get("tags", [])
+            tags = raw_tags if isinstance(raw_tags, list) else []
+
+        return SkillMeta(
+            name=skill_name,
+            description=str(description),
+            source="local",
+            identifier=identifier,
+            trust_level="trusted",
+            repo=str(parsed["root"]),
+            path=str(skill_dir.relative_to(parsed["root"])),
+            tags=[str(t) for t in tags],
+        )
+
+    def _scan_tap(self, tap: Dict[str, Any]) -> List[SkillMeta]:
+        root = self._tap_root(tap)
+        if not root:
+            return []
+
+        metas: List[SkillMeta] = []
+        for skill_dir in self._iter_skill_dirs(root):
+            identifier = self._make_identifier(root, skill_dir)
+            meta = self.inspect(identifier)
+            if meta:
+                metas.append(meta)
+        return metas
+
+    @staticmethod
+    def _tap_root(tap: Dict[str, Any]) -> Optional[Path]:
+        raw = tap.get("path")
+        if not raw:
+            return None
+        try:
+            return Path(raw).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return None
+
+    @classmethod
+    def _iter_skill_dirs(cls, root: Path) -> List[Path]:
+        if not root.exists():
+            return []
+
+        candidates: List[Path] = []
+        if (root / "SKILL.md").is_file():
+            candidates.append(root)
+        if (root / ".claude-plugin" / "marketplace.json").is_file():
+            candidates.extend(cls._skills_from_marketplace(root))
+        if (root / ".claude-plugin" / "plugin.json").is_file():
+            candidates.extend(cls._skills_from_tree(root / "skills"))
+        if (root / "skills").is_dir():
+            candidates.extend(cls._skills_from_tree(root / "skills"))
+
+        seen: set[Path] = set()
+        deduped: List[Path] = []
+        for candidate in candidates:
+            try:
+                resolved = candidate.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            deduped.append(resolved)
+        return deduped
+
+    @classmethod
+    def _skills_from_marketplace(cls, root: Path) -> List[Path]:
+        try:
+            data = json.loads((root / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+
+        skill_dirs: List[Path] = []
+        for plugin in data.get("plugins", []):
+            source = plugin.get("source")
+            if not isinstance(source, str) or not source:
+                continue
+            plugin_root = (root / source).resolve()
+            skill_dirs.extend(cls._skills_from_tree(plugin_root / "skills"))
+        return skill_dirs
+
+    @staticmethod
+    def _skills_from_tree(skills_root: Path) -> List[Path]:
+        if not skills_root.is_dir():
+            return []
+        results: List[Path] = []
+        for skill_md in sorted(skills_root.rglob("SKILL.md")):
+            parent = skill_md.parent
+            if any(part.startswith(".") for part in parent.relative_to(skills_root).parts):
+                continue
+            results.append(parent)
+        return results
+
+    @staticmethod
+    def _make_identifier(root: Path, skill_dir: Path) -> str:
+        return f"local::{root.resolve()}::{skill_dir.resolve().relative_to(root.resolve()).as_posix()}"
+
+    @staticmethod
+    def _parse_identifier(identifier: str) -> Optional[Dict[str, Path]]:
+        if not identifier.startswith("local::"):
+            return None
+        raw = identifier[len("local::"):]
+        if "::" not in raw:
+            return None
+        root_str, rel_str = raw.split("::", 1)
+        try:
+            root = Path(root_str).expanduser().resolve()
+            skill_dir = (root / rel_str).resolve()
+            if not str(skill_dir).startswith(str(root)):
+                return None
+        except (OSError, RuntimeError, ValueError):
+            return None
+        return {"root": root, "skill_dir": skill_dir}
+
+
+# ---------------------------------------------------------------------------
 # LobeHub source adapter
 # ---------------------------------------------------------------------------
 
@@ -2341,7 +2562,7 @@ class HubLockFile:
 # ---------------------------------------------------------------------------
 
 class TapsManager:
-    """Manages the taps.json file — custom GitHub repo sources."""
+    """Manages taps.json for custom GitHub repos and local skill repositories."""
 
     def __init__(self, path: Path = TAPS_FILE):
         self.path = path
@@ -2362,16 +2583,26 @@ class TapsManager:
     def add(self, repo: str, path: str = "skills/") -> bool:
         """Add a tap. Returns False if already exists."""
         taps = self.load()
-        if any(t["repo"] == repo for t in taps):
-            return False
-        taps.append({"repo": repo, "path": path})
+        if self._looks_like_local_source(repo):
+            normalized = self._normalize_local_source(repo)
+            if any(self._tap_key(t) == ("local", normalized) for t in taps):
+                return False
+            taps.append({"type": "local", "path": normalized})
+        else:
+            if any(self._tap_key(t) == ("github", repo) for t in taps):
+                return False
+            taps.append({"type": "github", "repo": repo, "path": path})
         self.save(taps)
         return True
 
     def remove(self, repo: str) -> bool:
         """Remove a tap by repo name. Returns False if not found."""
         taps = self.load()
-        new_taps = [t for t in taps if t["repo"] != repo]
+        if self._looks_like_local_source(repo):
+            target = ("local", self._normalize_local_source(repo))
+        else:
+            target = ("github", repo)
+        new_taps = [t for t in taps if self._tap_key(t) != target]
         if len(new_taps) == len(taps):
             return False
         self.save(new_taps)
@@ -2379,6 +2610,28 @@ class TapsManager:
 
     def list_taps(self) -> List[dict]:
         return self.load()
+
+    @staticmethod
+    def _looks_like_local_source(source: str) -> bool:
+        if not source:
+            return False
+        if source.startswith(("~", "/", "./", "../")):
+            return True
+        try:
+            return Path(source).expanduser().exists()
+        except (OSError, RuntimeError):
+            return False
+
+    @staticmethod
+    def _normalize_local_source(source: str) -> str:
+        return str(Path(source).expanduser().resolve())
+
+    @staticmethod
+    def _tap_key(tap: dict) -> Tuple[str, str]:
+        tap_type = tap.get("type")
+        if tap_type == "local" or ("repo" not in tap and "path" in tap):
+            return ("local", str(Path(tap.get("path", "")).expanduser()))
+        return ("github", tap.get("repo", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -2500,7 +2753,11 @@ def bundle_content_hash(bundle: SkillBundle) -> str:
     """Compute a deterministic hash for an in-memory skill bundle."""
     h = hashlib.sha256()
     for rel_path in sorted(bundle.files):
-        h.update(bundle.files[rel_path].encode("utf-8"))
+        content = bundle.files[rel_path]
+        if isinstance(content, bytes):
+            h.update(content)
+        else:
+            h.update(content.encode("utf-8"))
     return f"sha256:{h.hexdigest()[:16]}"
 
 
@@ -2577,13 +2834,16 @@ def create_source_router(auth: Optional[GitHubAuth] = None) -> List[SkillSource]
         auth = GitHubAuth()
 
     taps_mgr = TapsManager()
-    extra_taps = taps_mgr.list_taps()
+    all_taps = taps_mgr.list_taps()
+    github_taps = [tap for tap in all_taps if TapsManager._tap_key(tap)[0] == "github"]
+    local_taps = [tap for tap in all_taps if TapsManager._tap_key(tap)[0] == "local"]
 
     sources: List[SkillSource] = [
         OptionalSkillSource(),        # Official optional skills (highest priority)
+        LocalTapSource(local_taps),
         SkillsShSource(auth=auth),
         WellKnownSkillSource(),
-        GitHubSource(auth=auth, extra_taps=extra_taps),
+        GitHubSource(auth=auth, extra_taps=github_taps),
         ClawHubSource(),
         ClaudeMarketplaceSource(auth=auth),
         LobeHubSource(),
