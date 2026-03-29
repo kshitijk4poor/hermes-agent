@@ -107,18 +107,6 @@ class TestWriteResult:
         d = r.to_dict()
         assert d["error"] == "Permission denied"
 
-    def test_to_dict_includes_diff_metadata(self):
-        r = WriteResult(
-            bytes_written=12,
-            file_created=True,
-            diff="--- a/test.py\n+++ b/test.py\n",
-            path="test.py",
-        )
-        d = r.to_dict()
-        assert d["file_created"] is True
-        assert d["path"] == "test.py"
-        assert "+++ b/test.py" in d["diff"]
-
 
 class TestPatchResult:
     def test_to_dict_success(self):
@@ -345,27 +333,3 @@ class TestShellFileOpsWriteDenied:
         result = file_ops.patch_replace("~/.ssh/authorized_keys", "old", "new")
         assert result.error is not None
         assert "denied" in result.error.lower()
-
-    def test_write_file_returns_diff_for_existing_text_file(self, mock_env):
-        def side_effect(command, **kwargs):
-            if command.startswith("mkdir -p "):
-                return {"output": "", "returncode": 0}
-            if command.startswith("test -f "):
-                return {"output": "yes\n", "returncode": 0}
-            if command.startswith("cat '") and "2>/dev/null" in command:
-                return {"output": "print('old')\n", "returncode": 0}
-            if command.startswith("cat > "):
-                assert kwargs.get("stdin_data") == "print('new')\n"
-                return {"output": "", "returncode": 0}
-            if command.startswith("wc -c < "):
-                return {"output": "13\n", "returncode": 0}
-            return {"output": "", "returncode": 0}
-
-        mock_env.execute.side_effect = side_effect
-        ops = ShellFileOperations(mock_env)
-        result = ops.write_file("/tmp/test.py", "print('new')\n")
-        assert result.error is None
-        assert result.file_created is False
-        assert result.path == "/tmp/test.py"
-        assert "-print('old')" in (result.diff or "")
-        assert "+print('new')" in (result.diff or "")

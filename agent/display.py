@@ -201,7 +201,7 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | N
 
 def extract_edit_diff(tool_name: str, result: str | None) -> str | None:
     """Extract a unified diff from a file-edit tool result."""
-    if tool_name not in {"write_file", "patch"} or not result:
+    if tool_name != "patch" or not result:
         return None
     try:
         data = json.loads(result)

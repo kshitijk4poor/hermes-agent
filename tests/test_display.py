@@ -103,7 +103,7 @@ class TestEditDiffPreview:
         assert "+++ b/x" in diff
 
     def test_extract_edit_diff_ignores_non_edit_tools(self):
-        assert extract_edit_diff("read_file", '{"diff": "--- a\\n+++ b\\n"}') is None
+        assert extract_edit_diff("write_file", '{"diff": "--- a\\n+++ b\\n"}') is None
 
     def test_render_edit_diff_with_hunk_invokes_pager(self, monkeypatch):
         fake_run = MagicMock(return_value=MagicMock(returncode=0))
@@ -115,7 +115,7 @@ class TestEditDiffPreview:
 
         with patch("agent.display.subprocess.run", fake_run), patch("builtins.open", mock_open()) as mocked_open:
             rendered = render_edit_diff_with_hunk(
-                "write_file",
+                "patch",
                 '{"diff": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-old\\n+new\\n"}',
                 print_fn=printer,
             )

@@ -140,11 +140,8 @@ class WriteResult:
     """Result from writing a file."""
     bytes_written: int = 0
     dirs_created: bool = False
-    file_created: bool = False
-    diff: Optional[str] = None
     error: Optional[str] = None
     warning: Optional[str] = None
-    path: Optional[str] = None
     
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not None}
@@ -675,29 +672,12 @@ class ShellFileOperations(FileOperations):
         # Create parent directories
         parent = os.path.dirname(path)
         dirs_created = False
-        file_created = False
-        prior_content: Optional[str] = ""
 
         if parent:
             mkdir_cmd = f"mkdir -p {self._escape_shell_arg(parent)}"
             mkdir_result = self._exec(mkdir_cmd)
             if mkdir_result.exit_code == 0:
                 dirs_created = True
-
-        exists_cmd = f"test -f {self._escape_shell_arg(path)} && echo yes || echo no"
-        exists_result = self._exec(exists_cmd)
-        file_created = exists_result.stdout.strip() != "yes"
-
-        if not file_created:
-            read_cmd = f"cat {self._escape_shell_arg(path)} 2>/dev/null"
-            read_result = self._exec(read_cmd)
-            if read_result.exit_code == 0:
-                if self._is_likely_binary(path, read_result.stdout):
-                    prior_content = None
-                else:
-                    prior_content = read_result.stdout
-            else:
-                prior_content = None
 
         # Write via stdin pipe — content bypasses shell arg parsing entirely,
         # so there's no ARG_MAX limit regardless of file size.
@@ -716,16 +696,9 @@ class ShellFileOperations(FileOperations):
         except ValueError:
             bytes_written = len(content.encode('utf-8'))
         
-        diff = None
-        if prior_content is not None:
-            diff = self._unified_diff(prior_content, content, path)
-
         return WriteResult(
             bytes_written=bytes_written,
             dirs_created=dirs_created,
-            file_created=file_created,
-            diff=diff,
-            path=path,
         )
     
     # =========================================================================

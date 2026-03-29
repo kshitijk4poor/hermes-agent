@@ -4800,7 +4800,7 @@ class HermesCLI:
 
     def _on_tool_complete(self, function_name: str, function_args: dict, function_result: str):
         """Render file edits with hunk after write/patch tools complete."""
-        if function_name not in {"write_file", "patch"}:
+        if function_name != "patch":
             return
         try:
             from agent.display import render_edit_diff_with_hunk
