@@ -23,6 +23,7 @@ class TraceState:
     trace_id: str
     root_ctx: Any
     root_span: Any
+    turn_type: str = "user"
     generations: Dict[str, Any] = field(default_factory=dict)
     tools: Dict[str, Any] = field(default_factory=dict)
     turn_tool_calls: list[dict[str, Any]] = field(default_factory=list)
@@ -380,9 +381,16 @@ def _usage_and_cost(response: Any, *, provider: str, api_mode: str, model: str, 
 
 
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
-                      api_mode: str, messages: Any, client: Langfuse) -> TraceState:
+                      api_mode: str, messages: Any, client: Langfuse, turn_type: str = "user") -> TraceState:
     trace_id = client.create_trace_id(seed=f"{session_id or 'sessionless'}::{task_id or task_key}")
     trace_input = _extract_last_user_message(messages)
+
+    is_background = turn_type != "user"
+    trace_name = f"Hermes {turn_type.replace('_', ' ')}" if is_background else "Hermes turn"
+    tags = ["hermes", "langfuse"]
+    if is_background:
+        tags.append(turn_type)
+
     metadata = {
         "source": "hermes",
         "task_id": task_id,
@@ -391,18 +399,19 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         "provider": provider,
         "model": model,
         "api_mode": api_mode,
+        "turn_type": turn_type,
     }
 
     if propagate_attributes is not None:
         try:
             with propagate_attributes(
                 session_id=session_id or task_key,
-                trace_name="Hermes turn",
-                tags=["hermes", "langfuse"],
+                trace_name=trace_name,
+                tags=tags,
             ):
                 root_ctx = client.start_as_current_observation(
                     trace_context={"trace_id": trace_id},
-                    name="Hermes turn",
+                    name=trace_name,
                     as_type="chain",
                     input=trace_input,
                     metadata=metadata,
@@ -412,7 +421,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         except Exception:
             root_ctx = client.start_as_current_observation(
                 trace_context={"trace_id": trace_id},
-                name="Hermes turn",
+                name=trace_name,
                 as_type="chain",
                 input=trace_input,
                 metadata=metadata,
@@ -422,7 +431,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     else:
         root_ctx = client.start_as_current_observation(
             trace_context={"trace_id": trace_id},
-            name="Hermes turn",
+            name=trace_name,
             as_type="chain",
             input=trace_input,
             metadata=metadata,
@@ -435,8 +444,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     except Exception:
         pass
 
-    _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span)
+    _debug(f"started trace {trace_id} ({turn_type}) for {task_key}")
+    return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span, turn_type=turn_type)
 
 
 def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, as_type: str,
@@ -521,7 +530,7 @@ def _request_key(api_call_count: Any) -> str:
 
 def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = "", model: str = "",
                     provider: str = "", base_url: str = "", api_mode: str = "",
-                    api_call_count: int = 0, messages: Any = None, **_: Any) -> None:
+                    api_call_count: int = 0, messages: Any = None, turn_type: str = "user", **_: Any) -> None:
     client = _get_langfuse()
     if client is None:
         return
@@ -542,6 +551,7 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
                 api_mode=api_mode,
                 messages=messages,
                 client=client,
+                turn_type=turn_type,
             )
             _TRACE_STATE[task_key] = state
         state.last_updated_at = time.time()
@@ -567,7 +577,7 @@ def on_pre_llm_call(*, task_id: str = "", session_id: str = "", platform: str = 
 
 def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str = "", base_url: str = "",
                      api_mode: str = "", model: str = "", api_call_count: int = 0,
-                     assistant_message: Any = None, response: Any = None, **_: Any) -> None:
+                     assistant_message: Any = None, response: Any = None, turn_type: str = "user", **_: Any) -> None:
     client = _get_langfuse()
     if client is None:
         return

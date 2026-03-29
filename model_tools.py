@@ -374,6 +374,7 @@ def handle_function_call(
     enabled_tools: Optional[List[str]] = None,
     honcho_manager: Optional[Any] = None,
     honcho_session_key: Optional[str] = None,
+    turn_type: str = "user",
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -412,6 +413,7 @@ def handle_function_call(
                 args=function_args,
                 task_id=task_id or "",
                 tool_call_id=tool_call_id or "",
+                turn_type=turn_type,
             )
         except Exception:
             pass
@@ -445,6 +447,7 @@ def handle_function_call(
                 result=result,
                 task_id=task_id or "",
                 tool_call_id=tool_call_id or "",
+                turn_type=turn_type,
             )
         except Exception:
             pass

@@ -325,3 +325,160 @@ def test_finish_trace_merges_aggregated_tool_calls_into_root_output():
     assert root_updates["update"]["output"]["tool_calls"] == state.turn_tool_calls
     assert root_updates["ended"] is True
     assert root_updates["flushed"] is True
+
+
+def test_background_review_turn_type_tags_trace_differently():
+    """Background review traces should be named and tagged differently from user turns."""
+    plugin = _load_plugin_module()
+
+    observations_started = []
+
+    class FakeSpan:
+        def start_observation(self, **kwargs):
+            observations_started.append(kwargs)
+            return SimpleNamespace(update=lambda **k: None, end=lambda: None)
+
+        def set_trace_io(self, **kwargs):
+            pass
+
+    class FakeCtx:
+        def __enter__(self):
+            return FakeSpan()
+
+        def __exit__(self, *args):
+            pass
+
+    trace_calls = []
+
+    class FakeClient:
+        def create_trace_id(self, seed=""):
+            return f"trace-{seed}"
+
+        def start_as_current_observation(self, **kwargs):
+            trace_calls.append(kwargs)
+            return FakeCtx()
+
+    client = FakeClient()
+    messages = [{"role": "user", "content": "Review the conversation above"}]
+
+    # Call with turn_type="background_review"
+    state = plugin._start_root_trace(
+        "task-bg",
+        task_id="task-bg",
+        session_id="sess-1",
+        platform="cli",
+        provider="openai",
+        model="gpt-5.4",
+        api_mode="chat_completions",
+        messages=messages,
+        client=client,
+        turn_type="background_review",
+    )
+
+    assert state.turn_type == "background_review"
+    assert trace_calls[0]["name"] == "Hermes background review"
+    assert trace_calls[0]["metadata"]["turn_type"] == "background_review"
+
+
+def test_on_pre_llm_call_passes_turn_type_to_trace_state():
+    """on_pre_llm_call should propagate turn_type into the created TraceState."""
+    plugin = _load_plugin_module()
+
+    class FakeSpan:
+        def start_observation(self, **kwargs):
+            return SimpleNamespace(update=lambda **k: None, end=lambda: None)
+
+        def set_trace_io(self, **kwargs):
+            pass
+
+    class FakeCtx:
+        def __enter__(self):
+            return FakeSpan()
+
+        def __exit__(self, *args):
+            pass
+
+    class FakeClient:
+        def create_trace_id(self, seed=""):
+            return f"trace-{seed}"
+
+        def start_as_current_observation(self, **kwargs):
+            return FakeCtx()
+
+    original_get_langfuse = plugin._get_langfuse
+    plugin._get_langfuse = lambda: FakeClient()
+    task_id = "task-turn-type"
+
+    try:
+        plugin.on_pre_llm_call(
+            task_id=task_id,
+            session_id="sess-1",
+            platform="cli",
+            model="gpt-5.4",
+            provider="openai",
+            base_url="",
+            api_mode="chat_completions",
+            api_call_count=0,
+            messages=[{"role": "user", "content": "hello"}],
+            turn_type="background_review",
+        )
+        state = plugin._TRACE_STATE.get(task_id)
+        assert state is not None
+        assert state.turn_type == "background_review"
+    finally:
+        plugin._get_langfuse = original_get_langfuse
+        plugin._TRACE_STATE.pop(task_id, None)
+
+
+def test_default_turn_type_is_user():
+    """When turn_type is not passed, traces default to 'user'."""
+    plugin = _load_plugin_module()
+
+    class FakeSpan:
+        def start_observation(self, **kwargs):
+            return SimpleNamespace(update=lambda **k: None, end=lambda: None)
+
+        def set_trace_io(self, **kwargs):
+            pass
+
+    class FakeCtx:
+        def __enter__(self):
+            return FakeSpan()
+
+        def __exit__(self, *args):
+            pass
+
+    trace_calls = []
+
+    class FakeClient:
+        def create_trace_id(self, seed=""):
+            return f"trace-{seed}"
+
+        def start_as_current_observation(self, **kwargs):
+            trace_calls.append(kwargs)
+            return FakeCtx()
+
+    original_get_langfuse = plugin._get_langfuse
+    plugin._get_langfuse = lambda: FakeClient()
+    task_id = "task-default-type"
+
+    try:
+        plugin.on_pre_llm_call(
+            task_id=task_id,
+            session_id="sess-1",
+            platform="cli",
+            model="gpt-5.4",
+            provider="openai",
+            base_url="",
+            api_mode="chat_completions",
+            api_call_count=0,
+            messages=[{"role": "user", "content": "hello"}],
+        )
+        state = plugin._TRACE_STATE.get(task_id)
+        assert state is not None
+        assert state.turn_type == "user"
+        assert trace_calls[0]["name"] == "Hermes turn"
+        assert trace_calls[0]["metadata"]["turn_type"] == "user"
+    finally:
+        plugin._get_langfuse = original_get_langfuse
+        plugin._TRACE_STATE.pop(task_id, None)

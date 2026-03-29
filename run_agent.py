@@ -1114,6 +1114,11 @@ class AIAgent:
                 self._user_profile_enabled = False
                 logger.debug("peer %s memory_mode=honcho: local USER.md writes disabled", _hcfg.peer_name or "user")
 
+        # Turn type: "user" for normal conversation, "background_review" for
+        # auto-generated memory/skill review passes.  Propagated to plugin
+        # hooks so tracing backends (e.g. Langfuse) can distinguish them.
+        self._turn_type: str = "user"
+
         # Skills config: nudge interval for skill creation reminders
         self._skill_nudge_interval = 10
         try:
@@ -1600,6 +1605,7 @@ class AIAgent:
                     review_agent._user_profile_enabled = self._user_profile_enabled
                     review_agent._memory_nudge_interval = 0
                     review_agent._skill_nudge_interval = 0
+                    review_agent._turn_type = "background_review"
 
                     review_agent.run_conversation(
                         user_message=prompt,
@@ -5287,6 +5293,7 @@ class AIAgent:
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                 honcho_manager=self._honcho,
                 honcho_session_key=self._honcho_session_key,
+                turn_type=self._turn_type,
             )
 
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -5658,6 +5665,7 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                         honcho_manager=self._honcho,
                         honcho_session_key=self._honcho_session_key,
+                        turn_type=self._turn_type,
                     )
                     _spinner_result = function_result
                 except Exception as tool_error:
@@ -5678,6 +5686,7 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                         honcho_manager=self._honcho,
                         honcho_session_key=self._honcho_session_key,
+                        turn_type=self._turn_type,
                     )
                 except Exception as tool_error:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
@@ -6440,6 +6449,7 @@ class AIAgent:
                             messages=api_messages,
                             max_tokens=self.max_tokens,
                             tools=self.tools or [],
+                            turn_type=self._turn_type,
                         )
                     except Exception:
                         pass
@@ -7412,6 +7422,7 @@ class AIAgent:
                         messages=api_messages,
                         response=response,
                         assistant_message=assistant_message,
+                        turn_type=self._turn_type,
                     )
                 except Exception:
                     pass
