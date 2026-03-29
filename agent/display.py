@@ -12,12 +12,22 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
+from difflib import unified_diff
+from pathlib import Path
 
 # ANSI escape codes for coloring tool failure indicators
 _RED = "\033[31m"
 _RESET = "\033[0m"
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class LocalEditSnapshot:
+    """Pre-tool filesystem snapshot used to render diffs locally after writes."""
+    paths: list[Path] = field(default_factory=list)
+    before: dict[str, str | None] = field(default_factory=dict)
 
 
 # =========================================================================
@@ -197,20 +207,160 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int = 40) -> str | N
     return preview
 
 
-def extract_edit_diff(tool_name: str, result: str | None) -> str | None:
-    """Extract a unified diff from a file-edit tool result."""
-    if tool_name != "patch" or not result:
+def _resolved_path(path: str) -> Path:
+    """Resolve a possibly-relative filesystem path against the current cwd."""
+    candidate = Path(os.path.expanduser(path))
+    if candidate.is_absolute():
+        return candidate
+    return Path.cwd() / candidate
+
+
+def _snapshot_text(path: Path) -> str | None:
+    """Return UTF-8 file content, or None for missing/unreadable files."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, OSError):
         return None
+
+
+def _display_diff_path(path: Path) -> str:
+    """Prefer cwd-relative paths in diffs when available."""
+    try:
+        return str(path.resolve().relative_to(Path.cwd().resolve()))
+    except Exception:
+        return str(path)
+
+
+def _resolve_skill_manage_paths(args: dict) -> list[Path]:
+    """Resolve skill_manage write targets to filesystem paths."""
+    action = args.get("action")
+    name = args.get("name")
+    if not action or not name:
+        return []
+
+    from tools.skill_manager_tool import _find_skill, _resolve_skill_dir
+
+    if action == "create":
+        skill_dir = _resolve_skill_dir(name, args.get("category"))
+        return [skill_dir / "SKILL.md"]
+
+    existing = _find_skill(name)
+    if not existing:
+        return []
+
+    skill_dir = Path(existing["path"])
+    if action in {"edit", "patch"}:
+        file_path = args.get("file_path")
+        return [skill_dir / file_path] if file_path else [skill_dir / "SKILL.md"]
+    if action in {"write_file", "remove_file"}:
+        file_path = args.get("file_path")
+        return [skill_dir / file_path] if file_path else []
+    if action == "delete":
+        files = [path for path in sorted(skill_dir.rglob("*")) if path.is_file()]
+        return files
+    return []
+
+
+def _resolve_local_edit_paths(tool_name: str, function_args: dict | None) -> list[Path]:
+    """Resolve local filesystem targets for write-capable tools."""
+    if not isinstance(function_args, dict):
+        return []
+
+    if tool_name == "write_file":
+        path = function_args.get("path")
+        return [_resolved_path(path)] if path else []
+
+    if tool_name == "patch":
+        path = function_args.get("path")
+        return [_resolved_path(path)] if path else []
+
+    if tool_name == "skill_manage":
+        return _resolve_skill_manage_paths(function_args)
+
+    return []
+
+
+def capture_local_edit_snapshot(tool_name: str, function_args: dict | None) -> LocalEditSnapshot | None:
+    """Capture before-state for local write previews."""
+    paths = _resolve_local_edit_paths(tool_name, function_args)
+    if not paths:
+        return None
+
+    snapshot = LocalEditSnapshot(paths=paths)
+    for path in paths:
+        snapshot.before[str(path)] = _snapshot_text(path)
+    return snapshot
+
+
+def _result_succeeded(result: str | None) -> bool:
+    """Conservatively detect whether a tool result represents success."""
+    if not result:
+        return False
     try:
         data = json.loads(result)
     except (json.JSONDecodeError, TypeError):
-        return None
+        return False
     if not isinstance(data, dict):
+        return False
+    if data.get("error"):
+        return False
+    if "success" in data:
+        return bool(data.get("success"))
+    return True
+
+
+def _diff_from_snapshot(snapshot: LocalEditSnapshot | None) -> str | None:
+    """Generate unified diff text from a stored before-state and current files."""
+    if not snapshot:
         return None
-    diff = data.get("diff")
-    if not isinstance(diff, str) or not diff.strip():
+
+    chunks: list[str] = []
+    for path in snapshot.paths:
+        before = snapshot.before.get(str(path))
+        after = _snapshot_text(path)
+        if before == after:
+            continue
+
+        display_path = _display_diff_path(path)
+        diff = "".join(
+            unified_diff(
+                [] if before is None else before.splitlines(keepends=True),
+                [] if after is None else after.splitlines(keepends=True),
+                fromfile=f"a/{display_path}",
+                tofile=f"b/{display_path}",
+            )
+        )
+        if diff:
+            chunks.append(diff)
+
+    if not chunks:
         return None
-    return diff
+    return "".join(chunk if chunk.endswith("\n") else chunk + "\n" for chunk in chunks)
+
+
+def extract_edit_diff(
+    tool_name: str,
+    result: str | None,
+    *,
+    function_args: dict | None = None,
+    snapshot: LocalEditSnapshot | None = None,
+) -> str | None:
+    """Extract a unified diff from a file-edit tool result."""
+    if tool_name == "patch" and result:
+        try:
+            data = json.loads(result)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            diff = data.get("diff")
+            if isinstance(diff, str) and diff.strip():
+                return diff
+
+    if tool_name not in {"write_file", "patch", "skill_manage"}:
+        return None
+    if not _result_succeeded(result):
+        return None
+    return _diff_from_snapshot(snapshot)
 
 
 def _tty_output_path() -> str:
@@ -234,10 +384,17 @@ def render_edit_diff_with_delta(
     tool_name: str,
     result: str | None,
     *,
+    function_args: dict | None = None,
+    snapshot: LocalEditSnapshot | None = None,
     print_fn=None,
 ) -> bool:
     """Render an edit diff with delta when a TTY-backed CLI is available."""
-    diff = extract_edit_diff(tool_name, result)
+    diff = extract_edit_diff(
+        tool_name,
+        result,
+        function_args=function_args,
+        snapshot=snapshot,
+    )
     if not diff or not sys.stdin.isatty() or not sys.stdout.isatty():
         return False
 

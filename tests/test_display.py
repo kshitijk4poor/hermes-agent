@@ -1,10 +1,12 @@
 """Tests for agent/display.py — build_tool_preview()."""
 
 import pytest
+from pathlib import Path
 from unittest.mock import MagicMock, mock_open, patch
 
 from agent.display import (
     build_tool_preview,
+    capture_local_edit_snapshot,
     extract_edit_diff,
     render_edit_diff_with_delta,
 )
@@ -104,6 +106,87 @@ class TestEditDiffPreview:
 
     def test_extract_edit_diff_ignores_non_edit_tools(self):
         assert extract_edit_diff("write_file", '{"diff": "--- a\\n+++ b\\n"}') is None
+
+    def test_extract_edit_diff_uses_local_snapshot_for_write_file(self, tmp_path):
+        target = tmp_path / "note.txt"
+        target.write_text("old\\n", encoding="utf-8")
+
+        snapshot = capture_local_edit_snapshot("write_file", {"path": str(target)})
+
+        target.write_text("new\\n", encoding="utf-8")
+
+        diff = extract_edit_diff(
+            "write_file",
+            '{"bytes_written": 4}',
+            function_args={"path": str(target)},
+            snapshot=snapshot,
+        )
+
+        assert diff is not None
+        assert "--- a/" in diff
+        assert "+++ b/" in diff
+        assert "-old" in diff
+        assert "+new" in diff
+
+    def test_extract_edit_diff_uses_local_snapshot_for_skill_manage_patch(self, tmp_path, monkeypatch):
+        skill_dir = tmp_path / "teknium-dev"
+        skill_dir.mkdir()
+        skill_file = skill_dir / "SKILL.md"
+        skill_file.write_text("---\\nname: test\\n---\\nold\\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "tools.skill_manager_tool._find_skill",
+            lambda name: {"path": skill_dir} if name == "teknium-dev" else None,
+        )
+
+        args = {"action": "patch", "name": "teknium-dev"}
+        snapshot = capture_local_edit_snapshot("skill_manage", args)
+
+        skill_file.write_text("---\\nname: test\\n---\\nnew\\n", encoding="utf-8")
+
+        diff = extract_edit_diff(
+            "skill_manage",
+            '{"success": true, "message": "patched"}',
+            function_args=args,
+            snapshot=snapshot,
+        )
+
+        assert diff is not None
+        assert "SKILL.md" in diff
+        assert "old" in diff
+        assert "new" in diff
+
+    def test_extract_edit_diff_uses_local_snapshot_for_skill_manage_delete(self, tmp_path, monkeypatch):
+        skill_dir = tmp_path / "teknium-dev"
+        references_dir = skill_dir / "references"
+        references_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\\nname: test\\n---\\nbody\\n", encoding="utf-8")
+        (references_dir / "notes.md").write_text("notes\\n", encoding="utf-8")
+
+        monkeypatch.setattr(
+            "tools.skill_manager_tool._find_skill",
+            lambda name: {"path": skill_dir} if name == "teknium-dev" else None,
+        )
+
+        args = {"action": "delete", "name": "teknium-dev"}
+        snapshot = capture_local_edit_snapshot("skill_manage", args)
+
+        for path in sorted(skill_dir.rglob("*"), reverse=True):
+            if path.is_file():
+                path.unlink()
+            elif path.is_dir():
+                path.rmdir()
+
+        diff = extract_edit_diff(
+            "skill_manage",
+            '{"success": true, "message": "deleted"}',
+            function_args=args,
+            snapshot=snapshot,
+        )
+
+        assert diff is not None
+        assert "SKILL.md" in diff
+        assert "references/notes.md" in diff
 
     def test_render_edit_diff_with_delta_invokes_pager(self, monkeypatch):
         fake_run = MagicMock(return_value=MagicMock(returncode=0))
