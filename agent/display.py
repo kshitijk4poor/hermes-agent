@@ -387,6 +387,20 @@ def _normalize_delta_command(command: list[str]) -> list[str]:
             normalized.append(part)
     if not saw_paging:
         normalized.append("--paging=never")
+    normalized.extend([
+        "--no-gitconfig",
+        "--true-color=always",
+        "--line-numbers",
+        "--minus-style=red",
+        "--minus-emph-style=red bold",
+        "--minus-non-emph-style=red",
+        "--plus-style=green",
+        "--plus-emph-style=green bold",
+        "--plus-non-emph-style=green",
+        "--line-numbers-minus-style=red",
+        "--line-numbers-zero-style=syntax dim",
+        "--line-numbers-plus-style=green",
+    ])
     return normalized
 
 

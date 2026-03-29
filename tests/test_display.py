@@ -7,6 +7,7 @@ from agent.display import (
     build_tool_preview,
     capture_local_edit_snapshot,
     extract_edit_diff,
+    _normalize_delta_command,
     render_edit_diff_with_delta,
 )
 
@@ -93,6 +94,17 @@ class TestBuildToolPreview:
 
 
 class TestEditDiffPreview:
+    def test_normalize_delta_command_enforces_hermes_preview_flags(self):
+        command = _normalize_delta_command(["delta", "--paging=always"])
+
+        assert command[0] == "delta"
+        assert "--paging=never" in command
+        assert "--no-gitconfig" in command
+        assert "--true-color=always" in command
+        assert "--line-numbers" in command
+        assert "--plus-style=green" in command
+        assert "--minus-style=red" in command
+
     def test_extract_edit_diff_for_patch(self):
         diff = extract_edit_diff("patch", '{"success": true, "diff": "--- a/x\\n+++ b/x\\n"}')
         assert diff is not None
@@ -198,7 +210,11 @@ class TestEditDiffPreview:
         assert rendered is True
         assert printer.call_count >= 2
         args = fake_run.call_args.args[0]
-        assert args == ["delta", "--paging=never"]
+        assert args[0] == "delta"
+        assert "--paging=never" in args
+        assert "--no-gitconfig" in args
+        assert "--plus-style=green" in args
+        assert "--minus-style=red" in args
 
     def test_render_edit_diff_with_delta_skips_without_diff(self, monkeypatch):
         fake_run = MagicMock()
