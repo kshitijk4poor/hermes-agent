@@ -27,6 +27,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 from gateway.config import Platform, PlatformConfig
 from gateway.session import SessionSource, build_session_key
 from hermes_cli.config import get_hermes_home
+from hermes_constants import get_hermes_dir
 
 
 GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
@@ -44,8 +45,8 @@ GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE = (
 # (e.g. Telegram file URLs expire after ~1 hour).
 # ---------------------------------------------------------------------------
 
-# Default location: {HERMES_HOME}/image_cache/
-IMAGE_CACHE_DIR = get_hermes_home() / "image_cache"
+# Default location: {HERMES_HOME}/cache/images/ (legacy: image_cache/)
+IMAGE_CACHE_DIR = get_hermes_dir("cache/images", "image_cache")
 
 
 def get_image_cache_dir() -> Path:
@@ -147,7 +148,7 @@ def cleanup_image_cache(max_age_hours: int = 24) -> int:
 # here so the STT tool (OpenAI Whisper) can transcribe them from local files.
 # ---------------------------------------------------------------------------
 
-AUDIO_CACHE_DIR = get_hermes_home() / "audio_cache"
+AUDIO_CACHE_DIR = get_hermes_dir("cache/audio", "audio_cache")
 
 
 def get_audio_cache_dir() -> Path:
@@ -174,29 +175,51 @@ def cache_audio_from_bytes(data: bytes, ext: str = ".ogg") -> str:
     return str(filepath)
 
 
-async def cache_audio_from_url(url: str, ext: str = ".ogg") -> str:
+async def cache_audio_from_url(url: str, ext: str = ".ogg", retries: int = 2) -> str:
     """
     Download an audio file from a URL and save it to the local cache.
+
+    Retries on transient failures (timeouts, 429, 5xx) with exponential
+    backoff so a single slow CDN response doesn't lose the media.
 
     Args:
         url: The HTTP/HTTPS URL to download from.
         ext: File extension including the dot (e.g. ".ogg", ".mp3").
+        retries: Number of retry attempts on transient failures.
 
     Returns:
         Absolute path to the cached audio file as a string.
     """
+    import asyncio
     import httpx
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
 
+    last_exc = None
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-        response = await client.get(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
-                "Accept": "audio/*,*/*;q=0.8",
-            },
-        )
-        response.raise_for_status()
-        return cache_audio_from_bytes(response.content, ext)
+        for attempt in range(retries + 1):
+            try:
+                response = await client.get(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (compatible; HermesAgent/1.0)",
+                        "Accept": "audio/*,*/*;q=0.8",
+                    },
+                )
+                response.raise_for_status()
+                return cache_audio_from_bytes(response.content, ext)
+            except (httpx.TimeoutException, httpx.HTTPStatusError) as exc:
+                last_exc = exc
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 429:
+                    raise
+                if attempt < retries:
+                    wait = 1.5 * (attempt + 1)
+                    _log.debug("Audio cache retry %d/%d for %s (%.1fs): %s",
+                               attempt + 1, retries, url[:80], wait, exc)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +229,7 @@ async def cache_audio_from_url(url: str, ext: str = ".ogg") -> str:
 # here so the agent can reference them by local file path.
 # ---------------------------------------------------------------------------
 
-DOCUMENT_CACHE_DIR = get_hermes_home() / "document_cache"
+DOCUMENT_CACHE_DIR = get_hermes_dir("cache/documents", "document_cache")
 
 SUPPORTED_DOCUMENT_TYPES = {
     ".pdf": "application/pdf",
@@ -333,7 +356,10 @@ class MessageEvent:
             return None
         # Split on space and get first word, strip the /
         parts = self.text.split(maxsplit=1)
-        return parts[0][1:].lower() if parts else None
+        raw = parts[0][1:].lower() if parts else None
+        if raw and "@" in raw:
+            raw = raw.split("@", 1)[0]
+        return raw
     
     def get_command_args(self) -> str:
         """Get the arguments after a command."""
@@ -979,7 +1005,7 @@ class BasePlatformAdapter(ABC):
             # simultaneous messages. Queue them without interrupting the active run,
             # then process them immediately after the current task finishes.
             if event.message_type == MessageType.PHOTO:
-                print(f"[{self.name}] 🖼️ Queuing photo follow-up for session {session_key} without interrupt")
+                logger.debug("[%s] Queuing photo follow-up for session %s without interrupt", self.name, session_key)
                 existing = self._pending_messages.get(session_key)
                 if existing and existing.message_type == MessageType.PHOTO:
                     existing.media_urls.extend(event.media_urls)
@@ -994,7 +1020,7 @@ class BasePlatformAdapter(ABC):
                 return  # Don't interrupt now - will run after current task completes
 
             # Default behavior for non-photo follow-ups: interrupt the running agent
-            print(f"[{self.name}] ⚡ New message while session {session_key} is active - triggering interrupt")
+            logger.debug("[%s] New message while session %s is active — triggering interrupt", self.name, session_key)
             self._pending_messages[session_key] = event
             # Signal the interrupt (the processing task checks this)
             self._active_sessions[session_key].set()
@@ -1180,9 +1206,9 @@ class BasePlatformAdapter(ABC):
                             )
 
                         if not media_result.success:
-                            print(f"[{self.name}] Failed to send media ({ext}): {media_result.error}")
+                            logger.warning("[%s] Failed to send media (%s): %s", self.name, ext, media_result.error)
                     except Exception as media_err:
-                        print(f"[{self.name}] Error sending media: {media_err}")
+                        logger.warning("[%s] Error sending media: %s", self.name, media_err)
 
                 # Send auto-detected local files as native attachments
                 for file_path in local_files:
@@ -1214,7 +1240,7 @@ class BasePlatformAdapter(ABC):
             # Check if there's a pending message that was queued during our processing
             if session_key in self._pending_messages:
                 pending_event = self._pending_messages.pop(session_key)
-                print(f"[{self.name}] 📨 Processing queued message from interrupt")
+                logger.debug("[%s] Processing queued message from interrupt", self.name)
                 # Clean up current session before processing pending
                 if session_key in self._active_sessions:
                     del self._active_sessions[session_key]
@@ -1228,9 +1254,7 @@ class BasePlatformAdapter(ABC):
                 return  # Already cleaned up
                 
         except Exception as e:
-            print(f"[{self.name}] Error handling message: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("[%s] Error handling message: %s", self.name, e, exc_info=True)
             # Send the error to the user so they aren't left with radio silence
             try:
                 error_type = type(e).__name__

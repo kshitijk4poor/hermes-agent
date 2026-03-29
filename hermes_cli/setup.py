@@ -289,6 +289,7 @@ from hermes_cli.config import (
     get_env_value,
     ensure_hermes_home,
 )
+from hermes_constants import display_hermes_home
 
 from hermes_cli.colors import Colors, color
 
@@ -585,11 +586,11 @@ def _print_setup_summary(config: dict, hermes_home):
     else:
         tool_status.append(("Mixture of Agents", False, "OPENROUTER_API_KEY"))
 
-    # Web tools (Parallel, Firecrawl, or Tavily)
-    if get_env_value("PARALLEL_API_KEY") or get_env_value("FIRECRAWL_API_KEY") or get_env_value("FIRECRAWL_API_URL") or get_env_value("TAVILY_API_KEY"):
+    # Web tools (Exa, Parallel, Firecrawl, or Tavily)
+    if get_env_value("EXA_API_KEY") or get_env_value("PARALLEL_API_KEY") or get_env_value("FIRECRAWL_API_KEY") or get_env_value("FIRECRAWL_API_URL") or get_env_value("TAVILY_API_KEY"):
         tool_status.append(("Web Search & Extract", True, None))
     else:
-        tool_status.append(("Web Search & Extract", False, "PARALLEL_API_KEY, FIRECRAWL_API_KEY, or TAVILY_API_KEY"))
+        tool_status.append(("Web Search & Extract", False, "EXA_API_KEY, PARALLEL_API_KEY, FIRECRAWL_API_KEY, or TAVILY_API_KEY"))
 
     # Browser tools (local Chromium or Browserbase cloud)
     import shutil
@@ -683,7 +684,7 @@ def _print_setup_summary(config: dict, hermes_home):
         print_warning(
             "Some tools are disabled. Run 'hermes setup tools' to configure them,"
         )
-        print_warning("or edit ~/.hermes/.env directly to add the missing API keys.")
+        print_warning(f"or edit {display_hermes_home()}/.env directly to add the missing API keys.")
         print()
 
     # Done banner
@@ -706,7 +707,7 @@ def _print_setup_summary(config: dict, hermes_home):
     print()
 
     # Show file locations prominently
-    print(color("📁 All your files are in ~/.hermes/:", Colors.CYAN, Colors.BOLD))
+    print(color(f"📁 All your files are in {display_hermes_home()}/:", Colors.CYAN, Colors.BOLD))
     print()
     print(f"   {color('Settings:', Colors.YELLOW)}  {get_config_path()}")
     print(f"   {color('API Keys:', Colors.YELLOW)}  {get_env_path()}")
@@ -2092,11 +2093,11 @@ def setup_terminal_backend(config: dict):
         print_info("Serverless cloud sandboxes. Each session gets its own container.")
         print_info("Requires a Modal account: https://modal.com")
 
-        # Check if swe-rex[modal] is installed
+        # Check if modal SDK is installed
         try:
-            __import__("swe_rex")
+            __import__("modal")
         except ImportError:
-            print_info("Installing swe-rex[modal]...")
+            print_info("Installing modal SDK...")
             import subprocess
 
             uv_bin = shutil.which("uv")
@@ -2108,22 +2109,22 @@ def setup_terminal_backend(config: dict):
                         "install",
                         "--python",
                         sys.executable,
-                        "swe-rex[modal]",
+                        "modal",
                     ],
                     capture_output=True,
                     text=True,
                 )
             else:
                 result = subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "swe-rex[modal]"],
+                    [sys.executable, "-m", "pip", "install", "modal"],
                     capture_output=True,
                     text=True,
                 )
             if result.returncode == 0:
-                print_success("swe-rex[modal] installed")
+                print_success("modal SDK installed")
             else:
                 print_warning(
-                    "Install failed — run manually: pip install 'swe-rex[modal]'"
+                    "Install failed — run manually: pip install modal"
                 )
 
         # Modal token
@@ -2837,7 +2838,7 @@ def setup_gateway(config: dict):
         save_env_value("WEBHOOK_ENABLED", "true")
         print()
         print_success("Webhooks enabled! Next steps:")
-        print_info("   1. Define webhook routes in ~/.hermes/config.yaml")
+        print_info(f"   1. Define webhook routes in {display_hermes_home()}/config.yaml")
         print_info("   2. Point your service (GitHub, GitLab, etc.) at:")
         print_info("      http://your-server:8644/webhooks/<route-name>")
         print()

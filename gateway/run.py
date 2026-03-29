@@ -288,7 +288,7 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     if isinstance(model_cfg, str):
         model = model_cfg
     elif isinstance(model_cfg, dict):
-        model = model_cfg.get("default", model)
+        model = model_cfg.get("default") or model_cfg.get("model") or model
     return model
 
 
@@ -432,7 +432,7 @@ class GatewayRunner:
             from honcho_integration.session import HonchoSessionManager
 
             hcfg = HonchoClientConfig.from_global_config()
-            if not hcfg.enabled or not hcfg.api_key:
+            if not hcfg.enabled or not (hcfg.api_key or hcfg.base_url):
                 return None, hcfg
 
             client = get_honcho_client(hcfg)
@@ -745,10 +745,22 @@ class GatewayRunner:
                 logger.error("No connected messaging platforms remain. Shutting down gateway cleanly.")
             await self.stop()
         elif not self.adapters and self._failed_platforms:
-            logger.warning(
-                "No connected messaging platforms remain, but %d platform(s) queued for reconnection",
-                len(self._failed_platforms),
-            )
+            # All platforms are down and queued for background reconnection.
+            # If the error is retryable, exit with failure so systemd Restart=on-failure
+            # can restart the process. Otherwise stay alive and keep retrying in background.
+            if adapter.fatal_error_retryable:
+                self._exit_reason = adapter.fatal_error_message or "All messaging platforms failed with retryable errors"
+                self._exit_with_failure = True
+                logger.error(
+                    "All messaging platforms failed with retryable errors. "
+                    "Shutting down gateway for service restart (systemd will retry)."
+                )
+                await self.stop()
+            else:
+                logger.warning(
+                    "No connected messaging platforms remain, but %d platform(s) queued for reconnection",
+                    len(self._failed_platforms),
+                )
 
     def _request_clean_exit(self, reason: str) -> None:
         self._exit_cleanly = True
@@ -2081,7 +2093,7 @@ class GatewayRunner:
                     if isinstance(_model_cfg, str):
                         _hyg_model = _model_cfg
                     elif isinstance(_model_cfg, dict):
-                        _hyg_model = _model_cfg.get("default", _hyg_model)
+                        _hyg_model = _model_cfg.get("default") or _model_cfg.get("model") or _hyg_model
                         # Read explicit context_length override from model config
                         # (same as run_agent.py lines 995-1005)
                         _raw_ctx = _model_cfg.get("context_length")
@@ -2203,6 +2215,15 @@ class GatewayRunner:
                                         approx_tokens=_approx_tokens,
                                     ),
                                 )
+
+                                # _compress_context ends the old session and creates
+                                # a new session_id.  Write compressed messages into
+                                # the NEW session so the old transcript stays intact
+                                # and searchable via session_search.
+                                _hyg_new_sid = _hyg_agent.session_id
+                                if _hyg_new_sid != session_entry.session_id:
+                                    session_entry.session_id = _hyg_new_sid
+                                    self.session_store._save()
 
                                 self.session_store.rewrite_transcript(
                                     session_entry.session_id, _compressed
@@ -3998,13 +4019,22 @@ class GatewayRunner:
             loop = asyncio.get_event_loop()
             compressed, _ = await loop.run_in_executor(
                 None,
-                lambda: tmp_agent._compress_context(msgs, "", approx_tokens=approx_tokens),
+                lambda: tmp_agent._compress_context(msgs, "", approx_tokens=approx_tokens)
             )
 
-            self.session_store.rewrite_transcript(session_entry.session_id, compressed)
+            # _compress_context already calls end_session() on the old session
+            # (preserving its full transcript in SQLite) and creates a new
+            # session_id for the continuation.  Write the compressed messages
+            # into the NEW session so the original history stays searchable.
+            new_session_id = tmp_agent.session_id
+            if new_session_id != session_entry.session_id:
+                session_entry.session_id = new_session_id
+                self.session_store._save()
+
+            self.session_store.rewrite_transcript(new_session_id, compressed)
             # Reset stored token count — transcript changed, old value is stale
             self.session_store.update_session(
-                session_entry.session_key, last_prompt_tokens=0,
+                session_entry.session_key, last_prompt_tokens=0
             )
             new_count = len(compressed)
             new_tokens = estimate_messages_tokens_rough(compressed)
@@ -4160,7 +4190,7 @@ class GatewayRunner:
             ]
             ctx = agent.context_compressor
             if ctx.last_prompt_tokens:
-                pct = ctx.last_prompt_tokens / ctx.context_length * 100 if ctx.context_length else 0
+                pct = min(100, ctx.last_prompt_tokens / ctx.context_length * 100) if ctx.context_length else 0
                 lines.append(f"Context: {ctx.last_prompt_tokens:,} / {ctx.context_length:,} ({pct:.0f}%)")
             if ctx.compression_count:
                 lines.append(f"Compressions: {ctx.compression_count}")

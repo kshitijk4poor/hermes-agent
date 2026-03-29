@@ -166,7 +166,7 @@ class ResponseStore:
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Headers": "Authorization, Content-Type",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type, Idempotency-Key",
 }
 
 
@@ -222,6 +222,23 @@ if AIOHTTP_AVAILABLE:
         return await handler(request)
 else:
     body_limit_middleware = None  # type: ignore[assignment]
+
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+}
+
+
+if AIOHTTP_AVAILABLE:
+    @web.middleware
+    async def security_headers_middleware(request, handler):
+        """Add security headers to all responses (including errors)."""
+        response = await handler(request)
+        for k, v in _SECURITY_HEADERS.items():
+            response.headers.setdefault(k, v)
+        return response
+else:
+    security_headers_middleware = None  # type: ignore[assignment]
 
 
 class _IdempotencyCache:
@@ -307,6 +324,7 @@ class APIServerAdapter(BasePlatformAdapter):
         if "*" in self._cors_origins:
             headers = dict(_CORS_HEADERS)
             headers["Access-Control-Allow-Origin"] = "*"
+            headers["Access-Control-Max-Age"] = "600"
             return headers
 
         if origin not in self._cors_origins:
@@ -315,6 +333,7 @@ class APIServerAdapter(BasePlatformAdapter):
         headers = dict(_CORS_HEADERS)
         headers["Access-Control-Allow-Origin"] = origin
         headers["Vary"] = "Origin"
+        headers["Access-Control-Max-Age"] = "600"
         return headers
 
     def _origin_allowed(self, origin: str) -> bool:
@@ -582,10 +601,14 @@ class APIServerAdapter(BasePlatformAdapter):
         """
         import queue as _q
 
-        response = web.StreamResponse(
-            status=200,
-            headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
-        )
+        sse_headers = {"Content-Type": "text/event-stream", "Cache-Control": "no-cache"}
+        # CORS middleware can't inject headers into StreamResponse after
+        # prepare() flushes them, so resolve CORS headers up front.
+        origin = request.headers.get("Origin", "")
+        cors = self._cors_headers_for_origin(origin) if origin else None
+        if cors:
+            sse_headers.update(cors)
+        response = web.StreamResponse(status=200, headers=sse_headers)
         await response.prepare(request)
 
         try:
@@ -1218,10 +1241,11 @@ class APIServerAdapter(BasePlatformAdapter):
             return False
 
         try:
-            mws = [mw for mw in (cors_middleware, body_limit_middleware) if mw is not None]
+            mws = [mw for mw in (cors_middleware, body_limit_middleware, security_headers_middleware) if mw is not None]
             self._app = web.Application(middlewares=mws)
             self._app["api_server_adapter"] = self
             self._app.router.add_get("/health", self._handle_health)
+            self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)

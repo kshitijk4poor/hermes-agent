@@ -70,7 +70,7 @@ _COMMAND_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧
 
 # Load .env from ~/.hermes/.env first, then project root as dev fallback.
 # User-managed env files should override stale shell exports on restart.
-from hermes_constants import get_hermes_home, OPENROUTER_BASE_URL
+from hermes_constants import get_hermes_home, display_hermes_home, OPENROUTER_BASE_URL
 from hermes_cli.env_loader import load_hermes_dotenv
 
 _hermes_home = get_hermes_home()
@@ -1078,12 +1078,12 @@ class HermesCLI:
         # authoritative.  This avoids conflicts in multi-agent setups where
         # env vars would stomp each other.
         _model_config = CLI_CONFIG.get("model", {})
-        _config_model = _model_config.get("default", "") if isinstance(_model_config, dict) else (_model_config or "")
+        _config_model = (_model_config.get("default") or _model_config.get("model") or "") if isinstance(_model_config, dict) else (_model_config or "")
         _FALLBACK_MODEL = "anthropic/claude-opus-4.6"
         self.model = model or _config_model or _FALLBACK_MODEL
         # Auto-detect model from local server if still on fallback
         if self.model == _FALLBACK_MODEL:
-            _base_url = _model_config.get("base_url", "") if isinstance(_model_config, dict) else ""
+            _base_url = (_model_config.get("base_url") or "") if isinstance(_model_config, dict) else ""
             if "localhost" in _base_url or "127.0.0.1" in _base_url:
                 from hermes_cli.runtime_provider import _auto_detect_local_model
                 _detected = _auto_detect_local_model(_base_url)
@@ -3594,7 +3594,7 @@ class HermesCLI:
             print("  To start the gateway:")
             print("    python cli.py --gateway")
             print()
-            print("  Configuration file: ~/.hermes/config.yaml")
+            print(f"  Configuration file: {display_hermes_home()}/config.yaml")
             print()
             
         except Exception as e:
@@ -3604,7 +3604,7 @@ class HermesCLI:
             print("    1. Set environment variables:")
             print("       TELEGRAM_BOT_TOKEN=your_token")
             print("       DISCORD_BOT_TOKEN=your_token")
-            print("    2. Or configure settings in ~/.hermes/config.yaml")
+            print(f"    2. Or configure settings in {display_hermes_home()}/config.yaml")
             print()
     
     def process_command(self, command: str) -> bool:
@@ -3811,7 +3811,7 @@ class HermesCLI:
                 plugins = mgr.list_plugins()
                 if not plugins:
                     print("No plugins installed.")
-                    print("Drop plugin directories into ~/.hermes/plugins/ to get started.")
+                    print(f"Drop plugin directories into {display_hermes_home()}/plugins/ to get started.")
                 else:
                     print(f"Plugins ({len(plugins)}):")
                     for p in plugins:
@@ -4034,6 +4034,17 @@ class HermesCLI:
                     provider_data_collection=self._provider_data_collection,
                     fallback_model=self._fallback_model,
                 )
+                # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
+                bg_agent._print_fn = lambda *_a, **_kw: None
+
+                def _bg_thinking(text: str) -> None:
+                    # Concurrent bg tasks may race on _spinner_text; acceptable for best-effort UI.
+                    if not self._agent_running:
+                        self._spinner_text = text
+                        if self._app:
+                            self._app.invalidate()
+
+                bg_agent.thinking_callback = _bg_thinking
 
                 result = bg_agent.run_conversation(
                     user_message=prompt,
@@ -4096,6 +4107,9 @@ class HermesCLI:
                 _cprint(f"  ❌ Background task #{task_num} failed: {e}")
             finally:
                 self._background_tasks.pop(task_id, None)
+                # Clear spinner only if no foreground agent owns it
+                if not self._agent_running:
+                    self._spinner_text = ""
                 if self._app:
                     self._invalidate(min_interval=0)
 
@@ -4326,7 +4340,7 @@ class HermesCLI:
                 source = f" ({s['source']})" if s["source"] == "user" else ""
                 print(f"   {marker} {s['name']}{source} — {s['description']}")
             print("\n  Usage: /skin <name>")
-            print("  Custom skins: drop a YAML file in ~/.hermes/skins/\n")
+            print(f"  Custom skins: drop a YAML file in {display_hermes_home()}/skins/\n")
             return
 
         new_skin = parts[1].strip().lower()
@@ -4506,7 +4520,7 @@ class HermesCLI:
         compressor = agent.context_compressor
         last_prompt = compressor.last_prompt_tokens
         ctx_len = compressor.context_length
-        pct = (last_prompt / ctx_len * 100) if ctx_len else 0
+        pct = min(100, (last_prompt / ctx_len * 100)) if ctx_len else 0
         compressions = compressor.compression_count
 
         msg_count = len(self.conversation_history)
@@ -5534,6 +5548,13 @@ class HermesCLI:
             except Exception as e:
                 logging.debug("@ context reference expansion failed: %s", e)
 
+        # Sanitize surrogate characters that can arrive via clipboard paste from
+        # rich-text editors (Google Docs, Word, etc.).  Lone surrogates are invalid
+        # UTF-8 and crash JSON serialization in the OpenAI SDK.
+        if isinstance(message, str):
+            from run_agent import _sanitize_surrogates
+            message = _sanitize_surrogates(message)
+
         # Add user message to history
         self.conversation_history.append({"role": "user", "content": message})
 
@@ -5891,10 +5912,22 @@ class HermesCLI:
             else:
                 duration_str = f"{seconds}s"
             
+            # Look up session title for resume-by-name hint
+            session_title = None
+            if self._session_db:
+                try:
+                    session_title = self._session_db.get_session_title(self.session_id)
+                except Exception:
+                    pass
+
             print("Resume this session with:")
             print(f"  hermes --resume {self.session_id}")
+            if session_title:
+                print(f"  hermes -c \"{session_title}\"")
             print()
             print(f"Session:        {self.session_id}")
+            if session_title:
+                print(f"Title:          {session_title}")
             print(f"Duration:       {duration_str}")
             print(f"Messages:       {msg_count} ({user_msgs} user, {tool_calls} tool calls)")
         else:
@@ -6070,7 +6103,7 @@ class HermesCLI:
             from honcho_integration.client import HonchoClientConfig
             from agent.display import honcho_session_line, write_tty
             hcfg = HonchoClientConfig.from_global_config()
-            if hcfg.enabled and hcfg.api_key and hcfg.explicitly_configured:
+            if hcfg.enabled and (hcfg.api_key or hcfg.base_url) and hcfg.explicitly_configured:
                 sname = hcfg.resolve_session_name(session_id=self.session_id)
                 if sname:
                     write_tty(honcho_session_line(hcfg.workspace_id, sname) + "\n")
@@ -6644,6 +6677,7 @@ class HermesCLI:
         # Paste collapsing: detect large pastes and save to temp file
         _paste_counter = [0]
         _prev_text_len = [0]
+        _prev_newline_count = [0]
         _paste_just_collapsed = [False]
 
         def _on_text_changed(buf):
@@ -6652,18 +6686,27 @@ class HermesCLI:
             When bracketed paste is available, handle_paste collapses
             large pastes directly.  This handler is a fallback for
             terminals without bracketed paste support.
+
+            Two heuristics (either triggers collapse):
+            1. Many characters added at once (chars_added > 1) — works
+               when the terminal delivers the paste in one event-loop tick.
+            2. Newline count jumped by 4+ in a single text-change event —
+               catches terminals that feed characters individually but
+               still batch newlines.  Alt+Enter only adds 1 newline per
+               event so it never triggers this.
             """
             text = buf.text
             chars_added = len(text) - _prev_text_len[0]
             _prev_text_len[0] = len(text)
             if _paste_just_collapsed[0]:
                 _paste_just_collapsed[0] = False
+                _prev_newline_count[0] = text.count('\n')
                 return
             line_count = text.count('\n')
-            # Heuristic: a real paste adds many characters at once (not just a
-            # single newline from Alt+Enter) AND the result has 5+ lines.
-            # Fallback for terminals without bracketed paste support.
-            if line_count >= 5 and chars_added > 1 and not text.startswith('/'):
+            newlines_added = line_count - _prev_newline_count[0]
+            _prev_newline_count[0] = line_count
+            is_paste = chars_added > 1 or newlines_added >= 4
+            if line_count >= 5 and is_paste and not text.startswith('/'):
                 _paste_counter[0] += 1
                 # Save to temp file
                 paste_dir = _hermes_home / "pastes"
@@ -6671,6 +6714,7 @@ class HermesCLI:
                 paste_file = paste_dir / f"paste_{_paste_counter[0]}_{datetime.now().strftime('%H%M%S')}.txt"
                 paste_file.write_text(text, encoding="utf-8")
                 # Replace buffer with compact reference
+                _paste_just_collapsed[0] = True
                 buf.text = f"[Pasted text #{_paste_counter[0]}: {line_count + 1} lines \u2192 {paste_file}]"
                 buf.cursor_position = len(buf.text)
 
