@@ -1114,6 +1114,11 @@ class AIAgent:
                 self._user_profile_enabled = False
                 logger.debug("peer %s memory_mode=honcho: local USER.md writes disabled", _hcfg.peer_name or "user")
 
+        # Turn type: "user" for normal conversation, "background_review" for
+        # auto-generated memory/skill review passes.  Propagated to plugin
+        # hooks so tracing backends can distinguish them.
+        self._turn_type: str = "user"
+
         # Skills config: nudge interval for skill creation reminders
         self._skill_nudge_interval = 10
         try:
@@ -1600,6 +1605,7 @@ class AIAgent:
                     review_agent._user_profile_enabled = self._user_profile_enabled
                     review_agent._memory_nudge_interval = 0
                     review_agent._skill_nudge_interval = 0
+                    review_agent._turn_type = "background_review"
 
                     review_agent.run_conversation(
                         user_message=prompt,
@@ -5285,6 +5291,7 @@ class AIAgent:
                 enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                 honcho_manager=self._honcho,
                 honcho_session_key=self._honcho_session_key,
+                turn_type=self._turn_type,
             )
 
     def _execute_tool_calls_concurrent(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
@@ -5655,6 +5662,7 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                         honcho_manager=self._honcho,
                         honcho_session_key=self._honcho_session_key,
+                        turn_type=self._turn_type,
                     )
                     _spinner_result = function_result
                 except Exception as tool_error:
@@ -5674,6 +5682,7 @@ class AIAgent:
                         enabled_tools=list(self.valid_tool_names) if self.valid_tool_names else None,
                         honcho_manager=self._honcho,
                         honcho_session_key=self._honcho_session_key,
+                        turn_type=self._turn_type,
                     )
                 except Exception as tool_error:
                     function_result = f"Error executing tool '{function_name}': {tool_error}"
@@ -6235,6 +6244,7 @@ class AIAgent:
                 is_first_turn=(not bool(conversation_history)),
                 model=self.model,
                 platform=getattr(self, "platform", None) or "",
+                turn_type=self._turn_type,
             )
             _ctx_parts = []
             for r in _pre_results:
@@ -7963,6 +7973,7 @@ class AIAgent:
                     conversation_history=list(messages),
                     model=self.model,
                     platform=getattr(self, "platform", None) or "",
+                    turn_type=self._turn_type,
                 )
             except Exception as exc:
                 logger.warning("post_llm_call hook failed: %s", exc)
