@@ -382,37 +382,6 @@ def _emit_inline_diff(diff_text: str, print_fn) -> bool:
         return False
 
 
-def _normalize_delta_command(command: list[str]) -> list[str]:
-    """Force delta into inline rendering mode instead of launching a pager."""
-    normalized: list[str] = []
-    saw_paging = False
-    for part in command:
-        if part.startswith("--paging="):
-            normalized.append("--paging=never")
-            saw_paging = True
-        else:
-            normalized.append(part)
-    if not saw_paging:
-        normalized.append("--paging=never")
-    normalized.extend([
-        "--no-gitconfig",
-        "--true-color=always",
-        "--line-numbers",
-        "--minus-style=red red",
-        "--minus-emph-style=red red bold",
-        "--minus-non-emph-style=red red",
-        "--plus-style=green green",
-        "--plus-emph-style=green green bold",
-        "--plus-non-emph-style=green green",
-        "--hunk-header-style=syntax",
-        "--hunk-header-decoration-style=none",
-        "--line-numbers-minus-style=red",
-        "--line-numbers-zero-style=syntax dim",
-        "--line-numbers-plus-style=green",
-    ])
-    return normalized
-
-
 def _render_inline_unified_diff(diff: str) -> list[str]:
     """Render unified diff lines in Hermes' inline transcript style."""
     rendered: list[str] = []
@@ -463,15 +432,12 @@ def render_edit_diff_with_delta(
     )
     if not diff:
         return False
-
-    from tools.delta_bootstrap import resolve_delta_command
-    command = resolve_delta_command()
-    if command:
-        try:
-            _normalize_delta_command(command)
-        except Exception:
-            pass
-    return _emit_inline_diff("\n".join(_render_inline_unified_diff(diff)), print_fn)
+    try:
+        rendered_lines = _render_inline_unified_diff(diff)
+    except Exception as exc:
+        logger.debug("Could not render inline diff: %s", exc)
+        return False
+    return _emit_inline_diff("\n".join(rendered_lines), print_fn)
 
 
 # =========================================================================

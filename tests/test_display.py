@@ -7,7 +7,6 @@ from agent.display import (
     build_tool_preview,
     capture_local_edit_snapshot,
     extract_edit_diff,
-    _normalize_delta_command,
     _render_inline_unified_diff,
     render_edit_diff_with_delta,
 )
@@ -95,19 +94,6 @@ class TestBuildToolPreview:
 
 
 class TestEditDiffPreview:
-    def test_normalize_delta_command_enforces_hermes_preview_flags(self):
-        command = _normalize_delta_command(["delta", "--paging=always"])
-
-        assert command[0] == "delta"
-        assert "--paging=never" in command
-        assert "--no-gitconfig" in command
-        assert "--true-color=always" in command
-        assert "--line-numbers" in command
-        assert "--plus-style=green green" in command
-        assert "--minus-style=red red" in command
-        assert "--hunk-header-style=syntax" in command
-        assert "--hunk-header-decoration-style=none" in command
-
     def test_extract_edit_diff_for_patch(self):
         diff = extract_edit_diff("patch", '{"success": true, "diff": "--- a/x\\n+++ b/x\\n"}')
         assert diff is not None
@@ -216,8 +202,6 @@ class TestEditDiffPreview:
     def test_render_edit_diff_with_delta_invokes_pager(self, monkeypatch):
         printer = MagicMock()
 
-        monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
-
         rendered = render_edit_diff_with_delta(
             "patch",
             '{"diff": "--- a/x\\n+++ b/x\\n@@ -1 +1 @@\\n-old\\n+new\\n"}',
@@ -232,8 +216,6 @@ class TestEditDiffPreview:
         assert any("new" in line for line in calls)
 
     def test_render_edit_diff_with_delta_skips_without_diff(self, monkeypatch):
-        monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
-
         rendered = render_edit_diff_with_delta(
             "patch",
             '{"success": true}',
@@ -244,8 +226,6 @@ class TestEditDiffPreview:
     def test_render_edit_diff_with_delta_falls_back_to_plain_diff_when_missing(self, monkeypatch):
         printer = MagicMock()
 
-        monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: None)
-
         rendered = render_edit_diff_with_delta(
             "patch",
             '{"diff": "--- a/x\\n+++ b/x\\n"}',
@@ -255,11 +235,10 @@ class TestEditDiffPreview:
         assert rendered is True
         assert printer.call_count >= 2
 
-    def test_render_edit_diff_with_delta_falls_back_to_plain_diff_on_error(self, monkeypatch):
+    def test_render_edit_diff_with_delta_handles_inline_renderer_errors(self, monkeypatch):
         printer = MagicMock()
 
-        monkeypatch.setattr("tools.delta_bootstrap.resolve_delta_command", lambda: ["delta", "--paging=always"])
-        monkeypatch.setattr("agent.display._normalize_delta_command", MagicMock(side_effect=RuntimeError("boom")))
+        monkeypatch.setattr("agent.display._render_inline_unified_diff", MagicMock(side_effect=RuntimeError("boom")))
 
         rendered = render_edit_diff_with_delta(
             "patch",
@@ -267,5 +246,5 @@ class TestEditDiffPreview:
             print_fn=printer,
         )
 
-        assert rendered is True
-        assert printer.call_count >= 2
+        assert rendered is False
+        assert printer.call_count == 0
