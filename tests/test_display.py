@@ -104,6 +104,8 @@ class TestEditDiffPreview:
         assert "--line-numbers" in command
         assert "--plus-style=green" in command
         assert "--minus-style=red" in command
+        assert "--hunk-header-style=syntax" in command
+        assert "--hunk-header-decoration-style=none" in command
 
     def test_extract_edit_diff_for_patch(self):
         diff = extract_edit_diff("patch", '{"success": true, "diff": "--- a/x\\n+++ b/x\\n"}')

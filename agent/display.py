@@ -397,6 +397,8 @@ def _normalize_delta_command(command: list[str]) -> list[str]:
         "--plus-style=green",
         "--plus-emph-style=green bold",
         "--plus-non-emph-style=green",
+        "--hunk-header-style=syntax",
+        "--hunk-header-decoration-style=none",
         "--line-numbers-minus-style=red",
         "--line-numbers-zero-style=syntax dim",
         "--line-numbers-plus-style=green",
