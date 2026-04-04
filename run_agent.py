@@ -775,6 +775,7 @@ class AIAgent:
                 if self.provider in {"copilot-acp", "claude-cli"}:
                     client_kwargs["command"] = self.acp_command
                     client_kwargs["args"] = self.acp_args
+                    client_kwargs["session_id"] = session_id
                 effective_base = base_url
                 if "openrouter" in effective_base.lower():
                     client_kwargs["default_headers"] = {

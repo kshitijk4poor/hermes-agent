@@ -149,6 +149,11 @@ This backend is currently text-in/text-out only. Hermes disables its own tool
 schemas for `claude-cli` sessions, but it still tracks prompt/completion usage
 and context-window status so the CLI status bar remains accurate.
 
+Hermes also reuses the same Claude CLI conversation across turns for a given
+Hermes session. The first call seeds a stable Claude `--session-id`, then later
+turns switch to Claude CLI `--resume` automatically when the CLI returns its
+session handle.
+
 | Environment variable | Description |
 |---------------------|-------------|
 | `HERMES_CLAUDE_CLI_COMMAND` | Override the Claude CLI binary path (default: `claude`) |

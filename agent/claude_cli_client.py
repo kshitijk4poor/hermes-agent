@@ -36,6 +36,16 @@ def _resolve_args() -> list[str]:
     return shlex.split(raw) if raw else []
 
 
+def _coerce_session_uuid(session_id: str | None) -> str:
+    raw = str(session_id or "").strip()
+    if not raw:
+        return str(uuid.uuid4())
+    try:
+        return str(uuid.UUID(raw))
+    except Exception:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"hermes:{raw}"))
+
+
 def _render_message_content(content: Any) -> str:
     if content is None:
         return ""
@@ -122,6 +132,7 @@ class ClaudeCLIClient:
         acp_command: str | None = None,
         acp_args: list[str] | None = None,
         acp_cwd: str | None = None,
+        session_id: str | None = None,
         **_: Any,
     ):
         self.api_key = api_key or "claude-cli"
@@ -133,6 +144,8 @@ class ClaudeCLIClient:
         self.chat = _ClaudeCLIChatNamespace(self)
         self.is_closed = False
         self._last_result: dict[str, Any] | None = None
+        self._hermes_session_uuid = _coerce_session_uuid(session_id)
+        self._claude_session_id: str | None = None
 
     def close(self) -> None:
         self.is_closed = True
@@ -152,6 +165,9 @@ class ClaudeCLIClient:
             timeout_seconds=float(timeout or _DEFAULT_TIMEOUT_SECONDS),
         )
         self._last_result = payload
+        cli_session_id = str(payload.get("session_id") or "").strip()
+        if cli_session_id:
+            self._claude_session_id = cli_session_id
 
         usage_payload = payload.get("usage") if isinstance(payload, dict) else {}
         input_tokens = int((usage_payload or {}).get("input_tokens") or 0)
@@ -189,6 +205,10 @@ class ClaudeCLIClient:
 
     def _run_prompt(self, prompt_text: str, *, model: str, timeout_seconds: float) -> dict[str, Any]:
         cmd = [self._command, "-p", "--output-format", "json", "--model", model]
+        if self._claude_session_id:
+            cmd.extend(["--resume", self._claude_session_id])
+        else:
+            cmd.extend(["--session-id", self._hermes_session_uuid])
         cmd.extend(self._args)
         cmd.append(prompt_text)
         try:

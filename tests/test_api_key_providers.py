@@ -920,3 +920,19 @@ class TestHuggingFaceModels:
         from hermes_cli.models import _PROVIDER_LABELS
         assert "huggingface" in _PROVIDER_LABELS
         assert _PROVIDER_LABELS["huggingface"] == "Hugging Face"
+
+
+    def test_runtime_claude_cli_uses_process_runtime(self, monkeypatch):
+        monkeypatch.setattr("hermes_cli.auth.shutil.which", lambda command: f"/usr/local/bin/{command}")
+        monkeypatch.setenv("HERMES_CLAUDE_CLI_ARGS", "--debug")
+
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        result = resolve_runtime_provider(requested="claude-cli")
+
+        assert result["provider"] == "claude-cli"
+        assert result["api_mode"] == "chat_completions"
+        assert result["api_key"] == "claude-cli"
+        assert result["base_url"] == "claude-cli://local"
+        assert result["command"] == "/usr/local/bin/claude"
+        assert result["args"] == ["--debug"]
