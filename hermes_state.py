@@ -816,7 +816,8 @@ CREATE TABLE IF NOT EXISTS messages (
     platform_message_id TEXT,
     observed INTEGER DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
-    compacted INTEGER NOT NULL DEFAULT 0
+    compacted INTEGER NOT NULL DEFAULT 0,
+    api_content TEXT
 );
 
 CREATE TABLE IF NOT EXISTS session_model_usage (
@@ -3803,6 +3804,7 @@ class SessionDB:
         observed: bool = False,
         effect_disposition: Optional[str] = None,
         timestamp: Any = None,
+        api_content: Optional[str] = None,
     ) -> int:
         """
         Append a message to a session. Returns the message row ID.
@@ -3815,6 +3817,11 @@ class SessionDB:
         independent of the SQLite autoincrement primary key and is used by
         platform-specific flows like yuanbao's recall guard to redact a
         message by its platform-side identifier.
+
+        ``api_content`` is the exact content string sent to the API for this
+        message when it differs from ``content`` (ephemeral memory/plugin
+        injections, persist overrides).  It is a byte-fidelity sidecar for
+        prompt-cache-stable replay — stored verbatim, never sanitized.
         """
         # Serialize structured fields to JSON before entering the write txn
         reasoning_details_json = (
@@ -3854,8 +3861,8 @@ class SessionDB:
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed, active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, platform_message_id, observed, active, api_content)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -3875,6 +3882,7 @@ class SessionDB:
                     platform_message_id,
                     1 if observed else 0,
                     1,
+                    api_content if isinstance(api_content, str) else None,
                 ),
             )
             msg_id = cursor.lastrowid
@@ -3943,12 +3951,14 @@ class SessionDB:
                 msg.get("platform_message_id") or msg.get("message_id")
             )
 
+            api_content = msg.get("api_content")
+
             conn.execute(
                 """INSERT INTO messages (session_id, role, content, tool_call_id,
                    tool_calls, tool_name, effect_disposition, timestamp, token_count, finish_reason,
                    reasoning, reasoning_content, reasoning_details, codex_reasoning_items,
-                   codex_message_items, platform_message_id, observed, active)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   codex_message_items, platform_message_id, observed, active, api_content)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     role,
@@ -3968,6 +3978,7 @@ class SessionDB:
                     platform_msg_id,
                     1 if msg.get("observed") else 0,
                     1,
+                    api_content if isinstance(api_content, str) else None,
                 ),
             )
             inserted += 1
@@ -4092,6 +4103,37 @@ class SessionDB:
 
         return self._execute_write(_do)
 
+    def set_latest_user_api_content(
+        self, session_id: str, content: Any, api_content: str
+    ) -> int:
+        """Backfill the ``api_content`` sidecar onto the newest ACTIVE user row.
+
+        In-place preflight compaction (:meth:`archive_and_compact`) inserts the
+        current turn's user row BEFORE the turn prologue composes the
+        prefetch/plugin sidecar, and the subsequent crash persist identity-skips
+        every compacted dict — without this backfill the stamped sidecar would
+        never land in the DB and any reload would replay clean content,
+        re-introducing the prompt-cache divergence the sidecar exists to close.
+
+        The ``content`` match is a defensive guard: if the newest active user
+        row is not the message the caller stamped (racing rewrite, unexpected
+        tail shape), nothing is written. Returns the number of rows updated
+        (0 or 1).
+        """
+        encoded = self._encode_content(content)
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE messages SET api_content = ? WHERE id = ("
+                "SELECT id FROM messages "
+                "WHERE session_id = ? AND role = 'user' AND active = 1 "
+                "ORDER BY id DESC LIMIT 1"
+                ") AND content IS ?",
+                (api_content, session_id, encoded),
+            )
+            return cursor.rowcount
+
+        return self._execute_write(_do)
 
     def get_messages(
         self,
@@ -4454,7 +4496,8 @@ class SessionDB:
             rows = self._conn.execute(
                 "SELECT role, content, tool_call_id, tool_calls, tool_name, effect_disposition, "
                 "finish_reason, reasoning, reasoning_content, reasoning_details, "
-                "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp "
+                "codex_reasoning_items, codex_message_items, platform_message_id, observed, timestamp, "
+                "api_content "
                 f"FROM messages WHERE session_id IN ({placeholders})"
                 # Order by AUTOINCREMENT id (true insertion order), NOT timestamp:
                 # append_message stamps rows with time.time(), which is not
@@ -4474,6 +4517,14 @@ class SessionDB:
             if row["role"] in {"user", "assistant"} and isinstance(content, str):
                 content = sanitize_context(content).strip()
             msg = {"role": row["role"], "content": content}
+            # api_content is the byte-fidelity sidecar: the exact string sent
+            # to the API when it differed from the clean content. Returned
+            # VERBATIM — no sanitize_context, no strip — because the replay
+            # path substitutes it for content to keep the provider prompt
+            # cache prefix byte-stable across turns. Cleaning it here would
+            # re-introduce the divergence it exists to remove.
+            if row["api_content"]:
+                msg["api_content"] = row["api_content"]
             if row["timestamp"]:
                 msg["timestamp"] = row["timestamp"]
             if row["tool_call_id"]:
