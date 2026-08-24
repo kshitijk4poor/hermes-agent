@@ -20,6 +20,7 @@ Design constraints honored:
 from __future__ import annotations
 
 import threading
+import time
 from collections import OrderedDict, deque
 
 # Replay ring per session. A long turn emits ~hundreds of token events; this
@@ -105,11 +106,30 @@ def reset_replay_state() -> None:
 
 
 def replay_stats() -> dict:
-    """Telemetry: buffer occupancy for the ops/debug surface."""
+    """Telemetry: buffer occupancy + per-turn timing for the ops/debug surface."""
     with _replay_lock:
-        return {
+        stats = {
             "sessions": len(_replay_buffers),
             "events": sum(len(b) for b in _replay_buffers.values()),
             "max_per_session": _REPLAY_BUFFER_MAX,
             "max_sessions": _REPLAY_SESSIONS_MAX,
         }
+    # Per-turn timing from the session store (not under the replay lock —
+    # the session store has its own lock).
+    try:
+        from tui_gateway.server import _sessions, _sessions_lock
+        with _sessions_lock:
+            active_turns = []
+            for sid, session in _sessions.items():
+                inflight = session.get("inflight_turn")
+                if isinstance(inflight, dict) and inflight.get("started_at"):
+                    active_turns.append({
+                        "session_id": sid,
+                        "trace_id": inflight.get("trace_id"),
+                        "elapsed_s": round(time.time() - inflight["started_at"], 2),
+                        "streaming": inflight.get("streaming", False),
+                    })
+        stats["active_turns"] = active_turns
+    except Exception:
+        stats["active_turns"] = []
+    return stats
