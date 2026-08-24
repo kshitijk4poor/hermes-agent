@@ -9,11 +9,12 @@ replays everything newer from the buffer, then live events resume seamlessly.
 Design constraints honored:
 - stdio TUI path unaffected: frames gain a ``seq`` field only on event frames;
   Ink ignores unknown params keys.
-- Thread safety: a single module lock guards counters + buffers; write_json
-  already serializes per-transport writes, so stamping under the lock cannot
-  reorder frames relative to each other.
+- Thread safety: a single module lock guards counters + buffers, so buffer
+  order always matches seq order. Wire order is enforced separately by the
+  per-transport write path; two racing writers can briefly invert seq order
+  on the wire, which the client tolerates (watermarks are monotonic-max).
 - Memory bound: _REPLAY_BUFFER_MAX events / _REPLAY_SESSIONS_MAX sessions,
-  oldest session evicted FIFO.
+  least-recently-active session evicted first.
 """
 
 from __future__ import annotations
@@ -28,12 +29,14 @@ _REPLAY_BUFFER_MAX = 512
 _REPLAY_SESSIONS_MAX = 64
 
 _replay_lock = threading.Lock()
-# sid -> OrderedDict-ish deque of (seq, frame_params_dict_without_seq)
+# sid -> deque of (seq, params_dict). params is the same dict written to the
+# wire and already carries its stamped "seq" key — the replay RPC returns
+# these bare event objects, matching what the client's live dispatch sees.
 _replay_buffers: "OrderedDict[str, deque]" = OrderedDict()
 _replay_next_seq: dict[str, int] = {}
 
 
-def _stamp_event(obj: dict) -> None:
+def stamp_event(obj: dict) -> None:
     """Stamp one outgoing event frame (mutates obj in place) and record it."""
     if obj.get("method") != "event":
         return
@@ -56,16 +59,36 @@ def _stamp_event(obj: dict) -> None:
             while len(_replay_buffers) > _REPLAY_SESSIONS_MAX:
                 _oldest_sid, _oldest_buf = _replay_buffers.popitem(last=False)
                 _replay_next_seq.pop(_oldest_sid, None)
-        buf.append((seq, obj))
+        else:
+            # LRU, not insertion-FIFO: an actively streaming session must not
+            # be evicted just because it was created before idle newer ones.
+            _replay_buffers.move_to_end(sid)
+        buf.append((seq, params))
 
 
-def events_since(sid: str, last_seen: int) -> list[dict]:
-    """Return recorded event FRAMES with seq > last_seen for *sid*, in order."""
+def events_since(sid: str, last_seen: int) -> tuple[list[dict], int, bool]:
+    """Replay contract for one session, computed atomically.
+
+    Returns ``(events, latest_seq, truncated)``:
+
+    - ``events``: bare event params dicts (``type``/``session_id``/``seq``/
+      ``payload``) with ``seq > last_seen``, in seq order.
+    - ``latest_seq``: current highest stamped seq (0 when unknown).
+    - ``truncated``: the client cannot trust the gap is fully covered —
+      either events between ``last_seen`` and the buffer start were evicted,
+      or ``last_seen`` is AHEAD of ``latest_seq`` (seq epoch reset after a
+      gateway restart / session eviction). Clients must realign on this flag
+      instead of silently accepting a hole.
+    """
+    sid = sid or ""
     with _replay_lock:
-        buf = _replay_buffers.get(sid or "")
+        latest = _replay_next_seq.get(sid, 0)
+        buf = _replay_buffers.get(sid)
         if not buf:
-            return []
-        return [frame for seq, frame in buf if seq > last_seen]
+            return [], latest, last_seen > latest
+        frames = [params for seq, params in buf if seq > last_seen]
+        truncated = last_seen > latest or last_seen + 1 < buf[0][0]
+        return frames, latest, truncated
 
 
 def latest_seq(sid: str) -> int:
@@ -88,4 +111,5 @@ def replay_stats() -> dict:
             "sessions": len(_replay_buffers),
             "events": sum(len(b) for b in _replay_buffers.values()),
             "max_per_session": _REPLAY_BUFFER_MAX,
+            "max_sessions": _REPLAY_SESSIONS_MAX,
         }

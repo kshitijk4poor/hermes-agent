@@ -111,6 +111,9 @@ export class JsonRpcGatewayClient {
   private lastSeenSeq = new Map<string, number>()
   /** Set while a post-reconnect replay fetch is in flight (dedup guard). */
   private replayInFlight = false
+  /** Seqs dispatched LIVE while a replay RPC is in flight, per session —
+   * the replay response overlaps with these and must not re-dispatch them. */
+  private liveSeqsDuringReplay: Map<string, Set<number>> | null = null
   private readonly eventHandlers = new Map<string, Set<(event: GatewayEvent) => void>>()
   private readonly stateHandlers = new Set<(state: ConnectionState) => void>()
   private readonly options: Required<Omit<GatewayClientOptions, 'socketFactory'>> &
@@ -455,6 +458,26 @@ export class JsonRpcGatewayClient {
       }
 
       this.recordSeq(frame.params)
+
+      // While a replay RPC is in flight, remember which seqs arrived live —
+      // the replay response overlaps with them (server returns everything
+      // > our pre-replay watermark) and must not re-dispatch those.
+      if (this.liveSeqsDuringReplay) {
+        const sid = frame.params.session_id
+        const seq = (frame.params as { seq?: unknown }).seq
+
+        if (sid && typeof seq === 'number') {
+          let set = this.liveSeqsDuringReplay.get(sid)
+
+          if (!set) {
+            set = new Set()
+            this.liveSeqsDuringReplay.set(sid, set)
+          }
+
+          set.add(seq)
+        }
+      }
+
       this.dispatchEvent(frame.params)
     }
   }
@@ -486,8 +509,11 @@ export class JsonRpcGatewayClient {
   /**
    * After a reconnect, ask the gateway to replay every event newer than our
    * per-session watermarks. Replayed frames go through the SAME dispatchEvent
-   * path as live frames — dedupe happens naturally because recordSeq ignores
-   * non-increasing seqs and downstream stores key on event identity.
+   * path as live frames. Frames that arrived LIVE while the replay RPC was in
+   * flight are tracked and skipped here — the server returns everything past
+   * the pre-replay watermark, so those overlap, and re-dispatching them would
+   * double-append streamed text (message.delta has no identity; it's
+   * append-only downstream).
    * Best-effort: failures are swallowed (the next reconnect retries).
    */
   private async fetchReplay(): Promise<void> {
@@ -496,38 +522,61 @@ export class JsonRpcGatewayClient {
     }
 
     this.replayInFlight = true
+    this.liveSeqsDuringReplay = new Map()
 
     try {
       const entries = Object.entries(this.getSeqWatermarks())
       // One RPC per known session keeps params flat; sessions are few (<20).
-      const results = await Promise.allSettled(
-        entries.map(([sid, lastSeen]) =>
-          this.request<{ events?: Array<{ type: string; session_id?: string; seq?: number; payload?: unknown }> }>(
-            'session.events.since',
-            { session_id: sid, last_seen: lastSeen },
-            REPLAY_REQUEST_TIMEOUT_MS
-          )
-        )
-      )
+      await Promise.allSettled(
+        entries.map(async ([sid, lastSeen]) => {
+          const result = await this.request<{
+            events?: Array<{ type: string; session_id?: string; seq?: number; payload?: unknown }>
+            latest_seq?: number
+            truncated?: boolean
+          }>('session.events.since', { session_id: sid, last_seen: lastSeen }, REPLAY_REQUEST_TIMEOUT_MS)
 
-      for (const result of results) {
-        if (result.status !== 'fulfilled' || !Array.isArray(result.value?.events)) {
-          continue
-        }
+          // Seq epoch reset (gateway restart / server-side eviction): the
+          // server's counter is now BEHIND our watermark, so replay could
+          // never deliver again. Re-adopt the server's epoch so future
+          // reconnects work; the gap itself is unrecoverable (truncated).
+          const latest = typeof result?.latest_seq === 'number' ? result.latest_seq : 0
 
-        for (const event of result.value.events) {
-          if (!event?.type) {
-            continue
+          if (result?.truncated && latest < lastSeen) {
+            if (latest > 0) {
+              this.lastSeenSeq.set(sid, latest)
+            } else {
+              this.lastSeenSeq.delete(sid)
+            }
+
+            return
           }
 
-          this.recordSeq(event as GatewayEvent)
-          this.dispatchEvent(event as GatewayEvent)
-        }
-      }
+          if (!Array.isArray(result?.events)) {
+            return
+          }
+
+          const liveSeqs = this.liveSeqsDuringReplay?.get(sid)
+
+          for (const event of result.events) {
+            if (!event?.type) {
+              continue
+            }
+
+            // Skip events already dispatched live during the replay window.
+            if (typeof event.seq === 'number' && liveSeqs?.has(event.seq)) {
+              continue
+            }
+
+            this.recordSeq(event as GatewayEvent)
+            this.dispatchEvent(event as GatewayEvent)
+          }
+        })
+      )
     } catch {
       // Replay is an optimization over lossy-reconnect; never surface errors.
     } finally {
       this.replayInFlight = false
+      this.liveSeqsDuringReplay = null
     }
   }
 
