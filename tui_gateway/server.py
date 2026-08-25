@@ -141,8 +141,8 @@ except Exception:
     pass
 
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
+from tui_gateway.session_store import sessions as _sessions, lock as _sessions_lock
 
-_sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
@@ -159,7 +159,6 @@ _cfg_lock = threading.Lock()
 # and multiple worker-pool RPCs.  Its compare/check/write transaction needs a
 # dedicated lock rather than the unrelated process-config cache lock.
 _profile_ui_meta_lock = threading.Lock()
-_sessions_lock = threading.RLock()  # reentrant: _close_session_by_id may run under callers that already hold it
 _prompt_lock = threading.Lock()
 _cfg_cache: dict | None = None
 _cfg_mtime: float | None = None
