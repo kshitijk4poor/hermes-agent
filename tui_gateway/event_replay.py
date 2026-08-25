@@ -117,19 +117,8 @@ def replay_stats() -> dict:
     # Per-turn timing from the session store (not under the replay lock —
     # the session store has its own lock).
     try:
-        from tui_gateway.server import _sessions, _sessions_lock
-        with _sessions_lock:
-            active_turns = []
-            for sid, session in _sessions.items():
-                inflight = session.get("inflight_turn")
-                if isinstance(inflight, dict) and inflight.get("started_at"):
-                    active_turns.append({
-                        "session_id": sid,
-                        "trace_id": inflight.get("trace_id"),
-                        "elapsed_s": round(time.time() - inflight["started_at"], 2),
-                        "streaming": inflight.get("streaming", False),
-                    })
-        stats["active_turns"] = active_turns
+        from tui_gateway.session_store import active_turns
+        stats["active_turns"] = active_turns()
     except Exception:
         stats["active_turns"] = []
     return stats

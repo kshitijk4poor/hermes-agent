@@ -24,6 +24,7 @@ the functions themselves.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Any, Iterator
 
 
@@ -91,3 +92,52 @@ def pop(sid: str) -> dict | None:
 def clear() -> None:
     """Remove all sessions. Caller should hold ``lock``."""
     sessions.clear()
+
+
+# ── Session field helpers ────────────────────────────────────────────────
+# These operate on a session dict (returned by get/create) and do NOT need
+# the store lock — the caller holds a reference to the dict and mutates it
+# under the session's own history_lock or the store lock as appropriate.
+
+def is_running(session: dict | None) -> bool:
+    """True if the session has an in-flight agent turn."""
+    return bool((session or {}).get("running"))
+
+
+def inflight_turn(session: dict | None) -> dict | None:
+    """Return the inflight turn dict, or None when idle."""
+    turn = (session or {}).get("inflight_turn")
+    return turn if isinstance(turn, dict) else None
+
+
+def trace_id(session: dict | None) -> str | None:
+    """Return the current turn's trace_id, or None when idle."""
+    turn = inflight_turn(session)
+    return turn.get("trace_id") if turn else None
+
+
+def turn_elapsed(session: dict | None) -> float | None:
+    """Seconds since the current turn started, or None when idle."""
+    turn = inflight_turn(session)
+    if not turn or not turn.get("started_at"):
+        return None
+    return round(time.time() - float(turn["started_at"]), 2)
+
+
+def active_turns() -> list[dict]:
+    """Snapshot of all sessions with in-flight turns, with trace_id + elapsed.
+
+    Used by ``session.events.stats`` telemetry and the ops/debug surface.
+    """
+    with lock:
+        result = []
+        for sid, session in sessions.items():
+            turn = inflight_turn(session)
+            if turn and turn.get("started_at"):
+                result.append({
+                    "session_id": sid,
+                    "trace_id": turn.get("trace_id"),
+                    "elapsed_s": round(time.time() - float(turn["started_at"]), 2),
+                    "streaming": turn.get("streaming", False),
+                })
+        return result
