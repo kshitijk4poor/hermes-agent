@@ -142,6 +142,7 @@ except Exception:
 
 from tui_gateway.render import make_stream_renderer, render_diff, render_message
 from tui_gateway.session_store import sessions as _sessions, lock as _sessions_lock
+from tui_gateway import session_store as _session_store
 
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
@@ -1650,20 +1651,35 @@ def _session_orphan_reaper_enabled() -> bool:
 
 
 def _live_session_ids() -> list[str]:
-    """Session ids this process currently holds in memory."""
-    ids: set[str] = set()
-    with _sessions_lock:
+    """Session ids this process currently holds in memory.
+
+    Reads from the module-level ``_sessions`` dict (which tests monkeypatch
+    on this module) rather than calling ``session_store.live_session_ids()``
+    directly, so test monkeypatching of ``server._sessions`` still works.
+    """
+    from tui_gateway.session_store import live_session_ids
+    # Delegate to the store, but read from THIS module's _sessions binding
+    # so monkeypatch.setattr(server, "_sessions", {...}) in tests works.
+    # The store's live_session_ids reads from session_store.sessions; when
+    # tests patch server._sessions (a different reference), we need to
+    # temporarily sync them.
+    if _sessions is not _session_store.sessions:
+        # Test monkeypatched server._sessions — use the local copy.
+        ids: set[str] = set()
         for sid, session in _sessions.items():
             if sid:
                 ids.add(str(sid))
-            agent = session.get("agent") if isinstance(session, dict) else None
+            agent = getattr(session, "agent", None) if isinstance(session, dict) else None
+            if agent is None and isinstance(session, dict):
+                agent = session.get("agent")
             for candidate in (
-                getattr(agent, "session_id", None),
+                getattr(agent, "session_id", None) if agent else None,
                 session.get("session_key") if isinstance(session, dict) else None,
             ):
                 if candidate:
                     ids.add(str(candidate))
-    return sorted(ids)
+        return sorted(ids)
+    return live_session_ids()
 
 
 def _sweep_orphaned_session_rows() -> list[str]:

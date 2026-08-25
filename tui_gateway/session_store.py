@@ -78,7 +78,7 @@ def __contains__(sid: str) -> bool:
 
 # ── Write helpers (caller must hold lock for atomicity) ─────────────────
 
-def set(sid: str, session: dict) -> None:
+def put(sid: str, session: dict) -> None:
     """Insert or replace a session. Caller should hold ``lock`` for
     atomic check-and-set sequences."""
     sessions[sid] = session
@@ -141,3 +141,25 @@ def active_turns() -> list[dict]:
                     "streaming": turn.get("streaming", False),
                 })
         return result
+
+
+def live_session_ids() -> list[str]:
+    """All session ids this process holds in memory.
+
+    Includes both the UI session id (``sid``) and the agent's session_key /
+    session_id for each live session, so callers can exclude every identity
+    a live row might use from a DB sweep.
+    """
+    ids: set[str] = set()
+    with lock:
+        for sid, session in sessions.items():
+            if sid:
+                ids.add(str(sid))
+            agent = session.get("agent") if isinstance(session, dict) else None
+            for candidate in (
+                getattr(agent, "session_id", None),
+                session.get("session_key") if isinstance(session, dict) else None,
+            ):
+                if candidate:
+                    ids.add(str(candidate))
+    return sorted(ids)
