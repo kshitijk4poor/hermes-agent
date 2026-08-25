@@ -21,7 +21,9 @@ def _clean():
     reset_replay_state()
 
 
-def _frame(sid, etype="message.delta"):
+def _frame(sid, etype="status.update"):
+    # status.update is a DURABLE event type (buffered for replay).
+    # message.delta / thinking.delta are transient — stamped, never buffered.
     return {
         "jsonrpc": "2.0",
         "method": "event",
@@ -64,7 +66,7 @@ def test_events_since_returns_bare_params_only_newer_in_order():
     assert [e["seq"] for e in got] == [4, 5]
     # Replay returns the bare event params (what live dispatch sees), NOT the
     # full JSON-RPC frame envelope — the client reads event.type at top level.
-    assert all("jsonrpc" not in e and e["type"] == "message.delta" for e in got)
+    assert all("jsonrpc" not in e and e["type"] == "status.update" for e in got)
     assert latest == 5
     assert truncated is False
 
@@ -79,6 +81,41 @@ def test_unknown_session_returns_empty():
     assert latest_seq("nope") == 0
 
 
+def test_transient_deltas_stamped_but_not_buffered():
+    """Streaming token deltas get seqs (live wire ordering) but never enter
+    the replay ring — one streaming turn must not evict durable control
+    events (message.start/complete, session.info) from replay coverage."""
+    start = _frame("s1", "message.start")
+    deltas = [_frame("s1", "message.delta") for _ in range(100)]
+    thinking = [_frame("s1", "thinking.delta") for _ in range(50)]
+    complete = _frame("s1", "message.complete")
+
+    stamp_event(start)
+    for f in deltas:
+        stamp_event(f)
+    for f in thinking:
+        stamp_event(f)
+    stamp_event(complete)
+
+    # All frames got seqs, in one monotonic namespace.
+    assert start["params"]["seq"] == 1
+    assert complete["params"]["seq"] == 152
+    assert deltas[0]["params"]["seq"] == 2
+
+    # But only the 2 durable frames are buffered.
+    assert replay_stats()["events"] == 2
+
+    # Replay from 0 returns just the durable frames — and the delta-only
+    # gaps between them are NOT truncation (nothing recoverable was lost).
+    got, latest, truncated = events_since("s1", 0)
+    assert [e["type"] for e in got] == ["message.start", "message.complete"]
+    assert latest == 152
+    assert truncated is False
+
+    # A client that saw the whole live stream is fully covered too.
+    assert events_since("s1", 152) == ([], 152, False)
+
+
 def test_ring_buffer_is_bounded_and_reports_truncation():
     for _ in range(event_replay._REPLAY_BUFFER_MAX + 50):
         stamp_event(_frame("s1"))
@@ -86,7 +123,8 @@ def test_ring_buffer_is_bounded_and_reports_truncation():
     stats = replay_stats()
     assert stats["events"] == event_replay._REPLAY_BUFFER_MAX
 
-    # Client that saw nothing (last_seen=0) has a gap older than the ring.
+    # Client that saw nothing (last_seen=0) has a gap older than the ring —
+    # durable frames were evicted, so the gap is real truncation.
     got, latest, truncated = events_since("s1", 0)
     assert truncated is True
     assert latest == event_replay._REPLAY_BUFFER_MAX + 50
@@ -97,6 +135,24 @@ def test_ring_buffer_is_bounded_and_reports_truncation():
     covered, _, covered_truncated = events_since("s1", oldest - 1)
     assert covered_truncated is False
     assert len(covered) == event_replay._REPLAY_BUFFER_MAX
+
+
+def test_eviction_of_durable_frames_is_precise():
+    """Truncation is keyed to the highest EVICTED durable seq, not the buffer
+    floor: a client whose last_seen covers everything evicted is not
+    truncated even when younger frames were dropped for other clients."""
+    overflow = 50
+    for _ in range(event_replay._REPLAY_BUFFER_MAX + overflow):
+        stamp_event(_frame("s1"))
+
+    # The first `overflow` durable frames (seq 1..50) were evicted.
+    # A client at last_seen=overflow saw all of them — not truncated.
+    _, _, at_boundary = events_since("s1", overflow)
+    assert at_boundary is False
+
+    # A client one behind the boundary lost seq=overflow — truncated.
+    _, _, behind = events_since("s1", overflow - 1)
+    assert behind is True
 
 
 def test_epoch_reset_reports_truncated():
@@ -115,6 +171,15 @@ def test_epoch_reset_reports_truncated():
 
     # Session the server has never seen but the client has a watermark for.
     assert events_since("gone", 42) == ([], 0, True)
+
+
+def test_epoch_constant_is_stable_and_shaped():
+    """EPOCH identifies this process's seq namespace: 8 hex chars, constant
+    for the process lifetime (clients compare it across reconnects)."""
+    assert isinstance(event_replay.EPOCH, str)
+    assert len(event_replay.EPOCH) == 8
+    int(event_replay.EPOCH, 16)  # hex
+    assert event_replay.EPOCH == event_replay.EPOCH  # stable reference
 
 
 def test_session_count_bounded_with_lru_eviction():

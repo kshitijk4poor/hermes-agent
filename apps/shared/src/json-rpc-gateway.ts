@@ -111,6 +111,9 @@ export class JsonRpcGatewayClient {
   private lastSeenSeq = new Map<string, number>()
   /** Set while a post-reconnect replay fetch is in flight (dedup guard). */
   private replayInFlight = false
+  /** Server boot epoch from gateway.ready — seq watermarks are only valid
+   * within one epoch; a change (gateway restart) resets them. */
+  private serverEpoch: string | null = null
   /** Seqs dispatched LIVE while a replay RPC is in flight, per session —
    * the replay response overlaps with these and must not re-dispatch them. */
   private liveSeqsDuringReplay: Map<string, Set<number>> | null = null
@@ -449,11 +452,30 @@ export class JsonRpcGatewayClient {
     }
 
     if (frame.method === 'event' && frame.params?.type) {
-      if (frame.params.type === 'gateway.ready' && this.gatewayReadyAdvertisesHeartbeat(frame.params.payload)) {
-        const socket = this.socket
+      if (frame.params.type === 'gateway.ready') {
+        if (this.gatewayReadyAdvertisesHeartbeat(frame.params.payload)) {
+          const socket = this.socket
 
-        if (socket) {
-          this.startHeartbeat(socket)
+          if (socket) {
+            this.startHeartbeat(socket)
+          }
+        }
+
+        // Seq-namespace epoch: a new epoch means the gateway restarted and
+        // its per-session seq counters reset. Our stored watermarks are from
+        // the previous namespace — a stale HIGH watermark would make every
+        // replay return empty ("client ahead") and can suppress gap
+        // detection forever. Drop all watermarks so this connection starts
+        // fresh; the app layer re-hydrates state via session.resume anyway.
+        const payload = frame.params.payload as { epoch?: unknown } | undefined
+        const epoch = typeof payload?.epoch === 'string' ? payload.epoch : null
+
+        if (epoch) {
+          if (this.serverEpoch && this.serverEpoch !== epoch) {
+            this.lastSeenSeq.clear()
+          }
+
+          this.serverEpoch = epoch
         }
       }
 

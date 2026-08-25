@@ -275,4 +275,43 @@ describe('JsonRpcGatewayClient event-seq tracking + replay resume', () => {
     expect(client.getSeqWatermarks().s1).toBe(4)
     client.close()
   })
+
+  it('resets seq watermarks when gateway.ready arrives with a NEW epoch', async () => {
+    const client = makeClient()
+    const p = client.connect('ws://x')
+    sockets[0].open()
+    await p
+
+    // First connect: epoch A adopted, watermarks accumulate.
+    sockets[0].serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: { epoch: 'aaaa1111' } } })
+    sockets[0].serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'message.complete', session_id: 's1', seq: 40 } })
+    expect(client.getSeqWatermarks()).toEqual({ s1: 40 })
+
+    // Same epoch re-announced (same process, reconnect): watermarks KEPT.
+    sockets[0].serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: { epoch: 'aaaa1111' } } })
+    expect(client.getSeqWatermarks()).toEqual({ s1: 40 })
+
+    // New epoch (gateway restarted, seq namespace reset): stale watermark 40
+    // would be AHEAD of the new counter and suppress replay forever — must
+    // be dropped.
+    sockets[0].serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: { epoch: 'bbbb2222' } } })
+    expect(client.getSeqWatermarks()).toEqual({})
+
+    // Fresh seqs in the new namespace accumulate normally.
+    sockets[0].serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'message.start', session_id: 's1', seq: 1 } })
+    expect(client.getSeqWatermarks()).toEqual({ s1: 1 })
+    client.close()
+  })
+
+  it('ignores gateway.ready without an epoch (legacy backend)', async () => {
+    const client = makeClient()
+    const p = client.connect('ws://x')
+    sockets[0].open()
+    await p
+
+    sockets[0].serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'message.complete', session_id: 's1', seq: 7 } })
+    sockets[0].serverFrame({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: { skin: {} } } })
+    expect(client.getSeqWatermarks()).toEqual({ s1: 7 })
+    client.close()
+  })
 })

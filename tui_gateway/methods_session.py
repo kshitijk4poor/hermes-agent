@@ -3663,6 +3663,11 @@ def _(rid, params: dict) -> dict:
         "latest_seq": latest,
         "truncated": truncated,
         "count": len(frames),
+        # Server boot epoch: when this differs from the epoch the client saw
+        # in gateway.ready at its previous connection, the seq namespace was
+        # reset (gateway restart) — the client must drop its watermarks and
+        # do a full state reload instead of trusting replay.
+        "epoch": event_replay.EPOCH,
     })
 
 
