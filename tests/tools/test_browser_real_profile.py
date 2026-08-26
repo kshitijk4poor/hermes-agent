@@ -71,11 +71,32 @@ class TestRealProfileLaunchArgs:
         with patch.object(bt, "_use_real_profile", return_value=True), \
              patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
              patch("hermes_cli.browser_connect.real_profile_data_dir", return_value=str(data_dir)), \
-             patch("hermes_cli.browser_connect.chromium_executable", return_value="/usr/bin/google-chrome"):
+             patch("hermes_cli.browser_connect.chromium_executable", return_value="/usr/bin/google-chrome"), \
+             patch("hermes_cli.browser_connect.ensure_remote_debugging_policy", return_value=False):
             args, err = bt._real_profile_launch_args()
         assert err is None
+        # When policy fails (Chrome <136 fallback), uses --profile.
         assert "--profile" in args and str(data_dir) in args
         assert "--executable-path" in args and "/usr/bin/google-chrome" in args
+
+    def test_chromium_default_uses_cdp_with_policy(self, tmp_path):
+        import tools.browser_tool as bt
+        self._reset()
+        data_dir = tmp_path / "chrome-user-data"
+        data_dir.mkdir()
+        with patch.object(bt, "_use_real_profile", return_value=True), \
+             patch("hermes_cli.browser_connect.detect_default_chromium", return_value="chrome"), \
+             patch("hermes_cli.browser_connect.real_profile_data_dir", return_value=str(data_dir)), \
+             patch("hermes_cli.browser_connect.chromium_executable", return_value="/usr/bin/google-chrome"), \
+             patch("hermes_cli.browser_connect.ensure_remote_debugging_policy", return_value=True), \
+             patch.object(bt, "_launch_real_profile_chrome") as mock_launch:
+            args, err = bt._real_profile_launch_args()
+        assert err is None
+        # When policy succeeds (Chrome 136+), uses --cdp, not --profile.
+        assert args[0] == "--cdp"
+        assert "127.0.0.1" in args[1]
+        assert "--profile" not in args
+        mock_launch.assert_called_once()
 
     def test_missing_profile_dir_fails_closed(self, tmp_path):
         import tools.browser_tool as bt

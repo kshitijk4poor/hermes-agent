@@ -291,6 +291,96 @@ def detect_default_chromium(system: str | None = None) -> str | None:
     return _detect_default_linux()
 
 
+# ---------------------------------------------------------------------------#
+# Chrome 136+ default-profile remote-debugging block
+#
+# Chrome 136 blocks ``--remote-debugging-port`` on the default user-data-dir
+# (the one that has the user's real logins/cookies).  Since agent-browser
+# launches Chrome with ``--remote-debugging-port=0 --user-data-dir=<real-dir>``
+# when given ``--profile``, Chrome starts but never opens a CDP port, causing a
+# 120-second timeout.
+#
+# The enterprise policy ``RemoteDebuggingAllowed`` overrides this block, allowing
+# ``--remote-debugging-port=<port>`` on the default user-data-dir.  We set it
+# transparently (per-OS) when the user has consented to real-profile browsing,
+# then launch Chrome with an explicit port + ``--remote-allow-origins=*`` and
+# connect agent-browser via ``--cdp`` instead of ``--profile``.
+# ---------------------------------------------------------------------------#
+
+# Per-OS policy-application commands.  Each returns True on success.
+def _ensure_policy_darwin(browser: str) -> bool:
+    """Set RemoteDebuggingAllowed via ``defaults write`` on macOS."""
+    domain = {
+        "chrome": "com.google.Chrome",
+        "chromium": "org.chromium.Chromium",
+        "brave": "com.brave.Browser",
+        "edge": "com.microsoft.edgemac",
+    }.get(browser, "com.google.Chrome")
+    try:
+        subprocess.run(
+            ["defaults", "write", domain, "RemoteDebuggingAllowed", "-bool", "true"],
+            capture_output=True, timeout=5,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_policy_windows(browser: str) -> bool:
+    """Set RemoteDebuggingAllowed via registry on Windows."""
+    try:
+        import winreg  # type: ignore
+    except Exception:
+        return False
+    root_map = {
+        "chrome": r"Software\Policies\Google\Chrome",
+        "edge": r"Software\Policies\Microsoft\Edge",
+        "brave": r"Software\Policies\BraveSoftware\Brave",
+        "chromium": r"Software\Policies\Chromium",
+    }
+    subkey = root_map.get(browser, root_map["chrome"])
+    try:
+        key = winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, subkey, 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, "RemoteDebuggingAllowed", 0, winreg.REG_DWORD, 1)
+        winreg.CloseKey(key)
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_policy_linux(browser: str) -> bool:
+    """Drop a RemoteDebuggingAllowed JSON policy on Linux."""
+    paths = {
+        "chrome": "/etc/opt/chrome/policies/managed/hermes-real-profile.json",
+        "edge": "/etc/opt/edge/policies/managed/hermes-real-profile.json",
+        "brave": "/etc/brave/policies/managed/hermes-real-profile.json",
+        "chromium": "/etc/chromium/policies/managed/hermes-real-profile.json",
+    }
+    target = paths.get(browser, paths["chrome"])
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        import json as _json
+        with open(target, "w") as f:
+            _json.dump({"RemoteDebuggingAllowed": True}, f)
+        return True
+    except Exception:
+        return False
+
+
+def ensure_remote_debugging_policy(browser: str, system: str | None = None) -> bool:
+    """Set the RemoteDebuggingAllowed enterprise policy for ``browser``.
+
+    Returns True on success.  On failure the caller falls back to the old
+    ``--profile`` path (which works on Chrome <136).
+    """
+    system = system or platform.system()
+    if system == "Darwin":
+        return _ensure_policy_darwin(browser)
+    if system == "Windows":
+        return _ensure_policy_windows(browser)
+    return _ensure_policy_linux(browser)
+
+
 def get_chrome_debug_candidates(system: str) -> list[str]:
     candidates: list[str] = []
     seen: set[str] = set()

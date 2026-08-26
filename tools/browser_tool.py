@@ -1455,19 +1455,28 @@ def _use_real_profile() -> bool:
 
 
 def _real_profile_launch_args() -> tuple:
-    """Resolve (profile_args, error) for a real-profile local launch.
+    """Resolve (launch_args, error) for a real-profile local launch.
 
-    Returns ``(["--profile", <data_dir>, "--executable-path", <bin>], None)``
-    when consent is on and the default browser is a resolvable Chromium.
-    Returns ``([], <message>)`` when the default browser is non-Chromium or its
-    profile/binary cannot be located, so the caller can fail closed with a
-    clear reason. Returns ``([], None)`` when consent is off (no-op).
+    Chrome 136+ blocks ``--remote-debugging-port`` on the default user-data-dir.
+    agent-browser's ``--profile`` path launches Chrome with
+    ``--remote-debugging-port=0`` on that dir, so Chrome starts but never opens
+    a CDP port → 120s timeout.
+
+    Fix: set the ``RemoteDebuggingAllowed`` enterprise policy (overrides the
+    block), launch Chrome ourselves with an explicit port +
+    ``--remote-allow-origins=*``, and return ``--cdp`` so agent-browser
+    attaches to the running instance instead of launching a new one.
+
+    Returns ``(["--cdp", <url>], None)`` on success.
+    Returns ``([], <message>)`` on failure (fail-closed).
+    Returns ``([], None)`` when consent is off (no-op).
     """
     if not _use_real_profile():
         return [], None
     from hermes_cli.browser_connect import (
         chromium_executable,
         detect_default_chromium,
+        ensure_remote_debugging_policy,
         real_profile_data_dir,
     )
 
@@ -1487,11 +1496,59 @@ def _real_profile_launch_args() -> tuple:
             f"({data_dir!r}). Launch that browser at least once, or turn the "
             "toggle off."
         )
-    args = ["--profile", data_dir]
     exe = chromium_executable(browser)
+
+    # Set the enterprise policy that overrides Chrome 136+'s default-profile
+    # remote-debugging block.  If it fails, fall back to --profile (works on
+    # Chrome <136).
+    policy_ok = ensure_remote_debugging_policy(browser)
+
+    if policy_ok and exe:
+        # Launch Chrome with an explicit debugging port on the real profile.
+        cdp_port = _REAL_PROFILE_CDP_PORT
+        _launch_real_profile_chrome(exe, data_dir, cdp_port)
+        return ["--cdp", f"http://127.0.0.1:{cdp_port}"], None
+
+    # Fallback: old --profile path (Chrome <136 or policy failed).
+    args = ["--profile", data_dir]
     if exe:
         args += ["--executable-path", exe]
     return args, None
+
+
+# Port used for the real-profile Chrome instance launched by _real_profile_launch_args.
+_REAL_PROFILE_CDP_PORT = 9231
+
+
+def _launch_real_profile_chrome(exe: str, data_dir: str, port: int) -> None:
+    """Launch Chrome with ``--remote-debugging-port`` on the real profile.
+
+    Detached: the Chrome process outlives the agent-browser call.  If Chrome is
+    already running on this profile (SingletonLock), we skip launching — the
+    caller's ``--cdp`` will attach to the existing instance (the policy ensures
+    the port is exposed).
+    """
+    # If Chrome is already running on this profile, don't launch a second one.
+    lock = os.path.join(data_dir, "SingletonLock")
+    if os.path.exists(lock):
+        return
+    try:
+        subprocess.Popen(
+            [
+                exe,
+                f"--remote-debugging-port={port}",
+                "--remote-allow-origins=*",
+                "--no-first-run",
+                "--no-default-browser-check",
+                f"--user-data-dir={data_dir}",
+                "about:blank",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,  # detach from agent process group
+        )
+    except Exception as e:
+        logger.debug("Could not launch real-profile Chrome: %s", e)
 
 
 def _url_is_private(url: str) -> bool:
@@ -3000,7 +3057,12 @@ def _run_browser_command(
         if _profile_err:
             return {"success": False, "error": _profile_err}
         if _profile_args:
-            backend_args += _profile_args
+            if _profile_args[0] == "--cdp":
+                # Real-profile CDP path: agent-browser must attach via --cdp,
+                # not launch a new --session (it would silently ignore --cdp).
+                backend_args = _profile_args
+            else:
+                backend_args += _profile_args
 
     # Lightpanda engine injection (local mode only, agent-browser v0.25.3+).
     # Use the resolved session backend rather than global cloud-provider state:
