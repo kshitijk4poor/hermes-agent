@@ -16,6 +16,7 @@ until a later open atomically rebuilds the index and restores the triggers.
 import json
 import os
 import sqlite3
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -30,8 +31,11 @@ from hermes_state import (
     SCHEMA_SQL,
     SessionDB,
     _FTS_TRIGGERS,
+    _active_structural_quarantine_path,
     _concrete_state_db_holder_pids,
     _is_inactive_orphan_desktop_holder,
+    _finalize_structural_repair,
+    _retire_active_structural_quarantine,
 )
 
 
@@ -89,6 +93,18 @@ def _base_fts_triggers(db_path):
     ).fetchall()
     raw.close()
     return {row[0] for row in rows}
+
+
+def _corrupt_btree_root(db_path, root_page):
+    data = bytearray(db_path.read_bytes())
+    page_size = int.from_bytes(data[16:18], "big")
+    if page_size == 1:
+        page_size = 65_536
+    page_start = (root_page - 1) * page_size
+    header_offset = page_start + (100 if root_page == 1 else 0)
+    assert data[header_offset] in {0x02, 0x05, 0x0A, 0x0D}
+    data[header_offset + 3 : header_offset + 5] = b"\xff\xff"
+    db_path.write_bytes(data)
 
 
 class TestRuntimeFtsRebuild:
@@ -307,9 +323,298 @@ class TestRuntimeFtsRebuild:
                 'fts5: corrupt structure record for table "messages_fts"'
             )
         )
-        assert not SessionDB._is_fts_write_corruption_error(
-            sqlite3.DatabaseError("no such table: nothing_fts_related")
+
+        def _structural_corruption(_conn):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        with pytest.raises(sqlite3.DatabaseError, match="disk image is malformed"):
+            db._execute_write(_structural_corruption)
+
+        assert db._fts_runtime_rebuild_attempted is False
+        assert db._fts_enabled is True
+
+    def test_integrity_report_at_diagnostic_cap_fails_closed(self, db):
+        generic = sqlite3.DatabaseError("database disk image is malformed")
+        generic.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+        cursor = SimpleNamespace(
+            fetchall=lambda: [("malformed FTS5 table: messages_fts",)] * 100
         )
+        queries = []
+        fake_conn = SimpleNamespace(
+            execute=lambda sql: (queries.append(sql), cursor)[1]
+        )
+        real_conn = db._conn
+        db._conn = fake_conn
+        try:
+            assert db._has_fts_corruption_evidence(generic) is False
+        finally:
+            db._conn = real_conn
+        assert queries == ["PRAGMA integrity_check(100)"]
+
+    def test_physical_canonical_corruption_never_enters_fts_recovery(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "state.db"
+        seed = SessionDB(db_path=db_path)
+        seed.create_session("s1", source="test")
+        for index in range(160):
+            seed.append_message("s1", "user", f"payload {index} " + "x" * 1500)
+        seed.close()
+
+        raw = sqlite3.connect(str(db_path), isolation_level=None)
+        try:
+            raw.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            raw.execute("PRAGMA journal_mode=DELETE")
+            raw.execute("VACUUM")
+            plan = " ".join(
+                str(row[3])
+                for row in raw.execute(
+                    "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM messages"
+                ).fetchall()
+            )
+            assert "COVERING INDEX" in plan
+            root_row = raw.execute(
+                "SELECT rootpage FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'messages'"
+            ).fetchone()
+            assert root_row is not None
+            messages_root = int(root_row[0])
+        finally:
+            raw.close()
+
+        first = SessionDB(db_path=db_path)
+        sibling = SessionDB(db_path=db_path)
+        try:
+            _corrupt_btree_root(db_path, messages_root)
+            raw = sqlite3.connect(str(db_path), isolation_level=None)
+            try:
+                assert raw.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 160
+                with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+                    raw.execute("SELECT * FROM messages NOT INDEXED").fetchall()
+            finally:
+                raw.close()
+
+            monkeypatch.setattr(
+                first, "rebuild_fts", lambda: pytest.fail("must not rebuild FTS")
+            )
+            triggers_before = _base_fts_triggers(db_path)
+            with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+                first.append_message("s1", "user", "must not persist")
+
+            assert first._fts_runtime_rebuild_attempted is False
+            assert first._fts_stale is False
+            assert _meta_value(db_path, FTS_STALE_KEY) is None
+            assert _base_fts_triggers(db_path) == triggers_before
+            assert _active_structural_quarantine_path(db_path).exists()
+
+            callback_called = False
+
+            def _sibling_write(_conn):
+                nonlocal callback_called
+                callback_called = True
+
+            with pytest.raises(
+                sqlite3.DatabaseError, match="canonical writes disabled"
+            ):
+                sibling._execute_write(_sibling_write)
+            assert callback_called is False
+        finally:
+            first.close()
+            sibling.close()
+
+    def test_contradictory_result_code_does_not_quarantine(self, db):
+        contradictory = sqlite3.IntegrityError("database disk image is malformed")
+        contradictory.sqlite_errorcode = sqlite3.SQLITE_CONSTRAINT_TRIGGER
+
+        with pytest.raises(sqlite3.IntegrityError) as caught:
+            db._execute_write(
+                lambda _conn: (_ for _ in ()).throw(contradictory)
+            )
+
+        assert caught.value is contradictory
+        assert db._structural_corruption_error is None
+        assert not _active_structural_quarantine_path(db.db_path).exists()
+
+    def test_unscoped_corruption_latches_canonical_writes_closed(self, db):
+        db.create_session("s1", source="test")
+
+        def _structural_corruption(_conn):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        with pytest.raises(sqlite3.DatabaseError, match="disk image is malformed"):
+            db._execute_write(_structural_corruption)
+
+        called = False
+
+        def _later_write(_conn):
+            nonlocal called
+            called = True
+
+        with pytest.raises(sqlite3.DatabaseError, match="canonical writes disabled"):
+            db._execute_write(_later_write)
+        assert called is False
+
+    def test_structural_quarantine_spans_handles_restarts_and_generations(
+        self, tmp_path
+    ):
+        db_path = tmp_path / "state.db"
+        first = SessionDB(db_path=db_path)
+        first.create_session("seed", source="test")
+        second = SessionDB(db_path=db_path)
+        try:
+            structural = sqlite3.DatabaseError("database disk image is malformed")
+            structural.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+            with pytest.raises(sqlite3.DatabaseError, match="disk image is malformed"):
+                first._execute_write(
+                    lambda _conn: (_ for _ in ()).throw(structural)
+                )
+
+            called = False
+
+            def _sibling_write(_conn):
+                nonlocal called
+                called = True
+
+            with pytest.raises(
+                sqlite3.DatabaseError, match="canonical writes disabled"
+            ):
+                second._execute_write(_sibling_write)
+            assert called is False
+        finally:
+            first.close()
+            second.close()
+
+        corrupt_generation = db_path.read_bytes()
+        with pytest.raises(sqlite3.DatabaseError, match="writable open refused"):
+            SessionDB(db_path=db_path)
+
+        replacement = tmp_path / "replacement.db"
+        raw = sqlite3.connect(replacement)
+        raw.execute("CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT)")
+        raw.commit()
+        raw.close()
+        os.replace(replacement, db_path)
+        assert _finalize_structural_repair(db_path)
+        repaired = SessionDB(db_path=db_path)
+        repaired.create_session("repaired", source="test")
+        repaired.close()
+
+        db_path.write_bytes(corrupt_generation)
+        with pytest.raises(sqlite3.DatabaseError, match="writable open refused"):
+            SessionDB(db_path=db_path)
+
+        report = hermes_state.repair_state_db_schema(db_path, backup=False)
+        assert report["repaired"] is True
+        reopened = SessionDB(db_path=db_path)
+        reopened.create_session("repaired-restored-generation", source="test")
+        reopened.close()
+
+    def test_quarantine_publication_precedes_waiting_sibling_write(self, tmp_path):
+        db_path = tmp_path / "state.db"
+        first = SessionDB(db_path=db_path)
+        first.create_session("seed", source="test")
+        second = SessionDB(db_path=db_path)
+        detector_entered = threading.Event()
+        release_detector = threading.Event()
+        sibling_started = threading.Event()
+        errors = []
+        sibling_callback_called = False
+
+        structural = sqlite3.DatabaseError("database disk image is malformed")
+        structural.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+
+        def _detect(_conn):
+            detector_entered.set()
+            assert release_detector.wait(timeout=5)
+            raise structural
+
+        def _run_detector():
+            try:
+                first._execute_write(_detect)
+            except sqlite3.DatabaseError as exc:
+                errors.append(exc)
+
+        def _sibling_write(_conn):
+            nonlocal sibling_callback_called
+            sibling_callback_called = True
+
+        def _run_sibling():
+            sibling_started.set()
+            try:
+                second._execute_write(_sibling_write)
+            except sqlite3.DatabaseError as exc:
+                errors.append(exc)
+
+        detector = threading.Thread(target=_run_detector)
+        sibling = threading.Thread(target=_run_sibling)
+        try:
+            detector.start()
+            assert detector_entered.wait(timeout=5)
+            sibling.start()
+            assert sibling_started.wait(timeout=5)
+            release_detector.set()
+            detector.join(timeout=5)
+            sibling.join(timeout=5)
+            assert not detector.is_alive()
+            assert not sibling.is_alive()
+            assert sibling_callback_called is False
+            assert len(errors) == 2
+            assert any("canonical writes disabled" in str(exc) for exc in errors)
+        finally:
+            release_detector.set()
+            detector.join(timeout=5)
+            sibling.join(timeout=5)
+            first.close()
+            second.close()
+
+    def test_quarantine_authority_is_shared_across_path_aliases(self, tmp_path):
+        db_path = tmp_path / "state.db"
+        alias = tmp_path / "state-alias.db"
+        first = SessionDB(db_path=db_path)
+        first.create_session("seed", source="test")
+        try:
+            os.symlink(db_path, alias)
+        except OSError as exc:
+            first.close()
+            pytest.skip(f"file symlinks unavailable: {exc}")
+        second = SessionDB(db_path=alias)
+        try:
+            structural = sqlite3.DatabaseError("database disk image is malformed")
+            structural.sqlite_errorcode = sqlite3.SQLITE_CORRUPT
+            with pytest.raises(sqlite3.DatabaseError, match="disk image is malformed"):
+                first._execute_write(
+                    lambda _conn: (_ for _ in ()).throw(structural)
+                )
+
+            called = False
+
+            def _alias_write(_conn):
+                nonlocal called
+                called = True
+
+            with pytest.raises(
+                sqlite3.DatabaseError, match="canonical writes disabled"
+            ):
+                second._execute_write(_alias_write)
+            assert called is False
+        finally:
+            first.close()
+            second.close()
+
+    def test_quarantine_retirement_failure_is_reported(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "state.db"
+        marker = _active_structural_quarantine_path(db_path)
+        marker.write_text("{}", encoding="utf-8")
+        real_unlink = type(marker).unlink
+
+        def _deny_active_marker(path, *args, **kwargs):
+            if path == marker:
+                raise PermissionError("denied")
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(type(marker), "unlink", _deny_active_marker)
+        assert _retire_active_structural_quarantine(db_path) is False
+        assert marker.exists()
 
     def test_structural_corruption_propagates_without_live_fts_mutation(
         self, db, tmp_path, monkeypatch
