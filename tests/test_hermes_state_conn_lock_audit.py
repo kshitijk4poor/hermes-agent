@@ -30,6 +30,10 @@ _ALLOWED_UNLOCKED_FNS = frozenset({
     "__init__",
     "_connect_and_init",
     "_connect_and_init_with_lock_patience",
+    # Lock-audited helper: documented caller contract requires self._lock
+    # (held via BEGIN IMMEDIATE body or an explicit with self._lock: at the
+    # _has_fts_corruption_evidence call sites).
+    "_integrity_diagnostics_locked",
 })
 
 

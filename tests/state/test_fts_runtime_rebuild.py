@@ -324,6 +324,12 @@ class TestRuntimeFtsRebuild:
             )
         )
 
+    def test_generic_malformed_write_fails_closed(self, db, monkeypatch):
+        db.create_session("s1", source="test")
+        monkeypatch.setattr(
+            db, "rebuild_fts", lambda: pytest.fail("must not rebuild FTS")
+        )
+
         def _structural_corruption(_conn):
             raise sqlite3.DatabaseError("database disk image is malformed")
 

@@ -141,6 +141,9 @@ class TestConcurrentReadersDoNotRaceTheWriter:
             # are drained. Not reachable concurrently with writers.
             "__init__", "_connect_and_init",
             "_connect_and_init_with_lock_patience", "close",
+            # Lock-audited helper: caller contract requires self._lock held
+            # (see _has_fts_corruption_evidence call sites).
+            "_integrity_diagnostics_locked",
         }
 
         def is_lock_with(node):

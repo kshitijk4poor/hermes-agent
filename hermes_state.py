@@ -6048,23 +6048,23 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
                 # same guarantee. First try the cheap in-place repair. If that
                 # one-shot path is unavailable or corruption recurs, detach the
                 # derived indexes and retry against the canonical tables.
+                #
+                # Structural latch first: once the inner BEGIN IMMEDIATE
+                # handler classified this failure as unscoped structural
+                # corruption it already ran the integrity probe and published
+                # the durable quarantine — re-entering the FTS recovery
+                # ladder would only repeat the expensive integrity_check and
+                # rewrite the marker.
+                if self._structural_corruption_error is not None:
+                    raise
                 if self._try_runtime_fts_rebuild(exc):
                     continue
                 if self._structural_corruption_error is not None:
                     raise
                 if self._enter_fts_fail_open(exc):
                     continue
-                if (
-                    _has_structural_corruption_provenance(exc)
-                    and self._structural_corruption_error is None
-                ):
+                if _has_structural_corruption_provenance(exc):
                     self._quarantine_structural_corruption(exc)
-                    logger.critical(
-                        "state.db reported structural corruption (%s); canonical "
-                        "writes are disabled for this database generation until "
-                        "offline repair.",
-                        exc,
-                    )
                 raise
             except sqlite3.Error as exc:
                 # Catch-all for builds that surface 'no more rows available'
@@ -6094,6 +6094,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         """Latch and publish structural corruption without trusting state.db."""
         reason = str(exc)
         self._structural_corruption_error = reason
+        logger.critical(
+            "state.db reported unscoped or mixed structural corruption (%s); "
+            "canonical writes are disabled for this database generation until "
+            "offline repair.",
+            exc,
+        )
         try:
             _record_structural_quarantine(
                 self.db_path, self._db_generation, reason
@@ -6176,14 +6182,13 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             return False
         diagnostic_limit = 100
         try:
-            lock_context = contextlib.nullcontext() if lock_held else self._lock
-            with lock_context:
-                diagnostics = [
-                    str(row[0]).lower()
-                    for row in self._conn.execute(
-                        f"PRAGMA integrity_check({diagnostic_limit})"
-                    ).fetchall()
-                ]
+            if lock_held:
+                diagnostics = self._integrity_diagnostics_locked(diagnostic_limit)
+            else:
+                with self._lock:
+                    diagnostics = self._integrity_diagnostics_locked(
+                        diagnostic_limit
+                    )
         except sqlite3.Error:
             return False
         # SQLite returns at most N diagnostics. Reaching the requested cap is
@@ -6200,6 +6205,21 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
             and any(table in diagnostic for table in self._FTS_TABLES)
             for diagnostic in diagnostics
         )
+
+    def _integrity_diagnostics_locked(self, limit: int) -> List[str]:
+        """Run ``PRAGMA integrity_check`` on the writer connection.
+
+        Caller must hold ``self._lock`` (enumerated in the writer-conn lock
+        audits: reached from ``_has_fts_corruption_evidence`` either inside
+        an already-locked ``BEGIN IMMEDIATE`` body or under an explicit
+        ``with self._lock:``).
+        """
+        return [
+            str(row[0]).lower()
+            for row in self._conn.execute(
+                f"PRAGMA integrity_check({limit})"
+            ).fetchall()
+        ]
 
     def _foreign_state_db_holders(self) -> List[Tuple[int, str]]:
         """Return foreign processes holding this DB or its WAL sidecars.
@@ -6389,12 +6409,6 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         if not self._has_fts_corruption_evidence(exc):
             if _has_structural_corruption_provenance(exc):
                 self._quarantine_structural_corruption(exc)
-                logger.critical(
-                    "state.db reported unscoped or mixed structural corruption "
-                    "(%s); canonical writes are disabled for this database "
-                    "generation until offline repair.",
-                    exc,
-                )
             return False
         # Set the one-shot flag before the foreign-holder check: even when
         # the rebuild is skipped, the fail-open path that follows persists
