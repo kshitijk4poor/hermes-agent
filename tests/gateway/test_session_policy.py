@@ -35,3 +35,22 @@ def test_policy_selects_surface_and_isolates_cwd(tmp_path):
                    {'provider': 'custom'}, {'skills': ['x']}, {'toolsets': ['desktop_ui'], 'source': 'cli'}):
         with pytest.raises(RuntimeStoreError, match='invalid_params'):
             build_policy(params, {})
+
+
+def test_launch_policy_reaches_real_turn_runner(tmp_path):
+    import json
+    from pathlib import Path
+    import subprocess
+    import sys
+    repo = Path(__file__).resolve().parents[2]
+    home, state = tmp_path / 'home', tmp_path / 'state'
+    home.mkdir()
+    state.mkdir()
+    env = {k: os.environ[k] for k in ('PATH', 'SYSTEMROOT', 'LANG', 'TZ') if k in os.environ}
+    env.update(HOME=str(home), USERPROFILE=str(home), HERMES_HOME=str(state), PYTHONPATH=str(repo))
+    result = subprocess.run([sys.executable, str(Path(__file__).parent / 'fixtures' / 'session_policy_peer.py')],
+                            cwd=repo, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=130)
+    assert result.returncode == 0, result.stdout + '\n' + result.stderr
+    receipt = json.loads((state / 'policy-receipt.json').read_text())
+    assert receipt['cwd_effects'] and receipt['same_agents'] and receipt['no_spill']
+    print(json.dumps(receipt))

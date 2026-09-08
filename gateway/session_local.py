@@ -22,6 +22,7 @@ class LocalSessionAdapter(BasePlatformAdapter):
         super().__init__(PlatformConfig(enabled=True), Platform.LOCAL)
         self.authority = authority
         self.sources = {}
+        self.policies = {}
 
     def authorize_source(self, source):
         saved = self.sources.get(source.chat_id)
@@ -82,11 +83,9 @@ def create_local_session(authority, actor, params):
         raise RuntimeStoreError('profile_mismatch')
     if 'session:create' not in actor.capabilities:
         raise RuntimeStoreError('permission_denied')
-    if set(params) - {'request_id', 'source'}:
-        raise RuntimeStoreError('invalid_params')
-    # LOCAL maps to CLI policy in the existing TurnRunner; do not label this GUI.
-    if params.get('source', 'cli') != 'cli':
-        raise RuntimeStoreError('invalid_params')
+    from gateway.session_policy import build_policy
+    from gateway.run import _load_gateway_config
+    policy = build_policy(params, _load_gateway_config())
     request_id = params.get('request_id', uuid.uuid4().hex)
     if not isinstance(request_id, str) or not request_id or len(request_id) > 256:
         raise RuntimeStoreError('invalid_params')
@@ -99,10 +98,14 @@ def create_local_session(authority, actor, params):
     # Stable route lets the persisted SessionStore recover a lost create ACK.
     identity = json.dumps([authority.profile_id, actor.subject, request_id], separators=(',', ':'))
     chat_id = 'local-' + hashlib.sha256(identity.encode()).hexdigest()
+    existing = adapter.policies.get(chat_id)
+    if existing is not None and existing.request_json != policy.request_json:
+        raise RuntimeStoreError('invalid_params')
     source = SessionSource(platform=Platform.LOCAL, chat_id=chat_id,
                            user_id=actor.subject, chat_type='dm')
     ref = authority.register(source)
     source = authority.sessions[ref.session_id].source
+    adapter.policies.setdefault(chat_id, policy)
     adapter.register_source(source)
     return ref
 
@@ -110,7 +113,8 @@ def create_local_session(authority, actor, params):
 def local_session_info(authority, ref):
     live = authority.sessions[ref.session_id]
     agent = authority.agent(ref)
-    return {'source': 'cli' if isinstance(authority.runner._adapter_for_source(live.source),
-                                        LocalSessionAdapter) else live.source.platform.value,
-            'model': getattr(agent, 'model', None), 'lazy': agent is None,
+    from gateway.session_policy import policy_for_source
+    policy = policy_for_source(authority.runner, live.source)
+    return {'source': policy.source if policy else live.source.platform.value,
+            'model': getattr(agent, 'model', policy.model if policy else None), 'lazy': agent is None,
             'profile_id': authority.profile_id}

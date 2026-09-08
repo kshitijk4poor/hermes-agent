@@ -868,6 +868,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         return final_response + "\n" + "\n".join(unique_tags)
 
     def run_sync(self):
+        from gateway.session_policy import policy_for_source, policy_scope
+        with policy_scope(policy_for_source(self._runner, self._ctx.source)):
+            return self._run_sync_scoped()
+
+    def _run_sync_scoped(self):
         """Executor-thread body of the turn; returns the gateway result dict.
 
         The turn message lives on the shared TurnContext (``ctx.message``) so ``_run_agent_inner`` sees
@@ -888,17 +893,17 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # session via contextvars (set_current_session_key / session context), and only the TUI slash-worker
         # *subprocess* exports HERMES_SESSION_KEY (from its own --session-key argv, a separate process) — so
         # removing this in-process gateway write does not affect any of them.
-        platform_key = "cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(runner, ctx.source)
+        platform_key = policy.platform if policy else ("cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value)
         combined_ephemeral = self._combined_ephemeral_prompt()
         max_iterations = _current_max_iterations()
         try:
             model, runtime_kwargs = runner._resolve_session_agent_runtime(
                 source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
             )
-            # Stashed by _resolve_session_agent_runtime when the primary's credentials failed and a
-            # fallback was resolved before any agent exists (#74349); one-shot per turn.
-            pending_fallback_notice = getattr(runner, "_pre_agent_fallback_notice", None)
-            runner._pre_agent_fallback_notice = None
+            if policy and policy.model:
+                model = policy.model
             logger.debug(
                 "run_agent resolved: model=%s provider=%s session=%s",
                 model, runtime_kwargs.get("provider"), ctx.session_key or "",

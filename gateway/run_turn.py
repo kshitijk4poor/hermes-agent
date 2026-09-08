@@ -1013,10 +1013,19 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         from agent.secret_scope import get_secret
         from gateway.display_config import resolve_display_setting, resolve_tool_progress
         from gateway.status_phrases import choose_status_phrase, resolve_status_phrase_catalog
-        user_config = _load_gateway_config()
-        platform_key = _platform_config_key(source.platform)
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(self, source)
+        user_config = policy.config() if policy else _load_gateway_config()
+        platform_key = policy.platform if policy else _platform_config_key(source.platform)
         enabled_toolsets, disabled_toolsets = self._resolve_turn_toolsets(user_config, source, platform_key)
-        adapter = self._delivery_adapter_for(source)
+        if policy:
+            enabled_toolsets = list(policy.toolsets)
+        adapter = self._adapter_for_source(source)
+        # display.platforms.<platform>.<key> → display.<key> → built-in platform defaults.
+        _display_cfg = user_config.get("display", {})
+        if not isinstance(_display_cfg, dict):
+            _display_cfg = {}
+
         # Tool preview length (0 = no limit) and friendly tool labels (default on), per-platform.
         for _setter, _setting, _default, _cast in (
             ("set_tool_preview_max_len", "tool_preview_length", 0, lambda v: int(v) if v else 0),
@@ -1668,7 +1677,9 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         _result_for_fb = turn_ctx.result_holder[0]
         if _agent is None or not hasattr(_agent, 'model') or (_result_for_fb and _result_for_fb.get("failed")):
             return
-        _cfg_model = _resolve_gateway_model()
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(self, turn_ctx.source)
+        _cfg_model = policy.model if policy and policy.model else _resolve_gateway_model()
         # Normalize as AIAgent.__init__ does (vendor prefix stripped on native providers), else the
         # cached agent is evicted every turn, destroying prompt caching.
         with suppress(Exception):
