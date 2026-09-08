@@ -10,6 +10,8 @@ def validate_action(operation, payload):
         raise RuntimeStoreError('invalid_params')
     if operation == 'delete' and not payload:
         return
+    if operation == 'import' and set(payload) == {'sessions'} and isinstance(payload['sessions'], list):
+        return
     required = {'rename': {'title'}, 'archive': {'archived'}}
     if operation == 'sidebar':
         valid = bool(payload) and not set(payload) - METADATA_FIELDS.keys()
@@ -20,8 +22,9 @@ def validate_action(operation, payload):
 
 
 def apply_action(db, conn, session_id, operation, payload):
-    if operation == 'delete':
-        return _delete(db, conn, session_id)
+    handlers = {'delete': _delete, 'import': _import}
+    if operation in handlers:
+        return handlers[operation](db, conn, session_id, payload)
     affected = set()
     result = {}
     for key, value in payload.items():
@@ -37,7 +40,7 @@ def apply_action(db, conn, session_id, operation, payload):
     return affected, result
 
 
-def _delete(db, conn, session_id):
+def _delete(db, conn, session_id, payload):
     from hermes_state_mutation_guards import require_idle, delete_targets
     targets = delete_targets(conn, session_id)
     require_idle(db, conn, targets)
@@ -54,3 +57,25 @@ def _delete(db, conn, session_id):
     db._delete_unreferenced_system_prompts(conn)
     return set(), {'deleted_ids': targets}
 
+
+def _import(db, conn, session_id, payload):
+    rows = payload['sessions']
+    if len(rows) > db._IMPORT_MAX_SESSIONS:
+        raise RuntimeStoreError('invalid_params')
+    normalized, errors = db._validate_import_payload(rows)
+    if errors or not normalized or session_id != normalized[0]['session']['id']:
+        raise RuntimeStoreError('invalid_params')
+    imported, skipped, parents = [], [], []
+    for item in normalized:
+        raw = item['session']
+        sid = raw['id']
+        if conn.execute('SELECT 1 FROM sessions WHERE id=?', (sid,)).fetchone():
+            skipped.append(sid)
+            continue
+        db._import_session_row(conn, raw, item['messages'], sid)
+        if raw.get('parent_session_id'):
+            parents.append((sid, raw['parent_session_id']))
+        imported.append(sid)
+    detached = db._attach_import_parents(conn, parents)
+    return set(imported), {'ok': True, 'imported': len(imported), 'skipped': len(skipped),
+        'imported_ids': imported, 'skipped_ids': skipped, 'detached': detached, 'errors': []}

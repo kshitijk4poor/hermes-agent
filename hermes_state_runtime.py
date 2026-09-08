@@ -207,10 +207,13 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
             if receipt['digest'] != digest:
                 raise RuntimeStoreError('admission_conflict')
             return receipt['result']
-        session = _session(conn, session_id)
-        if session['runtime_revision'] != expected_revision:
+        session = conn.execute('SELECT * FROM sessions WHERE id=?', (session_id,)).fetchone()
+        if session is None and operation != 'import':
+            raise RuntimeStoreError('not_found')
+        revision = session['runtime_revision'] if session else 0
+        if revision != expected_revision:
             raise RuntimeStoreError('revision_conflict')
-        if expected_generation is not None and session['runtime_generation'] != expected_generation:
+        if expected_generation is not None and (session is None or session['runtime_generation'] != expected_generation):
             raise RuntimeStoreError('stale_generation')
         affected, projection = apply_action(db, conn, session_id, operation, payload)
         conn.executemany('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?',
