@@ -111,7 +111,7 @@ def exclusive_maintenance(homes):
     """
     state = getattr(_maintenance, 'state', None)
     outermost = state is None or state[0] != os.getpid()
-    owner = ProfileOwnership() if outermost else state[1]
+    owner = state[1] if state is not None and not outermost else ProfileOwnership()
     previous = set(owner.homes)
     try:
         owner.reserve(homes)

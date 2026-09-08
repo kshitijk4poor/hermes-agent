@@ -52,15 +52,17 @@ def test_restore_refuses_live_authority_without_changing_data(tmp_path):
             await rpc(ws, 'prompt.submit', session_id=session, input_id='queued', text='FOLLOWER')
             before = rows()
             assert dict(before) == {'warm': 'terminal', 'started': 'started', 'queued': 'queued'}
+            import hashlib
+            bundle = [Path(str(home / 'state.db') + suffix) for suffix in ('', '-wal', '-shm')]
+            hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle if p.exists()}
             restored = restore_quick_snapshot(snapshot, hermes_home=home)
+            assert hashes == {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle if p.exists()}
             after = rows()
             print(json.dumps({'live_restore': restored, 'before': before, 'after': after}), flush=True)
             assert not restored and after == before
             # The real daemon still holds the source DB. Separate-output salvage
             # must not require stopping it or installing recovered runtime work.
-            import hashlib
             from hermes_cli.session_recovery import recover_session_database
-            bundle = [Path(str(home / 'state.db') + suffix) for suffix in ('', '-wal', '-shm')]
             hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle if p.exists()}
             report = recover_session_database(home / 'state.db', tmp_path / 'salvaged.db')
             assert report['verified'] and report['source_unchanged'], report
@@ -87,6 +89,8 @@ def test_restore_refuses_live_authority_without_changing_data(tmp_path):
         assert restore_quick_snapshot(snapshot, hermes_home=home)
         with daemon(root, home, env, barrier=False) as (_, restored_again):
             assert restored_again['authority_epoch'] > later_epoch
+            print(json.dumps({'offline_restore_restart_epochs': [old_epoch, later_epoch, restored_again['authority_epoch']],
+                              'restart_instance_changed': restored_again['instance_id'] != restarted['instance_id']}), flush=True)
     finally:
         peer.release.set()
         peer.shutdown()
@@ -146,10 +150,11 @@ def test_import_and_startup_exclude_each_other_before_publication(tmp_path, monk
     owner.reserve([home])
     try:
         before = (home / 'config.yaml').read_bytes(), (home / 'state.db').read_bytes()
-        restore()
-        assert results[-1][0] == 0 and 'maintenance refused' in results[-1][2][0]
-        assert before == ((home / 'config.yaml').read_bytes(), (home / 'state.db').read_bytes())
         import pytest
+        from gateway.runtime_ownership import OwnershipConflict
+        with pytest.raises(OwnershipConflict, match='maintenance refused'):
+            restore()
+        assert before == ((home / 'config.yaml').read_bytes(), (home / 'state.db').read_bytes())
         from argparse import Namespace
         monkeypatch.setenv('HERMES_HOME', str(home))
         def forbidden_revival(*args):

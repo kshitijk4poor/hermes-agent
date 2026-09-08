@@ -975,7 +975,7 @@ def _import_members(
     zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
 ) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
     """Reserve all affected profiles before publishing even the first config file."""
-    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
+    from gateway.runtime_ownership import exclusive_maintenance
     homes = {hermes_root}
     for member in members:
         rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
@@ -984,11 +984,11 @@ def _import_members(
             home = hermes_root / parts[0] / parts[1]
             if _is_within(home, hermes_root.resolve()):
                 homes.add(home)
-    try:
-        with exclusive_maintenance(homes):
-            return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
-    except OwnershipConflict as exc:
-        return 0, 0, [str(exc)], [], []
+        target = hermes_root / rel
+        if target.suffix == '.db' and _is_within(target, hermes_root.resolve()):
+            homes.update([target.absolute().parent, target.resolve().parent])
+    with exclusive_maintenance(homes):
+        return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
 
 
 def _import_members_exclusive(
@@ -1093,10 +1093,12 @@ def run_import(args) -> None:
         print(f"\nImporting {file_count} files ...")
         hermes_root.mkdir(parents=True, exist_ok=True)
         t0 = time.monotonic()
-        restored, restored_external, errors, skipped_runtime, db_shrunk = _import_members(
-            zf, members, prefix, hermes_root, file_count)
-        if not restored and errors:
-            _print_capped("\nImport refused or failed; no files restored:", errors, "  ")
+        from gateway.runtime_ownership import OwnershipConflict
+        try:
+            restored, restored_external, errors, skipped_runtime, db_shrunk = _import_members(
+                zf, members, prefix, hermes_root, file_count)
+        except OwnershipConflict as exc:
+            print(f"\nImport refused; no files restored: {exc}")
             sys.exit(1)
         elapsed = time.monotonic() - t0
         print(f"\nImport complete: {restored} files restored in {elapsed:.1f}s\n  Target: {display_hermes_home()}")
@@ -1760,46 +1762,37 @@ def _restore_quick_snapshot_exclusive(snapshot_id: str, home: Path) -> bool:
 
     with open(manifest_path, encoding="utf-8-sig") as f:
         meta = json.load(f)
-
-    restored = 0
+    snap_res, home_res = snap_dir.resolve(), home.resolve()
+    from gateway.runtime_ownership import exclusive_maintenance
+    homes = {home}
     for rel in meta.get("files", {}):
-        # Security: reject absolute paths and traversals in manifest entries
-        src = snap_dir / rel
-        try:
-            src.resolve().relative_to(snap_dir.resolve())
-        except ValueError:
-            logger.error("Manifest path traversal blocked: %s", rel)
-            continue
-
         dst = home / rel
-        try:
-            dst.resolve().relative_to(home.resolve())
-        except ValueError:
-            logger.error("Manifest path traversal blocked: %s", rel)
-            continue
-
-        if not src.exists():
-            continue
-
-        dst.parent.mkdir(parents=True, exist_ok=True)
-
-        try:
-            if dst.suffix == ".db":
-                # Restore through SQLite backup API so live connections
-                # (gateway, dashboard, another CLI session) see the
-                # restored data instead of continuing to serve stale
-                # cached pages from a replaced inode (issue #65942).
-                if not _safe_restore_db(src, dst):
-                    # Refused, failed, or source failed its integrity check:
-                    # dst left as it was. Count as a failure, not a restore.
-                    logger.error("Failed to restore %s: refused or source integrity check failed (see previous log)", rel)
-                    continue
-            else:
-                shutil.copy2(src, dst)
-            restored += 1
-        except (OSError, PermissionError) as exc:
-            logger.error("Failed to restore %s: %s", rel, exc)
-
+        if dst.suffix == '.db' and _is_within(dst, home_res):
+            homes.update([dst.absolute().parent, dst.resolve().parent])
+    with exclusive_maintenance(homes):
+        restored = 0
+        for rel in meta.get("files", {}):
+            src = snap_dir / rel
+            dst = home / rel
+            if not (_is_within(src, snap_res) and _is_within(dst, home_res)):
+                logger.error("Manifest path traversal blocked: %s", rel)
+                continue
+            if not src.exists():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                if dst.suffix == ".db":
+                    # Through the backup API so live connections see the restored data instead of
+                    # stale pages from a replaced inode (#65942).
+                    if not _safe_restore_db(src, dst):
+                        # Refused (live holder) or failed: destination untouched — a failure, not a restore.
+                        logger.error("Failed to restore %s: live-safe restore refused", rel)
+                        continue
+                else:
+                    shutil.copy2(src, dst)
+                restored += 1
+            except (OSError, PermissionError) as exc:
+                logger.error("Failed to restore %s: %s", rel, exc)
     logger.info("Restored %d files from snapshot %s", restored, snapshot_id)
     return restored > 0
 
