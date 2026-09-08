@@ -1,4 +1,4 @@
-import { enqueueQueuedPrompt } from '@/store/composer-queue'
+import { enqueueQueuedPrompt, serverOwnsComposerQueue } from '@/store/composer-queue'
 import { $sessions, resolveComposerSessionKey } from '@/store/session'
 import { $sessionStates } from '@/store/session-states'
 
@@ -36,7 +36,7 @@ export function queueKickoffIfSessionBusy({
 }: QueueIfBusyInput): 'busy' | 'idle' | 'queued' {
   const states = $sessionStates.get()
 
-  if (!isTargetSessionBusy(states, sessionId, foregroundBusy)) {
+  if (serverOwnsComposerQueue(sessionId) || !isTargetSessionBusy(states, sessionId, foregroundBusy)) {
     return 'idle'
   }
 

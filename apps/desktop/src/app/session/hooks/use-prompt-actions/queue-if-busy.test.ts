@@ -29,6 +29,12 @@ afterEach(() => {
   $sessionStates.set({})
 })
 
+it('leaves canonical busy kickoff admission to the submit pipeline instead of the local queue', () => {
+  $connection.set({ mode: 'local', wsUrl: 'ws://localhost/api/ws?native_dial=unminted' } as never)
+  expect(queueKickoffIfSessionBusy({ sessionId: 'runtime-a', text: 'expanded' })).toBe('idle')
+  expect(queue.getQueuedPrompts('stored-a')).toEqual([])
+})
+
 it('forwards kickoff identity to queue admission and leaves idle targets alone', () => {
   const enqueue = vi.spyOn(queue, 'enqueueQueuedPrompt')
   const input = { id: 'caller-kickoff', sessionId: 'runtime-a', text: 'expanded skill', displayText: '/work' }
