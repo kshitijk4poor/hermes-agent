@@ -42,7 +42,8 @@ def test_ordinary_daemon_slash_skill_uses_durable_fifo(tmp_path):
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
                PYTHONPATH=str(root), PYTHONUNBUFFERED='1',
-               OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
+               OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url,
+               HERMES_DASHBOARD_SESSION_TOKEN='owned-slash-negative')
     receipts = []
 
     def rows():
@@ -64,6 +65,9 @@ def test_ordinary_daemon_slash_skill_uses_durable_fifo(tmp_path):
 
             help_reply = await command(command='help')
             assert help_reply.get('result', {}).get('output'), help_reply
+            for read_command in ('commands', 'context', 'version', 'whoami'):
+                read_reply = await command(command=read_command)
+                assert read_reply.get('result', {}).get('output'), read_reply
             status = await command(command='status')
             assert sid in status['result']['output'], status
             for method, params in [('slash.exec', {'command': 'probe-quick TASK_ONE'}),
@@ -98,6 +102,14 @@ def test_ordinary_daemon_slash_skill_uses_durable_fifo(tmp_path):
                                    ({'command': 'approve'}, 'unsupported_command')]:
                 denied = await command(**params)
                 assert denied['error']['message'] == reason, denied
+            # A second valid credential is a different actor, not session ownership.
+            other_url = desc['api_origin'].replace('http:', 'ws:') + '/api/ws?token=owned-slash-negative'
+            async with connect(other_url) as other:
+                for method, payload in [('slash.exec', {'command': 'title stolen'}),
+                                        ('command.dispatch', {'name': 'title', 'arg': 'stolen'})]:
+                    denied = await rpc(other, method, session_id=sid, **payload)
+                    receipts.append(denied)
+                    assert denied.get('error', {}).get('message') == 'permission_denied', denied
             peer.release.set()
             async with asyncio.timeout(45):
                 while any(row[1] != 'terminal' for row in rows()):

@@ -22,6 +22,32 @@ publishes this state before `message.complete`, retaining the terminal event as 
 last event of that turn. Desktop translates both paths into its existing
 `pending_submissions` queue store.
 
+## Shared authority local slash commands
+
+Authenticated local sessions accept `slash.exec({session_id, command})` and
+`command.dispatch({session_id, name, arg})`. Both use the existing command registry
+and gateway handlers, without a legacy slash worker or second execution runtime.
+An optional `profile` selector must match the owning daemon's profile. Caller source
+and routing overrides are rejected; another authenticated actor cannot operate the
+session.
+
+Supported read commands are `/help`, `/commands`, `/status`, `/context`, `/version`,
+and `/whoami` (`session:read`). `/title` requires `session:control`, even for a query,
+and retains the existing busy rejection. Registry aliases work. Handler results use
+`{type: "exec", output}`.
+
+Skill names and configured quick-command aliases to supported commands or skills
+are resolved in the owner's profile. Skill resolution requires `session:submit` and
+returns `{type: "skill", name, message, display}`. Desktop/Ink send the expanded
+message through their normal identified `prompt.submit`; resolution is not an
+admission ACK. The authority's durable FIFO owns retries and execution, and skill
+content remains a user message without changing the cached system prefix.
+
+Other commands return `unsupported_command`: shell quick commands, plugin execution,
+bundles, configuration/runtime changes, lifecycle commands, and approval/secret
+slash shortcuts are not exposed. Existing generation-bound approval and interrupt
+RPCs remain separate. Catalog discovery is broader than this reviewed execution set.
+
 ## Shared authority setup readiness
 
 Authenticated local clients can call `setup.status` and `setup.runtime_check` before
