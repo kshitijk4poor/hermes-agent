@@ -121,6 +121,8 @@ _DEDUP_EXTRA_FIELDS = {
 def _notification_event_dedup_key(evt: dict) -> tuple:
     """UI-emission identity for a process notification event."""
     evt_type = evt.get("type", "completion")
+    if evt_type in {"watch_match", "watch_disabled"} and evt.get("event_id"):
+        return (evt.get("session_id", ""), evt_type, evt["event_id"])
     if evt_type == "async_delegation":
         # No process session_id: else every completion keys as ("", "async_delegation") and the second is suppressed forever.
         # An early per-task failure notice must not collapse with the batch's final result (nor with a sibling's notice).
