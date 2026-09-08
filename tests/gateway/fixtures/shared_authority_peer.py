@@ -31,7 +31,7 @@ class ModelPeer(BaseHTTPRequestHandler):
         if 'BLOCK_FIFO' in json.dumps(last):
             self.server.blocked.set()
             assert self.server.release.wait(15), 'fixture model gate timed out'
-        self.server.requests.append(request)
+        self.server.requests.append(request) if 'messages' in request else self.server.metadata_requests.append(request)
         base = {"id": "chatcmpl-local", "model": "local-wire-stub", "created": 1}
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream" if request.get("stream") else "application/json")
@@ -61,11 +61,13 @@ async def probe():
     from hermes_cli.dashboard_auth.ws_tickets import mint_ticket
     from tui_gateway import server
     from run_agent import AIAgent
+    from shared_authority_recovery import prepare_crash, recover_probe, verify_envelope_guards
 
     class CaptureAdapter(BasePlatformAdapter):
         def __init__(self):
             super().__init__(PlatformConfig(enabled=True, token="local-fixture"), Platform.TELEGRAM)
             self.sent = []
+            self.deliveries = []
 
         async def connect(self, *, is_reconnect=False):
             return True
@@ -74,6 +76,7 @@ async def probe():
             pass
 
         async def send(self, chat_id, content, reply_to=None, metadata=None):
+            self.deliveries.append({'chat_id': chat_id, 'content': content, 'reply_to': reply_to, 'metadata': metadata})
             self.sent.append(content)
             return SendResult(success=True, message_id=str(len(self.sent)))
 
@@ -95,6 +98,9 @@ async def probe():
     runner.adapters[Platform.TELEGRAM] = adapter
     adapter.set_message_handler(runner._handle_message)
     source = SessionSource(platform=Platform.TELEGRAM, chat_id="fixture-chat", chat_type="dm", user_id="fixture-user")
+    if os.environ.get('AUTHORITY_PROBE_MODE') == 'recover':
+        await recover_probe(runner, adapter, source, peer)
+        return
     event = MessageEvent(text="MESSAGING_WARM", source=source, message_id="warm-1")
     await adapter.handle_message(event)
     async with asyncio.timeout(35):
@@ -176,6 +182,14 @@ async def probe():
                             await asyncio.sleep(0.01)
                     assert not adapter._pending_messages, 'second frontend queue owns accepted work'
                     receipt['durable_native_fifo'] = True
+                    pending = list_session_admissions(runner.session_authority.db, session_id=entry.session_id)
+                    queued_row = next(r for r in pending if r['request_id'] == 'fifo-2')
+                    envelope = queued_row['payload'].get('native_text_v1')
+                    assert envelope is not None, 'ACK has no durable native source envelope'
+                    assert envelope['source']['user_id'] == 'fixture-user'
+                    assert envelope['route'] == entry.session_key
+                    queued_event.text = 'MUTATED_AFTER_ACK'
+                    queued_event.source = SessionSource(platform=Platform.TELEGRAM, chat_id='wrong-chat', user_id='foreign')
                 finally:
                     peer.release.set()
                     await queued_task
@@ -190,6 +204,10 @@ async def probe():
                 assert [r['request_id'] for r in rows] == ['warm-1', 'ws-1', 'fifo-1', 'fifo-2'], rows
                 assert all(r['status'] == 'terminal' and r['outcome'] == 'completed' for r in rows), rows
                 assert runner._cached_agent_for(entry.session_key) is warm_agent
+                last_users = [next((m.get('content', '') for m in reversed(r.get('messages', []))
+                                   if m['role'] == 'user'), '') for r in peer.requests]
+                assert 'FIFO_SECOND' in json.dumps(last_users[-1]), last_users
+                assert 'MUTATED_AFTER_ACK' not in json.dumps(last_users), last_users
                 assert any('LOCAL_ACK_WS_SHARED' in text for text in adapter.sent), adapter.sent
                 before = len(rows)
                 rejected = MessageEvent(text='UNAUTHORIZED', message_id='denied', source=SessionSource(
@@ -198,6 +216,9 @@ async def probe():
                 assert len(list_session_admissions(runner.session_authority.db,
                            session_id=entry.session_id, pending_only=False)) == before
                 receipt['admissions'] = rows
+                await verify_envelope_guards(runner, source)
+                if os.environ.get('AUTHORITY_PROBE_MODE') == 'crash':
+                    await prepare_crash(runner, adapter, source, peer)
     finally:
         Path(os.environ["HERMES_HOME"], "receipt.json").write_text(json.dumps(receipt, indent=2))
         Path(os.environ["HERMES_HOME"], "frames.json").write_text(json.dumps(frames, indent=2))
@@ -210,6 +231,7 @@ async def probe():
 if __name__ == "__main__":
     peer = ThreadingHTTPServer(("127.0.0.1", 0), ModelPeer)
     peer.requests = []
+    peer.metadata_requests = []
     peer.blocked = threading.Event()
     peer.release = threading.Event()
     threading.Thread(target=peer.serve_forever, daemon=True).start()
@@ -218,7 +240,7 @@ if __name__ == "__main__":
                       TELEGRAM_ALLOWED_USERS="fixture-user")
     Path(os.environ["HERMES_HOME"], "config.yaml").write_text(
         f"model:\n  default: local-wire-stub\n  provider: custom\n  base_url: {base_url}\n"
-        f"terminal:\n  cwd: {os.environ['HERMES_HOME']}\n")
+        f"auxiliary:\n  title_generation:\n    enabled: false\nterminal:\n  cwd: {os.environ['HERMES_HOME']}\n")
     status = 0
     try:
         asyncio.run(probe())

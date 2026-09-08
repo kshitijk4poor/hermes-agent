@@ -39,7 +39,7 @@ class SessionAuthority:
         self.sessions = {}
         self.waiters = {}
         self.events = {}
-        self.native_events = {}
+        self.native_waiters = set()
 
     def authorize(self, actor, ref, capability):
         if actor.profile_id != self.profile_id or ref.profile_id != self.profile_id:
@@ -97,6 +97,58 @@ class SessionAuthority:
                                 row['seq'], row['status'], row['outcome'],
                                 row['owner_epoch'] or self.epoch, row['generation'])
 
+    def _schedule(self, ref):
+        live = self.sessions[ref.session_id]
+        if live.task is None or live.task.done():
+            live.task = asyncio.create_task(self._drain(ref))
+
+    def admit_native(self, event):
+        """Trusted adapter entry; commit the snapshot before yielding or ACKing."""
+        import json
+        from gateway.session_envelope import snapshot_native, restore_native
+        payload = snapshot_native(self.runner, event)
+        source = restore_native(payload).source
+        ref = self.register(source)
+        identity = json.dumps([source.profile, source.platform.value, source.chat_id,
+                               source.thread_id, source.user_id], separators=(',', ':'))
+        row = admit_session_input(self.db, epoch=self.epoch, principal_id='messaging:' + identity,
+                                  session_id=ref.session_id,
+                                  request_id=str(event.message_id or uuid.uuid4().hex), payload=payload)
+        event._gateway_accepted = True
+        self._schedule(ref)
+        return self._receipt(row)
+
+    async def recover_native_sessions(self, bindings):
+        """Bind only server-observed native routes; unknown work stays paused."""
+        from collections import Counter
+        from gateway.session_envelope import check_native_route
+        bindings = list(bindings)
+        counts = Counter(sid for sid, _, _ in bindings)
+        results = {}
+        for sid, available_source, adapter in bindings:
+            try:
+                if counts[sid] != 1:
+                    raise RuntimeStoreError('admission_conflict')
+                rows = list_session_admissions(self.db, session_id=sid, pending_only=False)
+                native = [row for row in rows if 'native_text_v1' in row['payload']]
+                if not native:
+                    raise RuntimeStoreError('not_found')
+                source, route = check_native_route(self.runner, native[-1]['payload'], sid,
+                                                    available_source, adapter)
+                for row in rows:
+                    if row['status'] == 'queued':
+                        if 'native_text_v1' not in row['payload']:
+                            raise RuntimeStoreError('invalid_params')
+                        check_native_route(self.runner, row['payload'], sid, available_source, adapter)
+                self.sessions.setdefault(sid, LiveSession(source, route))
+                if any(row['status'] == 'unknown' for row in rows):
+                    raise RuntimeStoreError('unknown_execution')
+                self._schedule(SessionRef(self.profile_id, sid))
+                results[sid] = 'ready'
+            except RuntimeStoreError as exc:
+                results[sid] = exc.reason
+        return results
+
     async def submit(self, actor: Principal, request: Submission):
         self.authorize(actor, request.ref, 'session:submit')
         if request.intent != 'queue' or set(request.payload) != {'text'} or not isinstance(request.payload['text'], str):
@@ -135,7 +187,23 @@ class SessionAuthority:
     async def _drain(self, ref):
         from gateway.session_ingress import execute_admission
         live = self.sessions[ref.session_id]
-        while (row := claim_session_input(self.db, epoch=self.epoch, session_id=ref.session_id)) is not None:
+        while True:
+            try:
+                pending = list_session_admissions(self.db, session_id=ref.session_id)
+                if any(row['status'] == 'unknown' for row in pending):
+                    return
+                first = next((row for row in pending if row['status'] == 'queued'), None)
+                if first is not None and 'native_text_v1' in first['payload']:
+                    from gateway.session_envelope import check_native_route
+                    check_native_route(self.runner, first['payload'], ref.session_id, live.source,
+                                       self.runner._adapter_for_source(live.source))
+                row = claim_session_input(self.db, epoch=self.epoch, session_id=ref.session_id)
+            except RuntimeStoreError as exc:
+                import logging
+                logging.getLogger(__name__).warning('Session %s paused: %s', ref.session_id, exc.reason)
+                return
+            if row is None:
+                return
             admission_id = row['admission_id']
             try:
                 response = await execute_admission(self, ref, row)
