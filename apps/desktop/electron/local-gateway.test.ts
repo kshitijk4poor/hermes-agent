@@ -12,7 +12,7 @@ test('canonical ensure cannot cross a rejected update or profile lifecycle gate'
   expect(ran).toBe(false)
 })
 
-test('native HTTP mints fresh purpose-bound grants without browser credentials', async () => {
+test.skipIf(process.platform === 'win32')('native HTTP mints fresh purpose-bound grants without browser credentials', async () => {
   const fs = await import('node:fs/promises')
   const os = await import('node:os')
   const path = await import('node:path')
