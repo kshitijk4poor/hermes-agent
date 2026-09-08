@@ -327,6 +327,7 @@ Subcommands:
 | Subcommand | Description |
 |------------|-------------|
 | `run` | Run the gateway in the foreground. Recommended for WSL, Docker, and Termux. |
+| `ensure` | Discover or request a local session runtime without installing a service or replacing an existing owner. Emits JSON; see below. |
 | `start` | Start the installed systemd/launchd background service. |
 | `stop` | Stop the service (or foreground process). |
 | `restart` | Restart the service. |
@@ -362,6 +363,45 @@ stopped.
 :::tip WSL users
 Use `hermes gateway run` instead of `hermes gateway start` — WSL's systemd support is unreliable. Wrap it in tmux for persistence: `tmux new -s hermes 'hermes gateway run'`. See [WSL FAQ](./faq.md#wsl-gateway-keeps-disconnecting-or-hermes-gateway-start-fails) for details.
 :::
+
+### Local runtime discovery and startup
+
+```bash
+hermes gateway ensure --json --timeout 30
+```
+
+`ensure` targets the active profile and emits one JSON object with `state`,
+`reason_code`, and `endpoint`. The endpoint is present only when authenticated
+local discovery reports compatible session readiness. Output contains no bootstrap
+tickets or bearer credentials. JSON is also the default without `--json`.
+
+The timeout is a finite, positive total deadline in seconds (default `30`). An
+existing reservation or starting owner is waited for, not replaced. When absence
+is established, an existing service takes precedence; an unmanaged process is
+requested only when no service is found. This command never installs or rewrites
+service definitions, enables linger, elevates privileges, or clears update fences.
+Ambiguous or inaccessible ownership fails closed.
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Compatible session runtime ready. |
+| `2` | Invalid invocation, including invalid timeout or unknown arguments. |
+| `3` | Incompatible runtime protocol or capabilities. |
+| `4` | Authorization or profile mismatch. |
+| `5` | Deadline reached; startup may still be pending. |
+| `6` | Runtime draining or update in progress. |
+| `7` | Inaccessible runtime, conflicting supervisor, or startup failure. |
+
+A service start command or process creation is not a readiness acknowledgement.
+A gateway that has not exposed the session-authority capability can remain
+`starting` until the deadline even while its messaging adapters work. Do not treat
+exit `5` as permission to replace that owner. On Windows, a Startup-folder-only
+installation requires login rather than an unmanaged fallback; failure to detach
+from a parent job is reported instead of retried with weaker process isolation.
+
+Service persistence is separately opt-in during setup. Imports and noninteractive
+setup do not install a missing service based on an imported preference. See
+[optional service installation](../developer-guide/gateway-internals.md#optional-service-installation).
 
 ## `hermes lsp`
 
