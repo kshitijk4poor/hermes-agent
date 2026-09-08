@@ -377,6 +377,16 @@ class TestWebServerEndpoints:
         finally:
             verify.close()
 
+        # The existing owner maintenance path still honors the configured sweep.
+        _web_server_sessions._maybe_auto_archive_for_profile(None)
+        verify = SessionDB(db_path=db_path, read_only=True)
+        try:
+            assert verify.get_session("stale")["archived"] == 1
+            assert verify.get_session("fresh")["archived"] == 0
+            assert verify.get_meta("last_auto_archive")
+        finally:
+            verify.close()
+
     def test_get_sessions_missing_store_is_unavailable_without_creation(self):
         from hermes_constants import get_hermes_home
 
