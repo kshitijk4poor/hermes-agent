@@ -91,7 +91,15 @@ async function privateNode(file: string, kind: 'directory' | 'socket' | 'file') 
   if (!valid || node.uid !== process.getuid?.() || (node.mode & 0o077)) {throw new Error('Unsafe gateway control path')}
 }
 
-export async function mintLocalGatewayTicket(endpoint: GatewayEndpoint): Promise<string> {
+export async function nativeGatewayHttpHeaders(descriptor: { gatewayEndpoint: GatewayEndpoint; baseUrl: string }, url: string) {
+  if (new URL(url).origin !== descriptor.gatewayEndpoint.api_origin || descriptor.baseUrl !== descriptor.gatewayEndpoint.api_origin) {
+    throw new Error('Native gateway HTTP origin mismatch')
+  }
+
+  return { 'X-Hermes-Gateway-Ticket': await mintLocalGatewayTicket(descriptor.gatewayEndpoint, 'native-http') }
+}
+
+export async function mintLocalGatewayTicket(endpoint: GatewayEndpoint, purpose: 'interactive' | 'native-http' = 'interactive'): Promise<string> {
   // Named-pipe bootstrap needs the same server-identity validation as Python's
   // native bootstrap. Refuse rather than silently use an unauthenticated pipe.
   if (process.platform === 'win32') {throw new Error('Native gateway bootstrap on Windows requires the validated named-pipe client')}
@@ -120,7 +128,7 @@ export async function mintLocalGatewayTicket(endpoint: GatewayEndpoint): Promise
     const deadline = setTimeout(() => socket.destroy(new Error('Gateway ticket deadline')), 5000)
     socket.on('error', () => reject(new Error('Gateway ticket bootstrap failed')))
     socket.on('close', () => { clearTimeout(deadline); reject(new Error('Gateway ticket connection closed')) })
-    socket.on('connect', () => socket.write(JSON.stringify({ protocol: 1, id: 1, verb: 'session-ticket', params: { profile_id: home, instance_id: endpoint.instance_id, purpose: 'interactive' } }) + '\n'))
+    socket.on('connect', () => socket.write(JSON.stringify({ protocol: 1, id: 1, verb: 'session-ticket', params: { profile_id: home, instance_id: endpoint.instance_id, purpose } }) + '\n'))
     socket.on('data', chunk => {
       buffer += chunk.toString()
 
