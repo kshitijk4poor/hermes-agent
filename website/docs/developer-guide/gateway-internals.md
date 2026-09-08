@@ -8,6 +8,15 @@ description: "How the messaging gateway boots, authorizes users, routes sessions
 
 The messaging gateway is the long-running process that connects Hermes to 20+ external messaging platforms through a unified architecture.
 
+## Shared authority pending-input snapshots
+
+`session.resume` returns each pending admission with its original `input_id` and
+committed public `text`, alongside the canonical `admission_id`, sequence and status.
+This includes native messaging inputs and local-client inputs. Snapshots do not expose
+private native routing, source, or authorization envelopes. Submission and receipt
+ACKs retain their existing shape. Clients must use `admission_id` for cancellation
+and receipt queries rather than assuming it equals the original input ID.
+
 ## Shared authority setup readiness
 
 Authenticated local clients can call `setup.status` and `setup.runtime_check` before

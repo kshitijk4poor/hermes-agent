@@ -197,6 +197,13 @@ async def probe():
                     assert envelope is not None, 'ACK has no durable native source envelope'
                     assert envelope['source']['user_id'] == 'fixture-user'
                     assert envelope['route'] == entry.session_key
+                    await ws.send(json.dumps({'jsonrpc': '2.0', 'id': 'queue-snapshot',
+                        'method': 'session.resume', 'params': {'session_id': entry.session_id}}))
+                    projected = (await until(lambda f: f.get('id') == 'queue-snapshot'))['result']['pending']
+                    visible = next(r for r in projected if r['admission_id'] == queued_row['admission_id'])
+                    assert visible['text'] == 'FIFO_SECOND' and visible['input_id'] == 'fifo-2', visible
+                    assert not {'payload', 'native_text_v1', 'source', 'principal_id'} & visible.keys(), visible
+                    receipt['queue_snapshot_text'] = visible['text']
                     queued_event.text = 'MUTATED_AFTER_ACK'
                     queued_event.source = SessionSource(platform=Platform.TELEGRAM, chat_id='wrong-chat', user_id='foreign')
                 finally:

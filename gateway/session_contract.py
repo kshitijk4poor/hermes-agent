@@ -58,13 +58,19 @@ class AdmissionReceipt:
 
 
 @dataclass(frozen=True)
+class PendingAdmission(AdmissionReceipt):
+    input_id: str
+    text: str
+
+
+@dataclass(frozen=True)
 class SubscriptionSnapshot:
     subscription_id: str
     handle: SessionHandle
     replay_epoch: str
     last_sequence: int
     history: tuple[JsonObject, ...]
-    pending: tuple[AdmissionReceipt, ...]
+    pending: tuple[PendingAdmission, ...]
     prompts: tuple[JsonObject, ...]
 
 

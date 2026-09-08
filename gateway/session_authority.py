@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import uuid
 
 from gateway.session_contract import (
-    AdmissionReceipt, Principal, SessionHandle, SessionRef, Submission,
+    AdmissionReceipt, PendingAdmission, Principal, SessionHandle, SessionRef, Submission,
     SubscriptionSnapshot,
 )
 from gateway.session_events import SessionEvents
@@ -108,7 +108,7 @@ class SessionAuthority:
             epoch, sequence = live.event_stream.watermark()
             return SubscriptionSnapshot(subscription, handle, epoch,
                                         sequence, tuple(self.db.get_messages_as_conversation(ref.session_id)),
-                                        tuple(self._receipt(r) for r in list_session_admissions(
+                                        tuple(self._pending_receipt(r) for r in list_session_admissions(
                                             self.db, session_id=ref.session_id)), prompts)
 
     async def detach(self, actor, subscription_id):
@@ -127,6 +127,15 @@ class SessionAuthority:
         return AdmissionReceipt(row['admission_id'], SessionRef(self.profile_id, row['target_session_id']),
                                 row['seq'], row['status'], row['outcome'],
                                 row['owner_epoch'] or self.epoch, row['generation'])
+
+    def _pending_receipt(self, row):
+        # Only public input text crosses the viewer boundary, never the
+        # private native envelope's routing or authorization provenance.
+        payload = row['payload']
+        text = payload.get('text')
+        if text is None:
+            text = payload.get('native_text_v1', {}).get('event', {}).get('text', '')
+        return PendingAdmission(**vars(self._receipt(row)), input_id=row['request_id'], text=text)
 
     def _schedule(self, ref):
         live = self.sessions[ref.session_id]
