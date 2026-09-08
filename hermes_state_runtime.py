@@ -209,9 +209,8 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
         if session['runtime_revision'] != expected_revision:
             raise RuntimeStoreError('stale_revision')
         if operation == 'rename':
-            db._set_session_title_in_transaction(
+            affected = db._set_session_title_in_transaction(
                 conn, session_id, payload['title'], source=db.TITLE_SOURCE_USER)
-            affected = [session_id]
         else:
             affected = db._set_lineage_column_in_transaction(
                 conn, 'archived', session_id, int(payload['archived']))

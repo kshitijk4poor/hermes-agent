@@ -24,6 +24,16 @@ def test_mutation_receipt_fences_replay_revision_and_epoch(tmp_path, operation, 
             mutate(db, **{**args, 'expected_revision': 1})
         with pytest.raises(rt.RuntimeStoreError, match='stale_revision'):
             mutate(db, **{**args, 'request_id': 'other'})
+        peer = SessionDB(db_path=tmp_path / 'state.db')
+        try:
+            with pytest.raises(rt.RuntimeStoreError, match='stale_revision'):
+                mutate(peer, **{**args, 'request_id': 'peer'})
+            later = mutate(peer, **{**args, 'request_id': 'peer', 'expected_revision': 1})
+            assert later['revision'] == 2
+            assert mutate(db, **args) == result
+            assert db.get_session('s')['runtime_revision'] == 2
+        finally:
+            peer.close()
         new_epoch = rt.begin_runtime_epoch(db, instance_id='replacement')
         with pytest.raises(rt.RuntimeStoreError, match='stale_epoch'):
             mutate(db, **args)
@@ -65,6 +75,13 @@ def test_mutation_rules_and_receipt_failure_are_atomic(tmp_path, operation, payl
             mutate(db, **args)
             assert db.get_session_title('s') == 'New name'
             assert db.get_session_title_source('s') == db.TITLE_SOURCE_USER
+            db.end_session('s', end_reason='compression')
+            db.create_session('tip', source='test', parent_session_id='s')
+            mutate(db, **{**args, 'session_id': 'tip', 'request_id': 'transfer'})
+            assert db.get_session_title('s') is None
+            assert db.get_session_title('tip') == 'New name'
+            assert db.get_session('s')['runtime_revision'] == 2
+            assert db.get_session('tip')['runtime_revision'] == 1
         else:
             db.create_session('child', source='test', parent_session_id='s')
             db.end_session('s', end_reason='compression')
