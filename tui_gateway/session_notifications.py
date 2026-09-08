@@ -160,14 +160,13 @@ def _notif_log_failure(what: str, exc: BaseException) -> None:
     print(f"[tui_gateway] {what}: {type(exc).__name__}: {exc}", file=sys.stderr)
 
 
-def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwargs) -> None:
-    """message.start + _run_prompt_submit for a claimed (running=True) turn; releases on failure."""
+def _notif_submit(rid: str, sid: str, session: dict, text: str, what: str, **kwargs) -> bool:
+    """Only the execution gate can acknowledge a claimed notification turn."""
     try:
-        from gateway.warning_notifications import render_notification
-        with _session_profile_runtime_scope(session):
-            render_notification(lambda: _emit("message.start", sid), platform="tui",
-                                diagnostic=(kwargs.get("display_metadata") or {}).get("notification_category") == "diagnostic")
-        _run_prompt_submit(rid, sid, session, text, **kwargs)
+        accepted = _run_prompt_submit(rid, sid, session, text, **kwargs)
+        if not accepted:
+            _notif_release_turn(session)
+        return accepted
     except Exception as exc:
         _notif_log_failure(what, exc)
         _notif_release_turn(session)
@@ -467,18 +466,18 @@ def _background_notifications_off(session: dict) -> bool:
     return raw is False or str(raw or "").strip().lower() == "off"
 
 
+def _notif_defer_event(evt, claim, put=None):
+    from tools.async_delegation import defer_completion_delivery
+    from tools.process_registry import process_registry
+    if claim:
+        defer_completion_delivery(evt['delegation_id'], claim)
+    (put or process_registry.completion_queue.put)(evt)
+
+
 def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None:
     """Run the claimed (running=True) agent turn for one notification event."""
     from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
-    try:
-        claim = claim_event_delivery(evt, "tui-poller")
-    except Exception as exc:  # shared ledger busy/unreadable: the durable row stays pending and replays
-        _notif_log_failure("notification delivery claim failed", exc)
-        claim = None
-    if claim is None:
-        # Another consumer holds the durable row — a gateway sharing this home claims before it verifies
-        # the target. No turn will run, and nothing else clears ``running``: a busy session is exempt
-        # from the reaper, keeps its lease, and never reaches its bot mailbox again.
+    if (claim := claim_event_delivery(evt, "tui-poller")) is None:
         _notif_release_turn(session)
         return
     evt_type = evt.get("type")
@@ -495,7 +494,10 @@ def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None
     if diagnostic_process_event(evt):
         kwargs.setdefault("display_metadata", {})["notification_category"] = "diagnostic"
     try:
-        _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text, "notification poller dispatch failed", **kwargs)
+        if not _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
+                             "notification poller dispatch failed", **kwargs):
+            _notif_defer_event(evt, claim)
+            return
     except Exception:
         release_event_delivery(evt, claim)
         return
@@ -597,9 +599,12 @@ def _notif_dispatch_completions(sid, session, notifications, registry, deferred)
         _notif_release_turn(session)
     try:
         if text is not None:
-            _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
-                          "completion batch dispatch failed", display_kind=PROCESS_COMPLETE_DISPLAY_KIND,
-                          display_metadata={"display_text": batch.display_text(registry)})
+            if not _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
+                                 "completion batch dispatch failed"):
+                for event, _text, claim in claimed:
+                    _notif_defer_event(event, claim,
+                        deferred.append if deferred is not None else registry.completion_queue.put)
+                return
     except Exception:
         for event, _text, claim in claimed:
             release_event_delivery(event, claim)
