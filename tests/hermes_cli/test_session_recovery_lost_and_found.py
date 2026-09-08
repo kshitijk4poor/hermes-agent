@@ -403,6 +403,11 @@ def _make_synthetic_lost_and_found(
             )
 
         def session_row(session_id: str, ncols: int) -> list:
+            # Historical records predate the two authority columns; they are
+            # not prefixes of a freshly created runtime schema.
+            columns = sessions_columns if ncols == current_width else [
+                c for c in sessions_columns if c not in {"runtime_revision", "runtime_generation"}
+            ]
             base = {
                 "id": session_id,
                 "source": "telegram",
@@ -410,7 +415,7 @@ def _make_synthetic_lost_and_found(
                 "message_count": 2,
                 "title": f"synthetic {session_id}",
             }
-            return [base.get(column) for column in sessions_columns[:ncols]]
+            return [base.get(column) for column in columns[:ncols]]
 
         # Current layout (dynamic width) and historical 52-column layout.
         insert(max_fields, 1, session_row("20260101_010101_aaa001", max_fields))

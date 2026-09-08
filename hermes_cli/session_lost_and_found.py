@@ -306,6 +306,17 @@ def _looks_like_source(value: Any) -> bool:
     )
 
 
+def _session_source_index(cells: tuple[Any, ...]) -> Optional[int]:
+    if len(cells) > 1 and _looks_like_source(cells[1]):
+        return 1
+    # Fresh runtime schemas inserted counters after id; upgraded databases
+    # append those same columns. Width alone cannot distinguish the layouts.
+    if (len(cells) > 3 and _looks_like_source(cells[3])
+            and all(v is None or isinstance(v, int) for v in cells[1:3])):
+        return 3
+    return None
+
+
 def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional[str]:
     """Classify one lost_and_found record by field count + sentinel values."""
     if len(cells) >= 3 and cells[0] is None:
@@ -320,9 +331,10 @@ def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional
     second = cells[1] if len(cells) > 1 else None
     if nfield == SESSION_MODEL_USAGE_NFIELD:  # session id first, model string second
         return "session_model_usage" if isinstance(second, str) and second else None
-    # Any historical sessions width: session id first + recognizable source second (every sessions
-    # layout ever shipped has at least the 14 original columns).
-    if nfield >= SESSIONS_LEGACY_MINIMAL_NFIELD and _looks_like_source(second):
+    # Known sessions layouts, or an unknown historical one (>= 30 fields): session id + source is enough.
+    if (
+        nfield in SESSIONS_LAYOUT_NFIELDS or nfield == SESSIONS_LEGACY_MINIMAL_NFIELD or nfield >= 30
+    ) and _session_source_index(cells) is not None:
         return "sessions"
     return None
 
@@ -698,22 +710,68 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
         # Per-kind destination columns + NOT NULL substitutes. Identity fields are never fabricated:
         # rows with a NULL session id / role / source were already rejected by classify_lost_and_found_row.
         targets: dict[str, tuple[list[str], dict[int, Any]]] = {}
-        for kind_name, protected in (("sessions", (0, 1)), ("messages", (1, 2)), ("session_model_usage", (0, 1))):
+        for kind_name, protected in (
+            ("sessions", ("id", "source")), ("messages", ("session_id", "role")),
+            ("session_model_usage", ("session_id", "model")),
+        ):
+            columns = _table_columns(dest, kind_name)
             defaults = _notnull_defaults(dest, kind_name)
-            for index in protected:
-                defaults.pop(index, None)
-            targets[kind_name] = (_table_columns(dest, kind_name), defaults)
-        dest_types = {table: _declared_types(dest, table) for table in targets}
+            for name in protected:
+                defaults.pop(columns.index(name), None)
+            targets[kind_name] = (columns, defaults)
         lf_tables = [
             str(row[0]) for row in
             lf_conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'lost_and_found%'")
         ]
         report["lost_and_found_tables"] = lf_tables
-
-        def records():
-            """Yield (kind, lf_rowid, nfield, cells) for every classifiable lost_and_found row."""
-            for lf_table in lf_tables:
-                if _table_columns(lf_conn, lf_table)[:3] != ["rootpgno", "pgno", "nfield"]:
+        for lf_table in lf_tables:
+            if _table_columns(lf_conn, lf_table)[:3] != ["rootpgno", "pgno", "nfield"]:
+                continue
+            for row in lf_conn.execute(f'SELECT * FROM "{lf_table}"'):
+                try:
+                    nfield = int(row[2]) if row[2] is not None else 0
+                except (TypeError, ValueError):
+                    report["unmapped_rows"] += 1
+                    continue
+                lf_rowid = row[3]
+                cells = tuple(row[4 : 4 + max(nfield, 0)])
+                kind = classify_lost_and_found_row(nfield, cells)
+                if kind is None:
+                    report["unmapped_rows"] += 1
+                    continue
+                columns, defaults = targets[kind]
+                if kind == "sessions" and nfield != SESSIONS_LEGACY_MINIMAL_NFIELD:
+                    runtime_columns = ["runtime_revision", "runtime_generation"]
+                    base_columns = [c for c in columns if c not in runtime_columns]
+                    source_columns = (
+                        [base_columns[0], *runtime_columns, *base_columns[1:]]
+                        if _session_source_index(cells) == 3
+                        else [*base_columns, *runtime_columns]
+                    )
+                    named_defaults = {columns[i]: value for i, value in defaults.items()}
+                    columns = source_columns
+                    defaults = {i: named_defaults[c] for i, c in enumerate(columns) if c in named_defaults}
+                try:
+                    if kind == "sessions" and nfield == SESSIONS_LEGACY_MINIMAL_NFIELD:
+                        # Pre-modern layout with unknown column order: salvage identity + timing only.
+                        row_values = (
+                            cells[0], cells[1] if _looks_like_source(cells[1]) else "recovered",
+                            _heuristic_started_at(cells),
+                            f"{STUB_TITLE_PREFIX}] legacy session row (layout unknown)",
+                        )
+                        inserted = dest.execute(
+                            "INSERT OR IGNORE INTO sessions (id, source, started_at, title) VALUES (?, ?, ?, ?)",
+                            row_values,
+                        ).rowcount == 1
+                        report["legacy_minimal_sessions"] += int(inserted)
+                    else:
+                        # messages: the rowid-alias PK is NULL in the record; use the lost_and_found rowid.
+                        values = list(cells[:len(columns)])
+                        if kind == "messages":
+                            values[0] = lf_rowid
+                        inserted = _insert_prefix_row(dest, kind, columns, values, defaults)
+                except sqlite3.DatabaseError:
+                    report["unmapped_rows"] += 1
                     continue
                 for row in lf_conn.execute(f'SELECT * FROM "{lf_table}"'):
                     try:
