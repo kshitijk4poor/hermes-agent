@@ -13,7 +13,8 @@ class AuthorityConnection:
         self.transport = transport
         self.actor = Principal(str(identity.get('user_id') or 'authenticated-dashboard'),
                                authority.profile_id,
-                               frozenset({'session:read', 'session:submit', 'session:control', 'session:approve'}),
+                               frozenset({'session:read', 'session:submit', 'session:control', 'session:approve'})
+                               | (frozenset({'session:create'}) if identity else frozenset()),
                                uuid.uuid4().hex)
         self.subscriptions = {}
         authority.events[self.actor.transport_id] = transport
@@ -23,7 +24,8 @@ class AuthorityConnection:
         method = request.get('method')
         params = request.get('params') or {}
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
-        handlers = {'session.resume': self.resume, 'prompt.submit': self.submit,
+        handlers = {'session.create': self.create, 'ping': self.ping, 'runtime.describe': self.describe,
+                    'session.resume': self.resume, 'prompt.submit': self.submit,
                     'prompt.receipt': self.receipt, 'prompt.cancel': self.cancel,
                     'session.interrupt': self.interrupt, 'session.events.since': self.events_since,
                     'approval.respond': self.respond, 'clarify.respond': self.respond_clarify}
@@ -38,6 +40,27 @@ class AuthorityConnection:
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+
+    async def create(self, ref, params):
+        from gateway.session_local import create_local_session, local_session_info
+        ref = create_local_session(self.authority, self.actor, params)
+        result = await self.resume(ref, {})
+        result['info'] = local_session_info(self.authority, ref)
+        return result
+
+    async def ping(self, ref, params):
+        if not self.actor.capabilities:
+            raise RuntimeStoreError('permission_denied')
+        if params:
+            raise RuntimeStoreError('invalid_params')
+        return {'pong': True}
+
+    async def describe(self, ref, params):
+        await self.ping(ref, params)
+        return {'instance_id': self.authority.instance_id, 'profile_id': self.authority.profile_id,
+                'authority_epoch': self.authority.epoch,
+                'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1'],
+                'session_create': {'sources': ['cli'], 'parameters': ['request_id', 'source']}}
 
     async def resume(self, ref, params):
         snapshot = await self.authority.attach(self.actor, ref)
