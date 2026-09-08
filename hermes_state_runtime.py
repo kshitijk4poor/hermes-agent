@@ -427,6 +427,7 @@ def persist_worker_message(db, *, epoch: int, execution_id: str, session_id: str
             return json.loads(old['result_json'])
         if sequence != row['last_sequence'] + 1:
             raise RuntimeStoreError('invalid_params')
+        db._check_transcript_write_guards(conn, session_id, None)
         now = time.time()
         message = conn.execute('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)', (session_id, role, content, now))
         conn.execute('UPDATE sessions SET message_count=message_count+1,last_activity_at=?,runtime_revision=runtime_revision+1 WHERE id=?', (now, session_id))

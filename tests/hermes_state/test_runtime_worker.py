@@ -61,3 +61,38 @@ def test_worker_mutation_and_receipt_roll_back_together(tmp_path):
         assert len(db.get_messages('s')) == db.get_session('s')['message_count'] == 1
     finally:
         db.close()
+
+
+@pytest.mark.parametrize('closed', [False, True])
+def test_worker_append_preserves_compression_write_guards(tmp_path, closed):
+    from hermes_state_errors import CompressionSessionClosedError
+
+    db, epoch, assignment = setup_worker(tmp_path)
+    try:
+        args = dict(epoch=epoch, **assignment, sequence=1, role='assistant', content='before closure')
+        receipt = rt.persist_worker_message(db, **args)
+        assert db.try_acquire_compression_lock('s', 'compressor')
+        if closed:
+            db.end_session('s', end_reason='compression')
+            db.create_session('tip', source='test', parent_session_id='s')
+        before = db.get_session('s')
+        messages = db.get_messages('s')
+        next_args = args | {'sequence': 2, 'content': 'new output'}
+        if closed:
+            with pytest.raises(CompressionSessionClosedError):
+                db.append_message('s', 'assistant', 'ordinary')
+            with pytest.raises(CompressionSessionClosedError):
+                rt.persist_worker_message(db, **next_args)
+            assert db.get_session('s') == before
+            assert db.get_messages('s') == messages
+            assert db._conn.execute('SELECT COUNT(*) FROM worker_receipts').fetchone()[0] == 1
+            assert db._conn.execute('SELECT last_sequence FROM worker_executions').fetchone()[0] == 1
+        else:
+            db.append_message('s', 'assistant', 'ordinary')
+            rt.persist_worker_message(db, **next_args)
+            assert [r['content'] for r in db.get_messages('s')] == ['before closure', 'ordinary', 'new output']
+        db.close()
+        db = SessionDB(db_path=tmp_path / 'state.db')
+        assert rt.persist_worker_message(db, **args) == receipt
+    finally:
+        db.close()
