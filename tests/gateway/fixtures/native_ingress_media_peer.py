@@ -88,7 +88,7 @@ async def probe(mode, peer):
             assert not event._gateway_accepted
         finally:
             digest_dir.unlink()
-        receipt = authority.admit_native(event)
+        receipt = await authority.admit_native(event)
         assert event._gateway_accepted
         saved = rows(receipt.ref.session_id)[0]
         restored = restore_native(saved['payload'])
@@ -106,7 +106,7 @@ async def probe(mode, peer):
         assert retained.read_text() == 'ORIGINAL_DOCUMENT_BYTES'
         # A separate started row becomes unknown; neither it nor its file is reclaimed.
         unknown_event = replace(restored, source=replace(restored.source, chat_id='unknown-media'), message_id='unknown-1')
-        unknown = authority.admit_native(unknown_event)
+        unknown = await authority.admit_native(unknown_event)
         assert claim_session_input(authority.db, epoch=authority.epoch, session_id=unknown.ref.session_id)
         evidence = dict(sid=receipt.ref.session_id, saved=saved, unknown_sid=unknown.ref.session_id,
                         retained=str(retained), unknown=rows(unknown.ref.session_id))
@@ -180,7 +180,7 @@ async def probe(mode, peer):
     old_row = admit_session_input(authority.db, epoch=authority.epoch, principal_id=principal,
                                  session_id=ref.session_id, request_id=old_event.message_id, payload=legacy)
     cancel_session_input(authority.db, epoch=authority.epoch, admission_id=old_row['admission_id'])
-    retried = authority.admit_native(old_event)
+    retried = await authority.admit_native(old_event)
     assert retried.admission_id == old_row['admission_id'] and retried.status == 'terminal'
     assert rows(ref.session_id)[0]['payload'] == legacy
 
@@ -222,7 +222,7 @@ async def probe(mode, peer):
     cases.append(replace(event, source=foreign_home))
     for case in cases:
         try:
-            authority.admit_native(case)
+            await authority.admit_native(case)
         except RuntimeStoreError as exc:
             assert exc.reason == 'invalid_params', exc.reason
             denied.append(exc.reason)
@@ -239,7 +239,7 @@ async def probe(mode, peer):
     runner.config.multiplex_profiles = False
     missing = replace(event, source=replace(source, user_id='foreign'), media_urls=['/missing/private'])
     try:
-        authority.admit_native(missing)
+        await authority.admit_native(missing)
     except RuntimeStoreError as exc:
         assert exc.reason == 'permission_denied', exc.reason
     else:

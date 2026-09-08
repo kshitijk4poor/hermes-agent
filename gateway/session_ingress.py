@@ -11,7 +11,7 @@ executing_admission = ContextVar('executing_admission', default=False)
 
 
 async def admit_message(authority, event):
-    receipt = authority.admit_native(event)
+    receipt = await authority.admit_native(event)
     if receipt.status == 'terminal':
         return None
     # Only the delivery waiter is process-local; execution reads the committed snapshot.

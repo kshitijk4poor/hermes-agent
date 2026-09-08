@@ -111,6 +111,31 @@ def restore_provenance(runner, source, provenance):
     return runtime_home
 
 
+async def reauthorize_roles(runner, source, provenance):
+    """A role flag requests a connector check; it never supplies permission."""
+    if not source.role_authorized:
+        return False
+    if provenance is None or source.delivered_via_upstream_relay:
+        raise RuntimeStoreError('invalid_params')
+    restore_provenance(runner, source, provenance)
+    adapter = runner._adapter_for_source(source)
+    if runner._is_user_authorized_for_source(source, allow_adapter_delegation=False):
+        return True  # Direct allowlist/pairing remains an independent grant.
+    check = getattr(type(adapter), 'reauthorize_native_roles', None)
+    if check is None:
+        raise RuntimeStoreError('permission_denied')
+    from gateway.run import _profile_runtime_scope
+    with _profile_runtime_scope(Path(provenance['transport_home'])):
+        allowed = await check(adapter, source)
+    # A registry/profile/credential change during SDK I/O cannot borrow its result.
+    restore_provenance(runner, source, provenance)
+    if runner._adapter_for_source(source) is not adapter:
+        raise RuntimeStoreError('not_found')
+    if allowed is not True:
+        raise RuntimeStoreError('permission_denied')
+    return True
+
+
 def callback_runner():
     context = _callback.get()
     return context[0] if context else None

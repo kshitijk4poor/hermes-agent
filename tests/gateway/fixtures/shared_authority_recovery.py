@@ -36,7 +36,7 @@ async def verify_envelope_guards(runner, source):
     ]
     for event in unsupported:
         try:
-            authority.admit_native(event)
+            await authority.admit_native(event)
         except RuntimeStoreError as exc:
             assert exc.reason == 'invalid_params'
         else:
@@ -61,7 +61,7 @@ async def prepare_crash(runner, adapter, source, peer):
     # Production trusted ingress commits synchronously before its first execution
     # yield. Freeze THIS scheduling boundary, not a claim/storage predicate.
     safe_source = replace(source, chat_id='recover-chat', thread_id='recover-thread')
-    accepted = authority.admit_native(MessageEvent(text='RECOVER_EXACTLY_ONCE', source=safe_source,
+    accepted = await authority.admit_native(MessageEvent(text='RECOVER_EXACTLY_ONCE', source=safe_source,
                                                   message_id='crash-queued', reply_to_message_id='quote-7'))
     evidence = {'blocked_sid': sid, 'safe_sid': accepted.ref.session_id,
                 'blocked': rows(authority, sid), 'safe': rows(authority, accepted.ref.session_id)}

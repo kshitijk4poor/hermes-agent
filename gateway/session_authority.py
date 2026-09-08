@@ -120,11 +120,11 @@ class SessionAuthority:
         if live.task is None or live.task.done():
             live.task = asyncio.create_task(self._drain(ref))
 
-    def admit_native(self, event):
+    async def admit_native(self, event):
         """Trusted adapter entry; commit the snapshot before yielding or ACKing."""
         import json
-        from gateway.session_envelope import snapshot_native, restore_native
-        payload = snapshot_native(self.runner, event)
+        from gateway.session_envelope import prepare_native, restore_native
+        payload = await prepare_native(self.runner, event)
         source = restore_native(payload).source
         ref = self.register(source)
         identity = json.dumps([source.profile, source.platform.value, source.chat_id,
@@ -151,13 +151,13 @@ class SessionAuthority:
                 native = [row for row in rows if 'native_text_v1' in row['payload']]
                 if not native:
                     raise RuntimeStoreError('not_found')
-                source, route = check_native_route(self.runner, native[-1]['payload'], sid,
+                source, route = await check_native_route(self.runner, native[-1]['payload'], sid,
                                                     available_source, adapter)
                 for row in rows:
                     if row['status'] == 'queued':
                         if 'native_text_v1' not in row['payload']:
                             raise RuntimeStoreError('invalid_params')
-                        check_native_route(self.runner, row['payload'], sid, available_source, adapter)
+                        await check_native_route(self.runner, row['payload'], sid, available_source, adapter)
                 self.sessions.setdefault(sid, LiveSession(source, route))
                 if any(row['status'] == 'unknown' for row in rows):
                     raise RuntimeStoreError('unknown_execution')
@@ -257,7 +257,7 @@ class SessionAuthority:
                 first = next((row for row in pending if row['status'] == 'queued'), None)
                 if first is not None and 'native_text_v1' in first['payload']:
                     from gateway.session_envelope import check_native_route
-                    check_native_route(self.runner, first['payload'], ref.session_id, live.source,
+                    await check_native_route(self.runner, first['payload'], ref.session_id, live.source,
                                        self.runner._adapter_for_source(live.source))
                 row = claim_session_input(self.db, epoch=self.epoch, session_id=ref.session_id)
             except RuntimeStoreError as exc:

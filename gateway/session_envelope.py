@@ -19,13 +19,13 @@ _EVENT_FIELDS = (
 _CONTEXT_FIELDS = ('auto_skill', 'channel_prompt', 'channel_context')
 
 
-def _validate_native(runner, event, provenance=None):
+def _validate_native(runner, event, provenance=None, fresh_roles=False):
     source = event.source
     if (source is None or not isinstance(event.text, str)
             or not isinstance(event.message_type, MessageType)
             or event.message_type == MessageType.COMMAND or event.is_command()
             or event.internal or event.metadata or event.prompt_response
-            or source.role_authorized or source.delivered_via_upstream_relay
+            or (source.role_authorized and not fresh_roles) or source.delivered_via_upstream_relay
             or source.profile_route_rejected
             or (getattr(source, '_authorization_profile_home', None) is not None and provenance is None)
             or (getattr(runner.config, 'multiplex_profiles', False) and provenance is None)):
@@ -33,7 +33,7 @@ def _validate_native(runner, event, provenance=None):
     if provenance is not None:
         from gateway.session_ingress_context import restore_provenance
         restore_provenance(runner, source, provenance)
-    if not runner._is_user_authorized_for_source(source, allow_adapter_delegation=False):
+    if not runner._is_user_authorized_for_source(source, allow_adapter_delegation=fresh_roles):
         raise RuntimeStoreError('permission_denied')
     if any(value is not None and not isinstance(value, str)
            for value in (event.channel_prompt, event.channel_context)):
@@ -64,11 +64,27 @@ def _validate_native(runner, event, provenance=None):
 def snapshot_native(runner, event):
     from gateway.session_ingress_context import capture_provenance
     provenance = capture_provenance(runner, event)
-    encoded_source = _validate_native(runner, event, provenance)
+    return _snapshot_native(runner, event, provenance)
+
+
+async def prepare_native(runner, event):
+    from dataclasses import replace
+    from gateway.session_ingress_context import capture_provenance, reauthorize_roles
+    provenance = capture_provenance(runner, event)
+    # Freeze caller-owned identity and content before the first network yield.
+    frozen = replace(event, source=replace(event.source))
+    fresh_roles = await reauthorize_roles(runner, frozen.source, provenance)
+    return _snapshot_native(runner, frozen, provenance, fresh_roles)
+
+
+def _snapshot_native(runner, event, provenance, fresh_roles=False):
+    encoded_source = _validate_native(runner, event, provenance, fresh_roles)
     envelope = {'source': encoded_source,
                 'route': runner.session_store._generate_session_key(event.source),
                 'event': deepcopy({name: getattr(event, name) for name in _EVENT_FIELDS}),
                 'timestamp': event.timestamp.isoformat()}
+    if event.source.role_authorized:
+        envelope['reauthorize'] = 'roles'
     if provenance is not None:
         envelope['provenance'] = provenance
     # Omit new defaults so an identical retry of an older text admission retains
@@ -103,6 +119,8 @@ def restore_native(payload, runner=None):
     envelope = payload['native_text_v1']
     source = SessionSource.from_dict(envelope['source'])
     source.is_bot = envelope['source']['is_bot']
+    # Private descriptor requests a fresh check, never supplies the verdict.
+    source.role_authorized = envelope.get('reauthorize') == 'roles'
     if 'provenance' in envelope:
         from gateway.session_ingress_context import callback_runner, restore_provenance
         runner = runner or callback_runner()
@@ -115,11 +133,14 @@ def restore_native(payload, runner=None):
                         **deepcopy(envelope['event']))
 
 
-def check_native_route(runner, payload, session_id, available_source, adapter):
+async def check_native_route(runner, payload, session_id, available_source, adapter):
     """Read-only preflight: route/auth rejection must never consume a queued row."""
     event = restore_native(payload, runner)
     # Validate the stored sender without recapturing files or trusting the binding caller.
-    _validate_native(runner, event, payload['native_text_v1'].get('provenance'))
+    from gateway.session_ingress_context import reauthorize_roles
+    provenance = payload['native_text_v1'].get('provenance')
+    fresh_roles = await reauthorize_roles(runner, event.source, provenance)
+    _validate_native(runner, event, provenance, fresh_roles)
     route = payload['native_text_v1']['route']
     store = runner.session_store
     if (store._generate_session_key(event.source) != route
