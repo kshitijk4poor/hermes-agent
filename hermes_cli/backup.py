@@ -497,11 +497,53 @@ def _safe_restore_db(src: Path, dst: Path) -> bool:
     """Restore only while holding the destination authority's maintenance reservation."""
     from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
     try:
-        with exclusive_maintenance([dst.resolve().parent]):
-            return _restore_db_pages(src, dst)
-    except OwnershipConflict as exc:
+        with exclusive_maintenance([dst.absolute().parent, dst.resolve().parent]):
+            with _restore_epoch_source(src, dst) as prepared:
+                return _restore_db_pages(prepared, dst)
+    except (OwnershipConflict, OSError, sqlite3.Error) as exc:
         logger.error("%s", exc)
         return False
+
+
+def _restore_epoch(path: Path) -> int:
+    if not path.exists():
+        return 0
+    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='runtime_epoch'").fetchone():
+            return 0
+        row = conn.execute("SELECT epoch FROM runtime_epoch WHERE singleton=1").fetchone()
+        return int(row[0]) if row else 0
+
+
+@contextmanager
+def _restore_epoch_source(src: Path, dst: Path):
+    """Stage an epoch floor into the image BEFORE publishing it atomically.
+
+    Updating the destination after backup() would leave a crash window that
+    reuses an older worker epoch. Never modify the user's source snapshot.
+    Full restores retain all admissions/worker receipts; normal startup advances
+    this floor and reconciles started work to unknown, not replayable queued work.
+    An unreadable destination cannot prove its epoch floor: use transcript salvage
+    into a separate output rather than silently restoring with a recycled epoch.
+    """
+    floor = _restore_epoch(dst)
+    if floor <= _restore_epoch(src):
+        yield src
+        return
+    with tempfile.TemporaryDirectory(prefix='.restore-epoch-', dir=dst.parent) as work:
+        prepared = Path(work) / 'state.db'
+        if not _safe_copy_db(src, prepared):
+            raise OSError('Unable to stage a restore with a safe runtime epoch')
+        with closing(sqlite3.connect(prepared)) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS runtime_epoch (
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                epoch INTEGER NOT NULL CHECK (epoch > 0), instance_id TEXT NOT NULL)""")
+            conn.execute("""INSERT INTO runtime_epoch VALUES(1,?, 'offline-restore')
+                ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch,
+                instance_id=excluded.instance_id""", (floor,))
+            conn.commit()
+        prepared.chmod(src.stat().st_mode)
+        yield prepared
 
 
 def _restore_db_pages(src: Path, dst: Path) -> bool:
@@ -836,7 +878,7 @@ def _import_db_member(
     zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
     from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
     try:
-        with exclusive_maintenance([target.resolve().parent]):
+        with exclusive_maintenance([target.absolute().parent, target.resolve().parent]):
             _import_db_member_exclusive(zf, member, target, new_file_mode)
     except OwnershipConflict as exc:
         raise OSError(str(exc)) from exc
@@ -1023,6 +1065,41 @@ def _import_members_exclusive(
         print(f"Import {'incomplete' if errors else 'complete'}: {restored} files restored in {elapsed:.1f}s")
         print(f"  Target: {display_hermes_home()}")
 
+def run_import(args) -> None:
+    """Restore a Hermes backup from a zip file."""
+    zip_path = Path(args.zipfile).expanduser().resolve()
+    if not zip_path.is_file():
+        print(f"Error: File not found: {zip_path}")
+        sys.exit(1)
+    if not zipfile.is_zipfile(zip_path):
+        print(f"Error: Not a valid zip file: {zip_path}")
+        sys.exit(1)
+    # The restore target is the home the command operates under (the printed "Target:");
+    # ``get_default_hermes_root()`` would silently retarget a profile restore at the live root.
+    hermes_root = get_hermes_home()
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        ok, reason = _validate_backup_zip(zf)
+        if not ok:
+            print(f"Error: {reason}")
+            sys.exit(1)
+        prefix = _detect_prefix(zf)
+        members = [n for n in zf.namelist() if not n.endswith("/")]
+        file_count = len(members)
+        print(f"Backup contains {file_count} files\nTarget: {display_hermes_home()}")
+        if prefix:
+            print(f"Detected archive prefix: {prefix!r} (will be stripped)")
+        if not args.force and not _confirm_import_overwrite(hermes_root):
+            return
+        print(f"\nImporting {file_count} files ...")
+        hermes_root.mkdir(parents=True, exist_ok=True)
+        t0 = time.monotonic()
+        restored, restored_external, errors, skipped_runtime, db_shrunk = _import_members(
+            zf, members, prefix, hermes_root, file_count)
+        if not restored and errors:
+            _print_capped("\nImport refused or failed; no files restored:", errors, "  ")
+            sys.exit(1)
+        elapsed = time.monotonic() - t0
+        print(f"\nImport complete: {restored} files restored in {elapsed:.1f}s\n  Target: {display_hermes_home()}")
         if restored_external:
             print(
                 f"\n  Restored {restored_external} memory-provider file(s) to "
