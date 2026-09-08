@@ -179,15 +179,8 @@ class AuthorityConnection:
         return asdict(receipt)
 
     async def mutate(self, ref, params):
-        from hermes_state_runtime import mutate_runtime_session
-        self.authority.authorize(self.actor, ref, 'session:control')
-        self.authority._require_admission_open()
-        if set(params) != {'session_id', 'request_id', 'expected_revision', 'operation', 'payload'}:
-            raise RuntimeStoreError('invalid_params')
-        return mutate_runtime_session(
-            self.authority.db, epoch=self.authority.epoch, principal_id=self.actor.subject,
-            session_id=ref.session_id, request_id=params['request_id'],
-            expected_revision=params['expected_revision'], operation=params['operation'], payload=params['payload'])
+        from gateway.session_mutations import mutate_session
+        return await mutate_session(self.authority, self.actor, ref, params)
 
     async def receipt(self, ref, params):
         return asdict(await self.authority.receipt(self.actor, ref, params.get('admission_id')))
