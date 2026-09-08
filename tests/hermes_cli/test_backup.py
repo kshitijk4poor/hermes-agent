@@ -796,9 +796,11 @@ class TestImport:
         # Live runtime files are untouched; the backup's foreign ones never land.
         assert (hermes_home / "gateway.pid").read_text() == "4242"
         assert (hermes_home / "processes.json").read_text() == '{"live": true}'
-        # cron.pid / gateway.lock had no live copy and were not seeded.
+        # No foreign runtime file is installed. Maintenance creates a local lock
+        # inode which must remain after release, or concurrent openers can split ownership.
         assert not (hermes_home / "cron.pid").exists()
-        assert not (hermes_home / "gateway.lock").exists()
+        lock = json.loads((hermes_home / "gateway.lock").read_text())
+        assert lock["hermes_home"] == str(hermes_home.resolve())
 
 
 
