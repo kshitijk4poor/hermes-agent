@@ -42,6 +42,7 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
         raise
 
     web.app.state.gateway_runner = runner
+    web.app.state.session_authority = getattr(runner, "session_authority", None)
     web.app.state.bound_host = host
     web.app.state.bound_port = listener.getsockname()[1]
     try:
@@ -54,6 +55,7 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
     except BaseException:
         listener.close()
         web.app.state.gateway_runner = None
+        web.app.state.session_authority = None
         if hasattr(server, "lifespan") and not server.lifespan.should_exit:
             await server.lifespan.shutdown()
         raise
@@ -67,6 +69,7 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
             finally:
                 listener.close()
                 web.app.state.gateway_runner = None
+                web.app.state.session_authority = None
 
     task = asyncio.create_task(serve(), name="gateway-api")
     origin_host = f"[{host}]" if ":" in host else host
