@@ -375,6 +375,8 @@ CREATE TABLE IF NOT EXISTS system_prompts (
 
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
+    runtime_revision INTEGER NOT NULL DEFAULT 0,
+    runtime_generation INTEGER NOT NULL DEFAULT 0,
     source TEXT NOT NULL,
     created_source TEXT,
     user_id TEXT,
@@ -493,6 +495,48 @@ CREATE TABLE IF NOT EXISTS session_model_usage (
     first_seen REAL,
     last_seen REAL,
     PRIMARY KEY (session_id, model, billing_provider, billing_base_url, billing_mode, task)
+);
+
+CREATE TABLE IF NOT EXISTS runtime_epoch (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    epoch INTEGER NOT NULL CHECK (epoch > 0),
+    instance_id TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS session_admissions (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    admission_id TEXT NOT NULL UNIQUE,
+    request_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    target_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+    lineage_json TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    payload_digest TEXT NOT NULL,
+    intent TEXT NOT NULL CHECK (intent IN ('queue','steer','redirect')),
+    status TEXT NOT NULL CHECK (status IN ('queued','started','unknown','terminal')),
+    outcome TEXT,
+    owner_epoch INTEGER,
+    generation INTEGER,
+    UNIQUE (principal_id, target_session_id, request_id),
+    CHECK (status != 'started' OR (owner_epoch IS NOT NULL AND generation IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS session_admissions_pending
+    ON session_admissions(target_session_id, status, seq);
+CREATE TABLE IF NOT EXISTS worker_executions (
+    execution_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE RESTRICT,
+    kind TEXT NOT NULL CHECK (kind IN ('cron','child','compute','kanban')),
+    owner_epoch INTEGER NOT NULL,
+    generation INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('registered','running','unknown','terminal')),
+    adoption_digest TEXT NOT NULL,
+    last_sequence INTEGER NOT NULL DEFAULT 0 CHECK (last_sequence >= 0)
+);
+CREATE TABLE IF NOT EXISTS worker_receipts (
+    execution_id TEXT NOT NULL REFERENCES worker_executions(execution_id) ON DELETE RESTRICT,
+    sequence INTEGER NOT NULL CHECK (sequence > 0),
+    payload_digest TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    PRIMARY KEY (execution_id, sequence)
 );
 
 CREATE TABLE IF NOT EXISTS state_meta (
