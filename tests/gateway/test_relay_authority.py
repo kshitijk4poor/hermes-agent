@@ -86,7 +86,8 @@ async def probe(peer):
             'platform': 'telegram', 'chat_id': 'relay-chat', 'chat_type': 'dm', 'user_id': 'relay-user'}}
 
         async def send(raw_event):
-            await connector_ws.send(json.dumps({'type': 'inbound', 'event': raw_event}) + '\n')
+            await connector_ws.send(json.dumps({'type': 'inbound', 'event': raw_event,
+                                               'bufferId': raw_event['message_id']}) + '\n')
             async with asyncio.timeout(25):
                 while True:
                     entries = list(authority.sessions.values())
@@ -95,6 +96,8 @@ async def probe(peer):
                     if any(r['request_id'] == raw_event['message_id'] and r['status'] == 'terminal' for r in rows):
                         while adapter._active_sessions:
                             await asyncio.sleep(.01)
+                        assert any(f.get('type') == 'inbound_ack' and f.get('bufferId') == raw_event['message_id']
+                                   for f in outgoing), outgoing
                         return rows
                     # Fail on the real adapter's completed rejection, rather than waiting for a timeout.
                     errors = [f for f in outgoing if 'invalid_params' in json.dumps(f) or 'not_found' in json.dumps(f)]
@@ -102,6 +105,18 @@ async def probe(peer):
                     await asyncio.sleep(.02)
 
         try:
+            failed_insert = asyncio.Event()
+            authority.db._execute_write(lambda conn: conn.create_function(
+                'ingress_failure_witness', 0, lambda: failed_insert.set() or 1))
+            authority.db._execute_write(lambda conn: conn.execute("CREATE TRIGGER fail_relay BEFORE INSERT ON session_admissions BEGIN SELECT ingress_failure_witness(); SELECT RAISE(ABORT, 'owned storage failure'); END"))
+            await connector_ws.send(json.dumps({'type': 'inbound', 'event': raw,
+                                               'bufferId': 'durable-buffer-1'}) + '\n')
+            await asyncio.wait_for(failed_insert.wait(), 10)
+            await connector_ws.close()
+            connector_ws = await asyncio.wait_for(ready.get(), 5)
+            assert not any(f.get('type') == 'inbound_ack' for f in outgoing), outgoing
+            assert not peer.requests
+            authority.db._execute_write(lambda conn: conn.execute('DROP TRIGGER fail_relay'))
             rows = await send(raw)
             sid = next(iter(authority.sessions))
             warm_agent = authority.agent(SessionRef('default', sid))
