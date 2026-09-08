@@ -9,6 +9,7 @@ import time
 _PURPOSE_CAPABILITIES = {
     'interactive': frozenset({'session:create', 'session:read', 'session:submit',
                               'session:control', 'session:approve', 'session:respond'}),
+    'native-http': frozenset({'http:owner'}),
     'exposure': frozenset({'transport:delegate'}),
     'worker-adoption': frozenset({'worker:adopt'}),
 }

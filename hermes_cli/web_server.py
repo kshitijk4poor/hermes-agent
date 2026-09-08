@@ -552,6 +552,7 @@ async def auth_middleware(request: Request, call_next):
     path = request.url.path
     if (
         not getattr(request.state, "token_authenticated", False)
+        and not getattr(request.state, "native_http_principal", None)
         and not getattr(request.app.state, "auth_required", False)
         and path.startswith("/api/")
         and path not in _PUBLIC_API_PATHS
@@ -571,7 +572,11 @@ async def _token_auth_seam(request: Request, call_next):
     + ``token_authenticated`` so downstream gates skip enforcement. Non-token
     routes pass through untouched.
     """
+    from hermes_cli.dashboard_auth.native_http import authenticate_native_http
     from hermes_cli.dashboard_auth.token_auth import token_auth_middleware
+    rejection = await authenticate_native_http(request)
+    if rejection is not None:
+        return rejection
     return await token_auth_middleware(request, call_next)
 
 

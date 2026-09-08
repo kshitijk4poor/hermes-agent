@@ -112,6 +112,9 @@ class GatewayRuntimeAPI:
                 await JSONResponse({'error': 'gateway_not_ready', 'state': descriptor['state']},
                                    status_code=503)(scope, receive, send)
             return
+        if scope['type'] == 'http':
+            # Capture before Uvicorn's proxy middleware rewrites scope.client.
+            scope['hermes.gateway_socket_peer'] = scope.get('client')
         if scope['type'] != 'websocket' or scope['path'] != '/api/ws':
             return await self.app(scope, receive, send)
         original_receive = receive
