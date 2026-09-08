@@ -192,9 +192,7 @@ class SessionAuthority:
         row = admit_session_input(self.db, epoch=self.epoch, principal_id=actor.subject,
                                   session_id=request.ref.session_id, request_id=request.request_id,
                                   payload=dict(request.payload), intent=request.intent)
-        live = self.sessions[request.ref.session_id]
-        if live.task is None or live.task.done():
-            live.task = asyncio.create_task(self._drain(request.ref))
+        self._schedule(request.ref)
         return self._receipt(row)
 
     async def receipt(self, actor, ref, admission_id):

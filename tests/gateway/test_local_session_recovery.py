@@ -57,3 +57,9 @@ async def test_local_create_receipt_survives_cold_authority_atomically(tmp_path,
         policies = conn.execute("SELECT value FROM state_meta WHERE key LIKE 'gateway.local_policy.v1:%'").fetchall()
     assert len(policies) == 1
     assert json.loads(policies[0][0])['principal_id'] == actor.subject
+
+
+@pytest.mark.linux_only
+def test_real_daemon_recovers_only_authorized_never_started_local_work(tmp_path):
+    from tests.gateway.fixtures.local_recovery_probe import probe
+    print(json.dumps(probe(tmp_path)))
