@@ -99,7 +99,7 @@ async def probe(peer):
 
         try:
             rows = await send(raw)
-            sid = rows[0]['session_id']
+            sid = next(iter(authority.sessions))
             warm_agent = authority.agent(SessionRef('default', sid))
             assert warm_agent is not None
             port = api.socket.getsockname()[1]
@@ -142,8 +142,9 @@ async def probe(peer):
                         pass
                     else:
                         raise AssertionError('forged source accepted: ' + mutate)
-                for event in (_event_from_wire(raw), _event_from_wire(raw)):
-                    event.internal = event is not None
+                for internal in (False, True):
+                    event = _event_from_wire(raw)
+                    event.internal = internal
                     try:
                         await prepare_native(runner, event)
                     except RuntimeStoreError:
@@ -159,7 +160,8 @@ async def probe(peer):
                     raise AssertionError('stale connector replay accepted')
                 transport._upgrade_secret = secret
                 finals = [f for f in outgoing if f.get('type') == 'outbound'
-                          and f.get('op') in ('send', 'edit')]
+                          and f.get('action', {}).get('op') in ('send', 'edit')
+                          and 'LOCAL_ACK_' in f.get('action', {}).get('content', '')]
                 assert len(finals) == 2, outgoing
                 receipt = {'same_agent': True, 'negative_controls': True,
                     'admissions': [r['admission_id'] for r in rows], 'model_requests': len(peer.requests),

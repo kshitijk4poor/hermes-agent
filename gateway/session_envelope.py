@@ -2,7 +2,7 @@
 
 Ordinary context and local media are retained without serializing delegated trust.
 Multiplex callbacks bind current connector ownership; roles require fresh preflight.
-Upstream-relay delegation remains unsupported.
+Relay snapshots bind the authenticated connector and exact source; replay rechecks both.
 """
 from copy import copy, deepcopy
 from datetime import datetime
@@ -26,7 +26,8 @@ def _validate_native(runner, event, provenance=None, fresh_roles=False):
             or not isinstance(event.message_type, MessageType)
             or event.message_type == MessageType.COMMAND or event.is_command()
             or event.internal or event.metadata or event.prompt_response
-            or (source.role_authorized and not fresh_roles) or source.delivered_via_upstream_relay
+            or (source.role_authorized and not fresh_roles)
+            or (source.delivered_via_upstream_relay and not (provenance and 'relay' in provenance))
             or source.profile_route_rejected
             or (getattr(source, '_authorization_profile_home', None) is not None and provenance is None)
             or (getattr(runner.config, 'multiplex_profiles', False) and provenance is None)):
@@ -34,7 +35,8 @@ def _validate_native(runner, event, provenance=None, fresh_roles=False):
     if provenance is not None:
         from gateway.session_ingress_context import restore_provenance
         restore_provenance(runner, source, provenance)
-    if not runner._is_user_authorized_for_source(source, allow_adapter_delegation=fresh_roles):
+    delegated = fresh_roles or bool(provenance and 'relay' in provenance)
+    if not runner._is_user_authorized_for_source(source, allow_adapter_delegation=delegated):
         raise RuntimeStoreError('permission_denied')
     if any(value is not None and not isinstance(value, str)
            for value in (event.channel_prompt, event.channel_context)):
