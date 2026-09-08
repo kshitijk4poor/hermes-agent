@@ -76,7 +76,8 @@ class SessionAuthority:
     async def attach(self, actor, ref):
         self.authorize(actor, ref, 'session:read')
         live = self.sessions[ref.session_id]
-        subscription = uuid.uuid4().hex
+        subscription = next((key for key, member in live.subscribers.items()
+                             if member == actor), None) or uuid.uuid4().hex
         live.subscribers[subscription] = actor
         return SubscriptionSnapshot(subscription, self._handle(ref), self.instance_id,
                                     live.sequence, tuple(self.db.get_messages_as_conversation(ref.session_id)),

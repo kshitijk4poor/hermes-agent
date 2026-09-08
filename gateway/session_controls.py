@@ -73,4 +73,5 @@ class AuthorityConnection:
     async def close(self):
         for subscription in self.subscriptions.values():
             await self.authority.detach(self.actor, subscription)
+        self.subscriptions.clear()
         self.authority.events.pop(self.actor.transport_id, None)
