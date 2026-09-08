@@ -1890,6 +1890,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _open_and_cache_session_db(self, home) -> Optional[Any]:
         """Cached SessionDB for ``home`` (shared by both ``_ensure_session_db*``). Never writes
         ``self._session_db`` (explicit override only), so no profile pins later requests."""
+        if self.gateway_runner is not None:
+            from gateway.platforms.api_server_store import selected_session_db
+            return selected_session_db(self, home)
         from hermes_state_registry import acquire
         key = str(home)
         with self._session_db_cache_lock:
@@ -1931,6 +1934,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _ensure_session_db(self):
         """SessionDB for the active profile home (the runtime scope redirects ``get_hermes_home()``
         per profile). Sync, for ``_create_agent``; handlers use ``_ensure_session_db_async``."""
+        if self.gateway_runner is not None:
+            from hermes_constants import get_hermes_home
+            from gateway.platforms.api_server_store import selected_session_db
+            return selected_session_db(self, get_hermes_home())
         if self._session_db is not None:
             return self._session_db
         try:
@@ -1943,6 +1950,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     async def _ensure_session_db_async(self):
         """Async variant: the profile home is captured on the loop thread (its scope is invisible
         inside ``to_thread``), only the blocking open runs in the worker, single-flight locked."""
+        if self.gateway_runner is not None:
+            from hermes_constants import get_hermes_home
+            from gateway.platforms.api_server_store import selected_session_db
+            return selected_session_db(self, get_hermes_home())
         if self._session_db is not None:
             return self._session_db
         try:
