@@ -59,7 +59,9 @@ def _socket_path(home: Path) -> Path:
 def query_identify(home: Path, *, timeout: float) -> dict:
     """Unlike diagnostic queries, retain timeout/access/protocol failures."""
     if os.name == "nt":
-        raise DiscoveryError("native_bootstrap_required")
+        from gateway.runtime_bootstrap_windows import query_runtime_control
+        return _identify_response(query_runtime_control(
+            home, b'{"protocol":1,"verb":"identify","id":1}\n', timeout))
     deadline = time.monotonic() + timeout
     path = _socket_path(home)
     request = b'{"protocol":1,"verb":"identify","id":1}\n'
@@ -79,7 +81,11 @@ def query_identify(home: Path, *, timeout: float) -> dict:
             data.extend(chunk)
             if len(data) > 524288:
                 raise DiscoveryError("oversized_control_response")
-    response = json.loads(bytes(data).split(b"\n", 1)[0])
+    return _identify_response(bytes(data))
+
+
+def _identify_response(data: bytes) -> dict:
+    response = json.loads(data.split(b"\n", 1)[0])
     if (not isinstance(response, dict) or response.get("ok") is not True
             or response.get("protocol") != 1 or response.get("id") != 1
             or not isinstance(response.get("result"), dict)):
@@ -87,7 +93,15 @@ def query_identify(home: Path, *, timeout: float) -> dict:
     return response["result"]
 
 
-def missing_owner_state(home: Path) -> Literal["starting", "absent"]:
-    """A live old owner without an API is not permission to start another."""
-    from gateway.status import get_running_pid
-    return "starting" if get_running_pid(home / "gateway.pid", cleanup_stale=False) else "absent"
+def missing_owner_state(home: Path) -> Literal["starting", "absent", "inaccessible"]:
+    """A reservation before PID/control publication already excludes a new owner."""
+    from gateway.status import _is_gateway_runtime_lock_active_strict
+    lock = home / "gateway.lock"
+    try:
+        if os.name != "nt":
+            _private_node(lock, kind="file")
+        return "starting" if _is_gateway_runtime_lock_active_strict(lock) else "absent"
+    except FileNotFoundError:
+        return "absent"
+    except (OSError, RuntimeError, DiscoveryError):
+        return "inaccessible"

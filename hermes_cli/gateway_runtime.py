@@ -94,6 +94,69 @@ def discover_gateway_endpoint(profile_home: str | Path, *, timeout: float = 2.0)
         return GatewayDiscovery("inaccessible", reason_code="control_timeout")
     except DiscoveryError as exc:
         return GatewayDiscovery("inaccessible", reason_code=exc.reason)
+    except PermissionError:
+        return GatewayDiscovery("inaccessible", reason_code="authorization")
     except (OSError, ValueError, TypeError):
         # Raw peer data, paths and URLs may contain secrets; report bounded codes.
         return GatewayDiscovery("inaccessible", reason_code="invalid_control_peer")
+
+
+def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = 30.0) -> GatewayDiscovery:
+    """Ensure once, never install/replace; pending remains pending at deadline.
+
+    A successful service command or Popen is not session readiness. After an
+    owner/start request is observed this invocation never launches another.
+    """
+    import time
+    from hermes_cli.gateway_runtime_service import (
+        RuntimeStartError, discover_existing_gateway_service, remaining,
+        start_existing_gateway_service,
+    )
+    from hermes_cli.update_lock import MARKER_NAME
+    from hermes_constants import get_default_hermes_root, get_process_hermes_home
+
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("timeout must be finite and positive")
+    deadline = time.monotonic() + timeout
+    home = Path(_canonical_home(profile_home))
+    requested = False
+    delay = 0.025
+    try:
+        while True:
+            # Never clear the updater's fence, even if malformed. Repair is not
+            # a client operation. The install-root marker also covers profiles.
+            for fence_home in {home, get_process_hermes_home(), get_default_hermes_root()}:
+                try:
+                    (fence_home / MARKER_NAME).lstat()
+                except FileNotFoundError:
+                    continue
+                return GatewayDiscovery("draining", reason_code="update_paused")
+            observed = discover_gateway_endpoint(home, timeout=remaining(deadline))
+            if observed.reason_code == "control_timeout":
+                return GatewayDiscovery("starting", reason_code="deadline")
+            if observed.state not in {"absent", "starting"}:
+                return observed
+            if observed.state == "starting":
+                requested = True
+            if observed.state == "absent" and not requested:
+                service = discover_existing_gateway_service(home, deadline=deadline)
+                # Runtime locks settle races remaining after this second probe.
+                observed = discover_gateway_endpoint(home, timeout=remaining(deadline))
+                if observed.state != "absent":
+                    continue
+                if service is not None:
+                    start_existing_gateway_service(service, deadline=deadline)
+                else:
+                    from hermes_cli.gateway_runtime_start import spawn_unmanaged_gateway
+                    spawn_unmanaged_gateway(home, deadline=deadline)
+                requested = True
+            time.sleep(min(delay, remaining(deadline)))
+            delay = min(delay * 1.5, 0.25)
+    except TimeoutError:
+        return GatewayDiscovery("starting", reason_code="deadline")
+    except RuntimeStartError as exc:
+        return GatewayDiscovery(exc.state, reason_code=exc.reason)
+    except PermissionError:
+        return GatewayDiscovery("inaccessible", reason_code="authorization")
+    except OSError:
+        return GatewayDiscovery("inaccessible", reason_code="runtime_start_failed")

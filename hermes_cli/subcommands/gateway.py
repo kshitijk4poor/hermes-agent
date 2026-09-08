@@ -88,6 +88,17 @@ def build_gateway_parser(
     add_accept_hooks_flag(gateway_run)
     add_accept_hooks_flag(gateway_parser)
 
+    from hermes_cli.gateway_runtime_cli import cmd_gateway_ensure
+    gateway_ensure = gateway_subparsers.add_parser(
+        "ensure", help="Ensure a local runtime without installing or replacing a service",
+        epilog="Exit codes: 0 ready; 2 invalid invocation; 3 incompatible; "
+               "4 authorization/profile mismatch; 5 deadline; 6 draining/update-paused; "
+               "7 inaccessible/conflicting supervisor. Pending startup is not readiness.")
+    _flag(gateway_ensure, "--json", help="Emit one credential-free JSON result (default)")
+    gateway_ensure.add_argument("--timeout", default="30",
+                                help="Total startup deadline in seconds (default: 30)")
+    gateway_ensure.set_defaults(func=cmd_gateway_ensure)
+
     gateway_start = gateway_subparsers.add_parser(
         "start", help="Start the installed systemd/launchd background service")
     _add_system_flag(gateway_start)
