@@ -204,6 +204,8 @@ def _import_legacy_row(conn, row, epoch, principal_id):
     target = chain[-1]
     status = 'unknown' if row['status'] == 'started' else row['status']
     generation = row['generation']
+    if generation is None and status == 'unknown':
+        generation = _session(conn, target)['runtime_generation'] + 1
     if generation is not None and (type(generation) is not int or generation < 0):
         raise RuntimeStoreError('invalid_params')
     digest = admission_fingerprint(canonical_target=target, payload={'input': payload, 'intent': intent})
@@ -248,6 +250,12 @@ def import_legacy_session_admissions(db, *, epoch: int, source_path, principal_i
                 if old[0] != marker:
                     raise RuntimeStoreError('admission_conflict')
                 return 0
+            for execution in executions:
+                generation = execution['generation']
+                if type(generation) is not int or generation < 0:
+                    raise RuntimeStoreError('invalid_params')
+                target = _canonical_chain(conn, _text(execution['root']))[-1]
+                conn.execute('UPDATE sessions SET runtime_generation=MAX(runtime_generation,?) WHERE id=?', (generation, target))
             for row in rows:
                 _import_legacy_row(conn, row, epoch, principal_id)
             conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)', (_IMPORT_KEY, marker))
@@ -260,7 +268,7 @@ def resolve_unknown_session_input(db, *, epoch: int, admission_id: str, generati
     def write(conn):
         _epoch(conn, epoch)
         row = _admission(conn, admission_id)
-        if row['status'] != 'unknown' or row['generation'] != generation:
+        if type(generation) is not int or row['status'] != 'unknown' or row['generation'] != generation:
             raise RuntimeStoreError('stale_generation')
         conn.execute("UPDATE session_admissions SET status='terminal',outcome='interrupted' WHERE admission_id=?", (admission_id,))
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
