@@ -147,5 +147,8 @@ class GatewayRuntimeAPI:
             # issuer. Let the existing gate validate them, never mint a grant.
             return await self.app(scope, receive, send)
         from tui_gateway.ws import handle_ws
-        await handle_ws(ws, auth_identity={'user_id': grant['subject'], 'provider': 'local'},
+        await handle_ws(ws, auth_identity={'user_id': grant['subject'], 'provider': 'local',
+                                          'profile_id': grant['profile_id'],
+                                          'instance_id': grant['instance_id'],
+                                          'capabilities': grant['capabilities']},
                         subprotocol='hermes-gateway-v1')

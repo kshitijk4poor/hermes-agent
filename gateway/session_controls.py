@@ -11,11 +11,16 @@ class AuthorityConnection:
     def __init__(self, authority, transport, identity):
         self.authority = authority
         self.transport = transport
+        capabilities = frozenset({'session:read', 'session:submit', 'session:control', 'session:approve'})
+        if identity:
+            capabilities |= {'session:create'}
+        if 'capabilities' in identity:
+            capabilities = frozenset(identity['capabilities'])
+        if identity.get('instance_id', authority.instance_id) != authority.instance_id:
+            capabilities = frozenset()
         self.actor = Principal(str(identity.get('user_id') or 'authenticated-dashboard'),
-                               authority.profile_id,
-                               frozenset({'session:read', 'session:submit', 'session:control', 'session:approve'})
-                               | (frozenset({'session:create'}) if identity else frozenset()),
-                               uuid.uuid4().hex)
+                               identity.get('profile_id', authority.profile_id),
+                               capabilities, uuid.uuid4().hex)
         self.subscriptions = {}
         authority.events[self.actor.transport_id] = transport
 
