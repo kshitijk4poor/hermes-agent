@@ -17,6 +17,8 @@ import json
 import logging
 import os
 import socket
+import stat
+import struct
 import sys
 import tempfile
 import time
@@ -130,6 +132,7 @@ class GatewayControlServer:
             from gateway.status import _get_process_hermes_home
             home = _get_process_hermes_home()
         self._home = Path(home)
+        self.ticket_store = None
         self._server: Optional[asyncio.AbstractServer] = None
         self._pipe_server: Any = None  # Windows proactor pipe server
         self._bind_path: Optional[Path] = None
@@ -198,7 +201,7 @@ class GatewayControlServer:
             with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)
 
-    def handle_request_line(self, raw: bytes) -> bytes:
+    def handle_request_line(self, raw: bytes, peer_subject: Optional[str] = None) -> bytes:
         """One JSON request line -> one JSON response line. Never raises (shared by POSIX + pipe)."""
         request_id: Any = None
         try:
@@ -207,7 +210,10 @@ class GatewayControlServer:
                 raise ValueError("request must be a JSON object")
             request_id, verb = request.get("id"), request.get("verb")
             handler = self._handlers.get(verb) if isinstance(verb, str) else None
-            if handler is None:
+            if verb == "session-ticket":
+                response = {"ok": True, "protocol": CONTROL_PROTOCOL_VERSION,
+                            "result": self._session_ticket(request, peer_subject)}
+            elif handler is None:
                 response: dict[str, Any] = {"ok": False, "error": f"unknown verb: {verb!r}",
                                             "protocol": CONTROL_PROTOCOL_VERSION, "supported_verbs": sorted(self._handlers)}
             else:
@@ -229,6 +235,41 @@ class GatewayControlServer:
             encoded = b'{"ok": false, "error": "response too large"}'
         return encoded + b"\n"
 
+    def _session_ticket(self, request: dict, peer_subject: Optional[str]) -> dict:
+        if not peer_subject or self.ticket_store is None:
+            raise PermissionError("authenticated runtime bootstrap unavailable")
+        if set(request) - {"protocol", "verb", "id", "params"} or request.get("protocol") != 1:
+            raise PermissionError("invalid bootstrap envelope")
+        params = request.get("params")
+        if not isinstance(params, dict) or set(params) != {"profile_id", "instance_id", "purpose"}:
+            raise PermissionError("invalid bootstrap parameters")
+        if params["instance_id"] != self.ticket_store.instance_id:
+            raise PermissionError("stale runtime instance")
+        ticket = self.ticket_store.mint(profile_id=params["profile_id"],
+                                       subject=peer_subject, purpose=params["purpose"])
+        return {"ticket": ticket, "expires_in_seconds": 30,
+                "instance_id": self.ticket_store.instance_id,
+                "profile_id": params["profile_id"], "runtime_protocol": 1}
+
+    def _posix_peer_subject(self, writer) -> Optional[str]:
+        # The legacy diagnostic channel may operate without bootstrap-safe metadata.
+        try:
+            home = self._home
+            info = home.lstat()
+            if (home.absolute() != home.resolve() or not stat.S_ISDIR(info.st_mode)
+                    or info.st_uid != os.getuid() or info.st_mode & 0o077):
+                return None
+            sock = writer.get_extra_info("socket")
+            if hasattr(socket, "SO_PEERCRED"):
+                _, uid, _ = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            elif hasattr(sock, "getpeereid"):
+                uid, _ = sock.getpeereid()
+            else:
+                return None
+            return f"uid:{uid}" if uid == os.getuid() else None
+        except OSError:
+            return None
+
     async def _handle_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=_DEFAULT_CLIENT_TIMEOUT)
@@ -237,9 +278,9 @@ class GatewayControlServer:
             # Handlers read disk; keep that off the loop that drives every platform
             # adapter so a fast-polling consumer can't stall heartbeats.
             response = await asyncio.get_running_loop().run_in_executor(
-                None, self.handle_request_line, raw.rstrip(b"\n"))
+                None, self.handle_request_line, raw.rstrip(b"\n"), self._posix_peer_subject(writer))
             writer.write(response)
-            await writer.drain()
+            await asyncio.wait_for(writer.drain(), timeout=_DEFAULT_CLIENT_TIMEOUT)
         except (asyncio.TimeoutError, ConnectionError, OSError):
             pass
         except Exception:

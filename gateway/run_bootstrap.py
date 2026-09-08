@@ -221,7 +221,29 @@ async def _start_gateway_start_control_socket(runner):
         # a truthful liveness/identity query for updater and fleet consumers. Strictly non-fatal: a bind
         # failure only means consumers fall back to the process-scan/state-file layer, exactly as before
         # this feature. See #92091.
-        from gateway.control_socket import GatewayControlServer
+        from gateway.control_socket import GatewayControlServer, build_identify_payload
+        from gateway.runtime_bootstrap import TicketStore
+        from gateway.runtime_ownership import process_ownership
+        import uuid
+        descriptor = {
+            "instance_id": uuid.uuid4().hex, "runtime_protocol": 1,
+            "state": "starting", "capabilities": [],
+            "served_profiles": [{"profile_id": str(home), "home": str(home)}
+                                for home in process_ownership.homes],
+        }
+        runner.session_runtime_descriptor = descriptor
+        runner.session_ticket_store = TicketStore(
+            descriptor["instance_id"],
+            frozenset(item["profile_id"] for item in descriptor["served_profiles"]))
+
+        def _identify_runtime():
+            payload = build_identify_payload()
+            payload.update({key: descriptor[key] for key in (
+                "instance_id", "runtime_protocol", "authority_epoch", "state", "api_origin",
+                "served_profiles", "capabilities") if key in descriptor})
+            payload["supervisor"] = {"manual": "none", "desktop": "none"}.get(
+                payload.get("supervisor"), payload.get("supervisor", "none"))
+            return payload
         # pause-for-update: the updater asks us to drain + exit (freeing venv handles) vs. a tree-kill
         # (same path as SIGUSR1). Handler runs on the socket executor thread, so marshal onto the loop.
         # pause-for-update (#92091 step 2): the updater asks this gateway to drain in-flight turns and exit
@@ -253,7 +275,8 @@ async def _start_gateway_start_control_socket(runner):
                 "pid": os.getpid(), "drain_timeout": _drain}
 
         _control_server = GatewayControlServer(
-            verb_handlers={"pause-for-update": _pause_for_update_handler})
+            verb_handlers={"pause-for-update": _pause_for_update_handler, "identify": _identify_runtime})
+        _control_server.ticket_store = runner.session_ticket_store
         if not await _control_server.start():
             _control_server = None
         else:
