@@ -218,8 +218,9 @@ class SessionAuthority:
         with live.event_stream.lock:
             if actor not in live.subscribers.values():
                 raise RuntimeStoreError("permission_denied")
-            if type(generation) is not int or generation != self._handle(ref).execution_generation:
+            if type(generation) is not int:
                 raise RuntimeStoreError("stale_generation")
+            self.check_approval_generation(ref.session_id, generation)
             if not isinstance(prompt_id, str) or not prompt_id:
                 raise RuntimeStoreError("invalid_params")
             return live.controls.respond(ref.session_id, generation, prompt_id, response)

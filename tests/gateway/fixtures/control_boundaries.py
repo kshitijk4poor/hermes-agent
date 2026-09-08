@@ -35,7 +35,7 @@ async def exercise_control_boundaries(tmp_path, monkeypatch):
             pass
         async def send_exec_approval(self, **kwargs):
             if self.mode == 'declined':
-                return SimpleNamespace(success=False, error='declined')
+                return SimpleNamespace(success=False, error='fixture egress declined: target is not approved')
             return SimpleNamespace(success=True)
         async def send(self, *args, **kwargs):
             self.sends += 1
@@ -96,9 +96,37 @@ async def exercise_control_boundaries(tmp_path, monkeypatch):
         replay = live.event_stream.since(live.event_stream.epoch, 0)
         assert 'PRIVATE_SUDO_ANSWER' not in json.dumps(replay)
 
+        # Native refusal cannot be converted into an observer approval path.
+        adapter.mode = 'declined'
+        before = live.event_stream.watermark()
+        declined = await asyncio.to_thread(_await_gateway_decision, live.route, turn._approval_notify_sync,
+                                          {'command': 'declined-fixture', 'pattern_keys': ['decline']})
+        assert declined.get('notify_failed') and adapter.sends == 0
+        assert live.event_stream.watermark() == before
+        assert not list_gateway_approvals(live.route)
+        adapter.mode = 'sent'
+        from tools import approval_context
+        with monkeypatch.context() as scoped:
+            scoped.setattr(approval_context, '_get_approval_timeout', lambda: 0)
+            timed_out = await asyncio.to_thread(_await_gateway_decision, live.route, turn._approval_notify_sync,
+                                               {'command': 'timeout-fixture', 'pattern_keys': ['timeout']})
+        assert timed_out['resolved'] is False and timed_out['choice'] is None
+        assert not (await authority.attach(actor, ref)).prompts
+
+        orphan = asyncio.create_task(asyncio.to_thread(_await_gateway_decision, live.route,
+            turn._approval_notify_sync, {'command': 'orphaned-worker', 'pattern_keys': ['orphan']}))
+        tasks.append(orphan)
+        orphan_prompt = await wait_prompt()
+        settle_session_input(db, epoch=epoch, admission_id=row['admission_id'], generation=row['generation'], outcome='completed')
+        with pytest.raises(RuntimeStoreError) as exc:
+            await authority.respond(actor, ref, row['generation'], orphan_prompt['prompt_id'], {'choice': 'once'})
+        assert exc.value.reason == 'stale_generation'
+        resolve_gateway_approval(live.route, 'deny', request_id=orphan_prompt['prompt_id'])
+        assert (await orphan)['choice'] == 'deny'
+        assert not (await authority.attach(actor, ref)).prompts
+
         # A delayed old worker callback must not publish a fresh actionable card
         # after a new generation has claimed the session.
-        settle_session_input(db, epoch=epoch, admission_id=row['admission_id'], generation=row['generation'], outcome='completed')
         admit_session_input(db, epoch=epoch, principal_id='owner', session_id='s', request_id='next', payload={'text': 'next'})
         newer = claim_session_input(db, epoch=epoch, session_id='s')
         from tools import approval_context
