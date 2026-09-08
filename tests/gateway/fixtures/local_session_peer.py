@@ -88,7 +88,8 @@ async def probe(peer, target, kind):
                               (Principal('creator', 'foreign', frozenset({'session:create'}), 'foreign'),
                                'profile_mismatch')):
             try:
-                create_local_session(authority, actor, {})
+                create_local_session(authority, actor, {'api_key': 'denied-launch-key',
+                    'provider': 'custom', 'base_url': 'http://127.0.0.1:9/v1', 'ignore_rules': True})
             except RuntimeStoreError as exc:
                 assert exc.reason == reason
             else:
