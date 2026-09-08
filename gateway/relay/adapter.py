@@ -888,7 +888,20 @@ class RelayAdapter(BasePlatformAdapter):
         if await self._consume_prompt_response(event):
             return
         await self._localize_inbound_media(event)
-        await self.handle_message(event)
+        runner = getattr(self._message_handler, '__self__', None)
+        if getattr(runner, 'session_authority', None) is not None:
+            # Busy authority dispatch waits for the final. Never await it on the
+            # WS reader: that same reader must receive the outbound_result ACK.
+            task = asyncio.create_task(self.handle_message(event))
+            self._background_tasks.add(task)
+            task.add_done_callback(self._relay_ingress_done)
+        else:
+            await self.handle_message(event)
+
+    def _relay_ingress_done(self, task):
+        self._background_tasks.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error('Relay ingress failed', exc_info=error)
 
     _SEEN_INBOUND_MAX = 512
 

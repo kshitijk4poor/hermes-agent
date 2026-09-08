@@ -150,7 +150,7 @@ async def probe(peer):
                 finally:
                     peer.release.set()
                 async with asyncio.timeout(10):
-                    while adapter._active_sessions or any(r['status'] != 'terminal' for r in
+                    while any(not task.done() for task in adapter._background_tasks) or any(r['status'] != 'terminal' for r in
                             list_session_admissions(authority.db, session_id=sid, pending_only=False)):
                         await asyncio.sleep(.01)
                 rows = list_session_admissions(authority.db, session_id=sid, pending_only=False)
