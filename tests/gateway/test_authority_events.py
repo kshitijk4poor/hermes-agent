@@ -46,7 +46,8 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
     db = SessionDB(tmp_path / 'replay.db')
     async def answer(event):
         return event.text
-    runner = SimpleNamespace(_session_db=db, _handle_message=answer, _adapter_for_source=lambda source: None)
+    runner = SimpleNamespace(_session_db=db, _draining=False,
+                             _handle_message=answer, _adapter_for_source=lambda source: None)
     authority = await initialize_session_authority(runner, profile_id='replay', instance_id='owner')
     ref = SessionRef('replay', 'shared')
     source = SessionSource(platform=Platform.TELEGRAM, chat_id='replay')
