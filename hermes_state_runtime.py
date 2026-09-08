@@ -173,7 +173,7 @@ def recover_session_inputs(db, *, epoch: int) -> int:
 
 def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str,
                            request_id: str, expected_revision: int,
-                           operation: str, payload: dict) -> dict:
+                           operation: str, payload: dict, expected_generation: int | None = None) -> dict:
     """Commit a closed metadata edit and its retry receipt in the same transaction.
 
     Caller authorizes the principal and resolves the canonical session. These
@@ -186,12 +186,18 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
         raise RuntimeStoreError('invalid_params')
     from hermes_state_mutations import validate_action, apply_action
     validate_action(operation, payload)
+    if expected_generation is not None and (type(expected_generation) is not int or expected_generation < 0):
+        raise RuntimeStoreError('invalid_params')
+    if operation == 'delete' and expected_generation is None:
+        raise RuntimeStoreError('invalid_params')
     # Snapshot caller data before waiting for the writer lock.
     payload = json.loads(_json(payload))
     key = 'gateway.mutation.v1.' + admission_fingerprint(
         canonical_target=session_id, payload={'principal': principal_id, 'request': request_id})
-    digest = admission_fingerprint(canonical_target=session_id, payload={
-        'operation': operation, 'payload': payload, 'expected_revision': expected_revision})
+    fingerprint = {'operation': operation, 'payload': payload, 'expected_revision': expected_revision}
+    if expected_generation is not None:
+        fingerprint['expected_generation'] = expected_generation
+    digest = admission_fingerprint(canonical_target=session_id, payload=fingerprint)
 
     def write(conn):
         _epoch(conn, epoch)
@@ -204,11 +210,13 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
         session = _session(conn, session_id)
         if session['runtime_revision'] != expected_revision:
             raise RuntimeStoreError('revision_conflict')
+        if expected_generation is not None and session['runtime_generation'] != expected_generation:
+            raise RuntimeStoreError('stale_generation')
         affected, projection = apply_action(db, conn, session_id, operation, payload)
         conn.executemany('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?',
                          [(target,) for target in affected])
-        updated = _session(conn, session_id)
-        result = {'session_id': session_id, 'revision': updated['runtime_revision'],
+        updated = conn.execute('SELECT * FROM sessions WHERE id=?', (session_id,)).fetchone()
+        result = {'session_id': session_id, 'revision': updated['runtime_revision'] if updated else expected_revision + 1,
                   'operation': operation, **projection}
         conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)',
                      (key, _json({'digest': digest, 'result': result})))
