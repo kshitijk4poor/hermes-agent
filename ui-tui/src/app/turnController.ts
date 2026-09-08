@@ -153,7 +153,7 @@ export const lateInterruptedReply = (
 
 export interface InterruptDeps {
   appendMessage: (msg: Msg) => void
-  gw: { request: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T> }
+  gw: { isCanonical?: boolean; request: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T> }
   sid: string
   sys: (text: string) => void
 }
@@ -363,7 +363,7 @@ class TurnController {
   // cancelled turn's "[interrupted]" reply.
   interruptTurn({ appendMessage, gw, sid, sys }: InterruptDeps, opts: { keepBusy?: boolean } = {}) {
     this.interrupted = true
-    gw.request<SessionInterruptResponse>('session.interrupt', { session_id: sid }).catch(() => {})
+    gw.request<SessionInterruptResponse>('session.interrupt', { session_id: sid, ...(gw.isCanonical ? { execution_generation: getUiState().info?.execution_generation } : {}) }).catch(() => {})
 
     this.closeReasoningSegment()
 

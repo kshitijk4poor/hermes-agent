@@ -1,0 +1,52 @@
+import { randomUUID } from 'node:crypto'
+
+export interface SharedControl { session_id: string; execution_generation: number; prompt_id: string }
+export const sharedControlParams = (prompt?: { sharedControl?: SharedControl } | null) => prompt?.sharedControl ?? {}
+
+export interface CreationContract { sources: string[]; parameters: string[] }
+
+export function canonicalRequest(method: string, original: Record<string, unknown>, contract?: CreationContract) {
+  const params = { ...original }
+  if (method === 'session.create') {
+    delete params.cols
+    params.source = 'tui'
+    params.request_id ??= randomUUID()
+    if (!contract?.sources.includes('tui')) { throw new Error('gateway does not support tui session policy; update/restart the gateway') }
+    const unsupported = Object.keys(params).filter(key => !contract.parameters.includes(key))
+    if (unsupported.length) { throw new Error(`gateway does not support TUI launch options: ${unsupported.join(', ')}`) }
+  }
+  if (method === 'prompt.submit' && params.submission_id) {
+    params.input_id = params.submission_id
+    delete params.submission_id
+  }
+  if (method === 'session.resume' || method === 'session.activate') {
+    method = 'session.resume'
+    delete params.cols
+    delete params.omit_messages
+  }
+  return { method, params }
+}
+
+export function canonicalResult(method: string, value: any): any {
+  if (!value || typeof value !== 'object') { return value }
+  if (method === 'prompt.submit' && value.ref) {
+    return { ...value, target_profile_home: value.ref.profile_id, target_session_id: value.ref.session_id }
+  }
+  if (['session.create', 'session.resume', 'session.activate'].includes(method)) {
+    return { ...value, info: { ...value.info, stored_session_id: value.stored_session_id,
+      execution_epoch: String(value.authority_epoch), execution_generation: value.execution_generation,
+      running: value.running } }
+  }
+  return value
+}
+
+export function localCreationOptions(env = process.env): Record<string, unknown> {
+  const fields: Record<string, string | undefined> = {
+    model: env.HERMES_MODEL, provider: env.HERMES_TUI_PROVIDER, cwd: env.HERMES_CWD,
+    skills: env.HERMES_TUI_SKILLS, checkpoints: env.HERMES_TUI_CHECKPOINTS,
+    max_turns: env.HERMES_TUI_MAX_TURNS, accept_hooks: env.HERMES_ACCEPT_HOOKS
+  }
+  const options: Record<string, unknown> = Object.fromEntries(Object.entries(fields).filter(([, value]) => value))
+  if (env.HERMES_TUI_TOOLSETS) { options.toolsets = env.HERMES_TUI_TOOLSETS.split(',') }
+  return options
+}

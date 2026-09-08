@@ -822,6 +822,14 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       }
     }
 
+    const settled = ev as unknown as { type: string; payload?: { prompt_id?: string } }
+    if (settled.type === 'approval.settled' || settled.type === 'clarify.settled') {
+      const kind = settled.type === 'approval.settled' ? 'approval' : 'clarify'
+      patchOverlayState(previous => previous[kind]?.sharedControl?.prompt_id === settled.payload?.prompt_id
+        ? { ...previous, [kind]: null } : previous)
+      return
+    }
+
     switch (ev.type) {
       case 'connection.request':
         if (ev.payload) {
@@ -1373,20 +1381,61 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       }
 
-      case 'request.cancel': {
-        // The backend withdrew a server→client request (timeout / interrupt /
-        // session close): tear down whichever card carries that id. A clarify
-        // that timed out is persisted as an abandoned prompt by tool.complete.
-        const id = ev.payload?.id
+      case 'clarify.request': {
+        const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
+        const sharedControl = shared.prompt_id && ev.session_id && typeof shared.execution_generation === 'number'
+          ? { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id } : undefined
+        const batch = (ev.payload.questions ?? [])
+          .filter(q => typeof q?.qid === 'string' && q.qid && typeof q?.question === 'string' && q.question.trim())
+          .map(q => ({
+            choices: q.choices && q.choices.length > 0 ? q.choices : null,
+            multiSelect: q.multi_select === true,
+            qid: q.qid,
+            question: q.question.trim()
+          }))
+
+        patchOverlayState({
+          clarify: batch.length
+            ? {
+                answers: ev.payload.answers ?? {},
+                choices: null,
+                question: '',
+                questions: batch,
+                requestId: shared.prompt_id ?? ev.payload.request_id, sharedControl
+              }
+            : {
+                choices: ev.payload.choices ?? null,
+                question: ev.payload.question ?? '',
+                requestId: shared.prompt_id ?? ev.payload.request_id, sharedControl
+              }
+        })
+        setStatus('waiting for input…')
+        ringPromptBell()
 
         if (!id) {
           return
         }
 
-        // A password/secret/vault card that timed out vanished silently; say
-        // what happened and how to get it back. Clarify already records its
-        // own "(timed out)" line via tool.complete.
-        const timeoutNotice = promptTimeoutNotice(ev.payload?.method, ev.payload?.reason)
+      case 'approval.request': {
+        const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
+        const sharedControl = shared.prompt_id && ev.session_id && typeof shared.execution_generation === 'number'
+          ? { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id } : undefined
+        const description = String(ev.payload.description ?? 'dangerous command')
+        // Only an explicit false (tirith warning) drops the permanent-allow option.
+        const allowPermanent = ev.payload.allow_permanent !== false
+
+        patchOverlayState({
+          approval: {
+            allowPermanent,
+            sharedControl,
+            choices: ev.payload.choices,
+            command: String(ev.payload.command ?? ''),
+            description,
+            smartDenied: ev.payload.smart_denied === true
+          }
+        })
+        setStatus('approval needed')
+        ringPromptBell()
 
         if (timeoutNotice) {
           sys(timeoutNotice)

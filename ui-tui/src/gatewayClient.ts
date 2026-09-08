@@ -15,8 +15,9 @@ import {
 import { reconnectBackoffDelayMs } from '@hermes/shared/reconnect-backoff'
 import { WebSocket as UndiciWebSocket } from 'undici'
 
-import type { AnyGatewayEvent } from './gatewayTypes.js'
-import { t } from './i18n/runtime.js'
+import { canonicalRequest, canonicalResult, type CreationContract } from './canonicalGateway.js'
+
+import type { GatewayEvent } from './gatewayTypes.js'
 import { CircularBuffer } from './lib/circularBuffer.js'
 import { recordParentLifecycle } from './lib/parentLog.js'
 
@@ -176,6 +177,7 @@ export class GatewayClient extends EventEmitter {
   private localStarted = false
   private localGeneration = 0
   isCanonical = false
+  private creationContract?: CreationContract
 
   constructor(private bootstrap: (start: boolean) => Promise<LocalGatewayGrant> = bootstrapLocalGateway) {
     super()
@@ -418,7 +420,16 @@ export class GatewayClient extends EventEmitter {
     }
   }
 
-  publishLocalEvent(ev: AnyGatewayEvent) {
+  hydrateSharedPrompts(snapshot: unknown) {
+    if (!this.isCanonical) { return }
+    const result = snapshot as { session_id: string; authority_epoch: number; prompts?: Array<Record<string, unknown>> }
+    for (const prompt of result.prompts ?? []) {
+      this.publishLocalEvent({ type: `${prompt.kind}.request`, session_id: result.session_id,
+        payload: { ...prompt, execution_epoch: String(result.authority_epoch) } } as unknown as GatewayEvent)
+    }
+  }
+
+  publishLocalEvent(ev: GatewayEvent) {
     const frame = JSON.stringify({ jsonrpc: '2.0', method: 'event', params: ev })
 
     this.mirrorEventToSidecar(frame)
@@ -508,7 +519,8 @@ export class GatewayClient extends EventEmitter {
 
             this.connectSidecarMirror()
             if (this.isCanonical) {
-              void this.requestOverWebSocket('runtime.describe').then(() => {
+              void this.requestOverWebSocket<{session_create: CreationContract}>('runtime.describe').then(description => {
+                this.creationContract = description.session_create
                 if (this.ws === ws) { this.publish({ type: 'gateway.ready', payload: {} }) }
               }).catch(error => {
                 this.publish({ type: 'gateway.start_timeout', payload: {
@@ -622,6 +634,55 @@ export class GatewayClient extends EventEmitter {
     }
 
     this.startLocalGateway()
+  }
+
+  private dispatch(msg: Record<string, unknown>) {
+    const id = msg.id as string | undefined
+
+    if (id && id === this.heartbeatPendingId) {
+      this.heartbeatPendingId = null
+      this.heartbeatSentAt = 0
+
+      return
+    }
+
+    const p = id ? this.pending.get(id) : undefined
+
+    if (p) {
+      this.settle(p, msg.error ? this.toError(msg.error) : null, msg.result)
+
+      return
+    }
+
+    if (msg.method === 'event') {
+      const ev = asGatewayEvent(msg.params)
+
+      if (ev) {
+        if (this.isCanonical) {
+          const shared = ev as GatewayEvent & { authority_epoch?: number; execution_generation?: number }
+          ev.payload = { ...ev.payload, execution_epoch: String(shared.authority_epoch),
+            execution_generation: shared.execution_generation } as any
+        }
+        this.publish(ev)
+      }
+    }
+  }
+
+  private toError(raw: unknown): Error {
+    const err = raw as { message?: unknown } | null | undefined
+
+    return new Error(typeof err?.message === 'string' ? err.message : 'request failed')
+  }
+
+  private settle(p: Pending, err: Error | null, result: unknown) {
+    clearTimeout(p.timeout)
+    this.pending.delete(p.id)
+
+    if (err) {
+      p.reject(err)
+    } else {
+      p.resolve(result)
+    }
   }
 
   private pushLog(line: string) {
@@ -742,7 +803,8 @@ export class GatewayClient extends EventEmitter {
     if (!this.bootstrapFlight) { this.start() }
     return this.bootstrapFlight!.then(() => {
       if (this.bootstrapError) { throw this.bootstrapError }
-      return this.requestOverWebSocket<T>(method, params)
+      const request = canonicalRequest(method, params, this.creationContract)
+      return this.requestOverWebSocket<T>(request.method, request.params).then(value => canonicalResult(method, value))
     })
   }
 
