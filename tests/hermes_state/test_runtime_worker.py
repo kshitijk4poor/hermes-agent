@@ -63,18 +63,29 @@ def test_worker_receipts_require_exact_sequence_assignment_and_adoption(tmp_path
         db.close()
 
 
-def test_worker_mutation_and_receipt_roll_back_together(tmp_path):
+@pytest.mark.parametrize('content', ['once', 'a' + chr(0xD800) + 'b'])
+def test_worker_mutation_and_receipt_roll_back_together(tmp_path, content):
     db, epoch, assignment = setup_worker(tmp_path)
     try:
         db._conn.execute("CREATE TRIGGER reject_receipt BEFORE INSERT ON worker_receipts BEGIN SELECT RAISE(ABORT, 'receipt fixture'); END")
-        args = dict(epoch=epoch, **assignment, sequence=1, role='assistant', content='once')
+        db.create_session('direct', source='test')
+        db.append_message('direct', 'assistant', content)
+        expected_content = db.get_messages('direct')[0]['content']
+        args = dict(epoch=epoch, **assignment, sequence=1, role='assistant', content=content)
         with pytest.raises(sqlite3.IntegrityError, match='receipt fixture'):
             rt.persist_worker_message(db, **args)
         assert db.get_messages('s') == []
         assert db.get_session('s')['message_count'] == 0
         assert db._conn.execute("SELECT last_sequence FROM worker_executions WHERE execution_id='worker'").fetchone()[0] == 0
         db._conn.execute('DROP TRIGGER reject_receipt')
-        rt.persist_worker_message(db, **args)
+        receipt = rt.persist_worker_message(db, **args)
+        db.close()
+        db = SessionDB(db_path=tmp_path / 'state.db')
+        assert rt.persist_worker_message(db, **args) == receipt
+        assert db.get_messages('s')[0]['content'] == expected_content
+        if content != expected_content:
+            with pytest.raises(rt.RuntimeStoreError, match='admission_conflict'):
+                rt.persist_worker_message(db, **(args | {'content': expected_content}))
         assert len(db.get_messages('s')) == db.get_session('s')['message_count'] == 1
     finally:
         db.close()

@@ -432,7 +432,7 @@ def persist_worker_message(db, *, epoch: int, execution_id: str, session_id: str
             raise RuntimeStoreError('invalid_params')
         db._check_transcript_write_guards(conn, session_id, None)
         now = time.time()
-        message = conn.execute('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)', (session_id, role, content, now))
+        message = conn.execute('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)', (session_id, role, db._encode_content(content), now))
         conn.execute('UPDATE sessions SET message_count=message_count+1,last_activity_at=?,runtime_revision=runtime_revision+1 WHERE id=?', (now, session_id))
         result = {'message_id': message.lastrowid}
         conn.execute('INSERT INTO worker_receipts(execution_id,sequence,payload_digest,result_json) VALUES(?,?,?,?)', (execution_id, sequence, digest, _json(result)))

@@ -7,7 +7,7 @@ from hermes_state import SessionDB
 import hermes_state_runtime as rt
 
 
-@pytest.mark.parametrize('operation,payload', [('rename', {'title': ' New  name '}), ('archive', {'archived': True})])
+@pytest.mark.parametrize('operation,payload', [('rename', {'title': ' New  name '}), ('rename', {'title': 'a' + chr(0xD800) + 'b'}), ('archive', {'archived': True})])
 def test_mutation_receipt_fences_replay_revision_and_epoch(tmp_path, operation, payload):
     db = SessionDB(db_path=tmp_path / 'state.db')
     try:
@@ -16,7 +16,17 @@ def test_mutation_receipt_fences_replay_revision_and_epoch(tmp_path, operation, 
         mutate = getattr(rt, 'mutate_runtime_session', None)
         assert callable(mutate), 'revision-fenced mutation operation missing'
         args = dict(epoch=epoch, principal_id='human', session_id='s', request_id='edit', expected_revision=0, operation=operation, payload=payload)
+        if operation == 'rename':
+            db.create_session('direct', source='test')
+            db.set_session_title('direct', payload['title'])
+            expected_title = db.get_session_title('direct')
+            db.set_session_title('direct', '')
         result = mutate(db, **args)
+        if operation == 'rename':
+            assert result['title'] == expected_title
+            if payload['title'] != expected_title:
+                with pytest.raises(rt.RuntimeStoreError, match='admission_conflict'):
+                    mutate(db, **(args | {'payload': {'title': expected_title}}))
         assert result['revision'] == 1
         assert mutate(db, **args) == result
         assert db.get_session('s')['runtime_revision'] == 1
