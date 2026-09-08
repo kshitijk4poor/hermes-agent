@@ -529,7 +529,14 @@ def _restore_epoch_source(src: Path, dst: Path):
     if dst.name != 'state.db' and dst.resolve().name != 'state.db':
         yield src
         return
-    floor = _restore_epoch(dst)
+    try:
+        floor = _restore_epoch(dst)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise OSError(
+            f"Cannot read the canonical runtime epoch at {dst}; refusing in-place restore. "
+            "Use `hermes sessions recover --source <snapshot> --output <separate-path>` "
+            "to salvage transcripts into a separate output."
+        ) from exc
     if floor <= _restore_epoch(src):
         yield src
         return

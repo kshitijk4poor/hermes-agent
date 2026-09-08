@@ -107,7 +107,8 @@ def test_update_autorestore_refuses_under_own_live_connection(
 
 
 def test_safe_restore_fallback_still_works_without_holder(tmp_path):
-    dst = tmp_path / "state.db"
+    # A genuinely non-runtime store has no canonical authority epoch to preserve.
+    dst = tmp_path / "projects.db"
     src = tmp_path / "snap.db"
     _make_db(src, "snapshot-good")
     _make_db(dst, "live-old")
@@ -116,6 +117,16 @@ def test_safe_restore_fallback_still_works_without_holder(tmp_path):
 
     assert backup_restore_mod._safe_restore_db(src, dst) is True
     assert _read_marker(dst) == "snapshot-good"
+
+
+def test_safe_restore_refuses_unreadable_canonical_epoch(tmp_path, caplog):
+    dst, src = tmp_path / "state.db", tmp_path / "snapshot.db"
+    _make_db(src, "snapshot-good")
+    dst.write_bytes(b"unreadable canonical epoch")
+    before = dst.read_bytes(), src.read_bytes()
+    assert backup_mod._safe_restore_db(src, dst) is False
+    assert (dst.read_bytes(), src.read_bytes()) == before
+    assert "separate output" in caplog.text
 
 
 def test_update_autorestore_still_works_without_holder(tmp_path):
