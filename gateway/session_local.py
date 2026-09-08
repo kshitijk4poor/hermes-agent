@@ -97,7 +97,19 @@ def create_local_session(authority, actor, params):
     from hermes_state_local import commit_local_session
     authority._require_admission_open()
     sid = local_identity(authority.profile_id, actor.subject, request_id)
-    from gateway.session_policy import bind_launch_key
+    from gateway.session_policy import bind_launch_key, restore_policy, launch_key
+    if authority.db.get_session(sid) is not None:
+        from hermes_state_local import local_receipt
+        saved = local_receipt(authority.db, sid)
+        original = restore_policy(saved['policy'])
+        if original.request_json != policy.request_json:
+            raise RuntimeStoreError('invalid_params')
+        if original.credential_ref is not None or params.get('api_key') is not None:
+            import hmac
+            key = launch_key(authority, original)
+            if key is None or not hmac.compare_digest(key, params.get('api_key') or ''):
+                raise RuntimeStoreError('admission_conflict')
+        return restore_local_session(authority, sid)
     policy = bind_launch_key(authority, sid, policy, params.get("api_key"), config_secrets=private_secrets)
     source = SessionSource(platform=Platform.LOCAL, chat_id=sid,
                            user_id=actor.subject, chat_type='dm')
