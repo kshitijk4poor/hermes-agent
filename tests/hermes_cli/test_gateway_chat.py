@@ -8,7 +8,7 @@ def test_unsupported_launch_options_fail_before_connection(monkeypatch, capsys):
     from hermes_cli import gateway_chat
     calls = []
     monkeypatch.setattr(gateway_chat, "connect_gateway", lambda: calls.append(True))
-    for option in ("yolo", "ignore_rules", "safe_mode", "worktree", "continue_last", "usage_file"):
+    for option in ("yolo", "safe_mode", "worktree", "continue_last", "usage_file"):
         args = argparse.Namespace(**{option: True})
         assert gateway_chat.launch_from_args(args) == 2
         assert option.replace("_", "-") in capsys.readouterr().err

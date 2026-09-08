@@ -41,6 +41,10 @@ class GatewaySessionAgentMixin:
     def _skip_context_files(self, platform_key) -> bool:
         """gateway.platforms.<plat>.skip_context_files: messaging platforms may opt out of
         filesystem-heavy context-file discovery (SOUL.md, AGENTS.md, .cursorrules)."""
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(self._runner, self._ctx.source)
+        if policy:
+            return policy.ignore_rules
         platforms_cfg = (self._ctx.user_config.get("gateway") or {}).get("platforms") or {}
         # ``hermes gateway setup`` writes ``gateway.platforms`` as a LIST of enabled platform names,
         # not a dict; treat any non-dict shape as "no per-platform overrides" rather than crashing.
@@ -147,6 +151,8 @@ class GatewaySessionAgentMixin:
         ctx = self._ctx
         runner = self._runner
         src = ctx.source
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(runner, src)
         return ctx.AIAgent(
             model=turn_route["model"], **turn_route["runtime"], **_checkpoint_agent_kwargs(ctx.user_config),
             max_iterations=max_iterations, quiet_mode=True, verbose_logging=False,
@@ -168,7 +174,8 @@ class GatewaySessionAgentMixin:
             fallback_model=self._runner._refresh_fallback_model(),
             skip_context_files=skip_context_files,
             # Keep the persona even with minimal context: soul identity is one small file.
-            load_soul_identity=True,
+            load_soul_identity=not bool(policy and policy.ignore_rules),
+            skip_memory=bool(policy and policy.ignore_rules),
         )
 
     def _resolve_turn_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations, reasoning_config, pr):

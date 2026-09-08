@@ -32,7 +32,7 @@ def test_policy_selects_surface_and_isolates_cwd(tmp_path):
         list(pool.map(run, policies))
     assert dict(os.environ) == before
     for params in ({'source': 'cron'}, {'toolsets': ['not-a-toolset']}, {'cwd': '.'},
-                   {'provider': 'custom'}, {'skills': ['x']}, {'toolsets': ['desktop_ui'], 'source': 'cli'}):
+                   {'provider': 12}, {'skills': ['x']}, {'toolsets': ['desktop_ui'], 'source': 'cli'}):
         with pytest.raises(RuntimeStoreError, match='invalid_params'):
             build_policy(params, {})
 
@@ -54,3 +54,24 @@ def test_launch_policy_reaches_real_turn_runner(tmp_path):
     receipt = json.loads((state / 'policy-receipt.json').read_text())
     assert receipt['cwd_effects'] and receipt['same_agents'] and receipt['no_spill']
     print(json.dumps(receipt))
+
+
+def test_launch_options_are_frozen_and_validated(tmp_path):
+    from gateway.session_policy import build_policy
+    from hermes_constants import parse_reasoning_effort
+    from hermes_state_runtime import RuntimeStoreError
+    cfg = {'agent': {'max_turns': 8, 'reasoning_effort': 'low'}}
+    params = dict(cwd=str(tmp_path), provider='custom', base_url='http://127.0.0.1:1234/v1',
+                  model='fixture', reasoning='high', max_turns=3, ignore_rules=True)
+    policy = build_policy(params, cfg)
+    assert policy.provider == 'custom' and policy.base_url == params['base_url']
+    assert policy.ignore_rules and policy.max_turns == 3
+    assert policy.reasoning_config == parse_reasoning_effort('high')
+    cfg['agent']['reasoning_effort'] = 'none'
+    assert policy.reasoning_config == parse_reasoning_effort('high')
+    assert build_policy(dict(cwd=str(tmp_path), ignore_rules=False), cfg).ignore_rules is False
+    for bad in ({'max_turns': True}, {'max_turns': 0}, {'reasoning': 'garbage'},
+                {'ignore_rules': 'false'}, {'base_url': 'http://user:secret@localhost/v1'}):
+        with pytest.raises(RuntimeStoreError, match='invalid_params'):
+            build_policy(dict(cwd=str(tmp_path), **bad), cfg)
+

@@ -107,11 +107,12 @@ class AuthorityConnection:
 
     async def describe(self, ref, params):
         await self.ping(ref, params)
+        from gateway.session_policy import CREATE_FIELDS
         return {'instance_id': self.authority.instance_id, 'profile_id': self.authority.profile_id,
                 'authority_epoch': self.authority.epoch,
                 'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1'],
                 'session_create': {'sources': ['cli', 'tui', 'gui'],
-                                   'parameters': ['request_id', 'source', 'cwd', 'model', 'toolsets']}}
+                                   'parameters': sorted(CREATE_FIELDS)}}
 
     async def info(self, ref, params):
         from gateway.session_local import local_session_info

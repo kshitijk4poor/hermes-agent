@@ -14,12 +14,12 @@ from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 # the authority. Reject them, rather than mutate process-wide gateway settings.
 _UNSUPPORTED = (
     "image", "skills", "worktree", "w", "checkpoints", "pass_session_id",
-    "ignore_user_config", "ignore_rules", "safe_mode", "yolo", "accept_hooks",
+    "ignore_user_config", "safe_mode", "yolo", "accept_hooks",
     "continue_last", "create_if_missing", "no_restore_cwd", "usage_file",
-    "run_budget", "api_key", "base_url", "verbose", "compact",
+    "run_budget", "api_key", "verbose", "compact",
     "list_tools", "list_toolsets",
 )
-_POLICY = ("model", "provider", "reasoning", "toolsets", "max_turns")
+_POLICY = ("model", "provider", "reasoning", "toolsets", "max_turns", "base_url", "ignore_rules")
 
 
 def validate_options(args):
@@ -30,7 +30,7 @@ def validate_options(args):
         flags = ", ".join("--" + name.replace("_", "-") for name in unsupported)
         raise GatewayClientError(f"Unsupported gateway CLI options: {flags}. No local fallback or policy changes were made.")
     if getattr(args, "resume", None) and (getattr(args, "in_dir", None) or getattr(args, "source", None) or
-            any(getattr(args, name, None) is not None for name in _POLICY)):
+            any(getattr(args, name, None) not in (None, False) for name in _POLICY)):
         raise GatewayClientError("Resume retains gateway session policy; creation overrides are unsupported on resume.")
 
 

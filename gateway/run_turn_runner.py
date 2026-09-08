@@ -900,7 +900,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         policy = policy_for_source(runner, ctx.source)
         platform_key = policy.platform if policy else ("cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value)
         combined_ephemeral = self._combined_ephemeral_prompt()
-        max_iterations = _current_max_iterations()
+        max_iterations = policy.max_turns if policy else _current_max_iterations()
         try:
             model, runtime_kwargs = runner._resolve_session_agent_runtime(
                 source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
@@ -926,7 +926,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 "messages": [], "api_calls": 0, "tools": [],
             }
         pr = runner._provider_routing
-        reasoning_config = runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model)
+        reasoning_config = (policy.reasoning_config if policy else
+            runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))
         runner._reasoning_config = reasoning_config
         runner._service_tier = runner._resolve_session_service_tier(source=ctx.source, session_key=ctx.session_key)
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)

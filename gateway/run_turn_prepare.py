@@ -52,6 +52,14 @@ class GatewayTurnPrepareMixin:
             _credential_pool_for_provider, _get_channel_override, _resolve_gateway_model,
             _resolve_runtime_agent_kwargs, _resolve_runtime_agent_kwargs_for_provider,
         )
+        from gateway.session_policy import policy_for_source
+        policy = policy_for_source(self, source) if source is not None else None
+        if policy is not None:
+            from hermes_cli.runtime_provider import resolve_runtime_provider
+            from gateway.run import _runtime_agent_kwargs
+            runtime = resolve_runtime_provider(requested=policy.provider,
+                explicit_base_url=policy.base_url, target_model=policy.model)
+            return policy.model, _runtime_agent_kwargs(runtime)
         skey = self._resolve_session_key_or_none(source, session_key)
 
         model = _resolve_gateway_model(user_config)

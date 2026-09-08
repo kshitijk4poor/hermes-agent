@@ -6,7 +6,8 @@ from pathlib import Path
 
 from hermes_state_runtime import RuntimeStoreError
 
-CREATE_FIELDS = frozenset({'request_id', 'source', 'cwd', 'model', 'toolsets'})
+CREATE_FIELDS = frozenset({'request_id', 'source', 'cwd', 'model', 'toolsets',
+                           'provider', 'base_url', 'reasoning', 'max_turns', 'ignore_rules'})
 SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop'}
 
 
@@ -23,6 +24,29 @@ class LocalSessionPolicy:
 
     def config(self):
         return json.loads(self.config_json)
+
+    @property
+    def provider(self):
+        return self.config().get('model', {}).get('provider')
+
+    @property
+    def base_url(self):
+        return self.config().get('model', {}).get('base_url')
+
+    @property
+    def ignore_rules(self):
+        return json.loads(self.request_json).get('ignore_rules', False)
+
+    @property
+    def max_turns(self):
+        from hermes_cli.config import resolve_turn_limit
+        cfg = self.config()
+        return resolve_turn_limit(cfg.get('agent', {}).get('max_turns', cfg.get('max_turns')))
+
+    @property
+    def reasoning_config(self):
+        from hermes_constants import resolve_reasoning_config
+        return resolve_reasoning_config(self.config(), self.model or '')
 
 
 def build_policy(params, config):
@@ -42,6 +66,32 @@ def build_policy(params, config):
     if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
         raise RuntimeStoreError('invalid_params')
     config = json.loads(json.dumps(config))
+    from urllib.parse import urlsplit
+    from hermes_constants import parse_reasoning_effort
+    for key in ('provider', 'base_url'):
+        if key in params:
+            value = params[key]
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeStoreError('invalid_params')
+            if key == 'base_url':
+                url = urlsplit(value)
+                if (url.scheme not in {'http', 'https'} or not url.hostname
+                        or url.username or url.password or url.query or url.fragment):
+                    raise RuntimeStoreError('invalid_params')
+            config.setdefault('model', {})[key] = value
+    if 'ignore_rules' in params and type(params['ignore_rules']) is not bool:
+        raise RuntimeStoreError('invalid_params')
+    if 'max_turns' in params:
+        value = params['max_turns']
+        if type(value) is not int or value <= 0:
+            raise RuntimeStoreError('invalid_params')
+        config.setdefault('agent', {})['max_turns'] = value
+    if 'reasoning' in params:
+        if not isinstance(params['reasoning'], str) or parse_reasoning_effort(params['reasoning']) is None:
+            raise RuntimeStoreError('invalid_params')
+        config.setdefault('agent', {})['reasoning_effort'] = params['reasoning']
+        # An explicit launch level wins over a per-model default, just like CLI.
+        config['agent'].pop('reasoning_overrides', None)
     explicit = params.get('toolsets')
     if 'toolsets' in params:
         if (not isinstance(explicit, list) or any(not isinstance(x, str) or not validate_toolset(x) for x in explicit)
