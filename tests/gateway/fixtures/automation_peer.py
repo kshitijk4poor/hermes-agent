@@ -28,7 +28,7 @@ class Model(BaseHTTPRequestHandler):
         last = next((m.get('content', '') for m in reversed(messages) if m['role'] == 'user'), '')
         if 'HOLD_AUTOMATION' in str(last):
             self.server.blocked.set()
-            self.server.release.wait(60)
+            self.server.release.wait(120)
         message = {'role': 'assistant', 'content': 'AUTOMATION_ACK'}
         if 'SPAWN_AUTOMATION' in str(last) and messages[-1]['role'] != 'tool':
             code = ('import pathlib,time; p=pathlib.Path(' + repr(str(self.server.gate)) + '); '
@@ -54,7 +54,7 @@ class Model(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
-async def probe(root, base):
+async def probe(root, base, mode):
     home, user = base / 'state', base / 'user'
     home.mkdir(); user.mkdir()
     model = ThreadingHTTPServer(('127.0.0.1', 0), Model)
@@ -127,9 +127,13 @@ async def probe(root, base):
                         await ws.send(json.dumps({'type': 'inbound', 'event': {'text': text,
                             'message_id': identity, 'source': {'platform': 'telegram', 'chat_id': 'automation-chat',
                             'chat_type': 'dm', 'user_id': 'fixture-user'}}}) + '\n')
-                    await send('spawn', 'SPAWN_AUTOMATION')
+                    await send('spawn', 'SPAWN_AUTOMATION' if mode == 'terminal' else 'WARM_AUTOMATION')
                     await wait_for(lambda: any(r['request_id'] == 'spawn' and r['status'] == 'terminal' for r in rows()))
-                    assert 'REAL_TERMINAL_COMPLETION' in json.dumps(model.requests), 'model did not request real terminal'
+                    if mode == 'terminal':
+                        assert 'REAL_TERMINAL_COMPLETION' in json.dumps(model.requests), 'model did not request real terminal'
+                    else:
+                        await send('timer-config', '/heartbeat every 1m TIMER_AUTOMATION')
+                        await wait_for(lambda: 'Heartbeat' in json.dumps(outgoing))
                     sid = rows()[0]['target_session_id']
                     async with websocket(home, desc) as observer:
                         assert 'result' in await rpc(observer, 'session.resume', session_id=sid)
@@ -138,7 +142,8 @@ async def probe(root, base):
                     await send('human-follower', 'HUMAN_FIFO_FOLLOWER')
                     await wait_for(lambda: any(r['request_id'] == 'human-follower' for r in rows()))
                     model.gate.touch()
-                    await asyncio.sleep(8)  # production notify watcher polls every five seconds
+                    # Real cadence: process polls every five seconds; heartbeat interval is one minute.
+                    await asyncio.sleep(8 if mode == 'terminal' else 70)
                     ledger = rows()
                     automatic = [r for r in ledger if r['principal_id'].startswith('automation:')]
                     assert automatic, {'failure': 'producer ACK bypassed canonical durable FIFO', 'ledger': ledger,
@@ -151,7 +156,8 @@ async def probe(root, base):
                     assert all(r['outcome'] == 'completed' for r in rows()), rows()
                     texts = [next((m.get('content', '') for m in reversed(r['messages']) if m['role'] == 'user'), '')
                              for r in model.requests if r.get('messages')]
-                    assert 'REAL_TERMINAL_COMPLETION' in str(texts[-1]), texts
+                    marker = 'REAL_TERMINAL_COMPLETION' if mode == 'terminal' else 'TIMER_AUTOMATION'
+                    assert marker in str(texts[-1]), texts
                     assert 'HUMAN_FIFO_FOLLOWER' in str(texts[-2]), texts
                     print(json.dumps({'daemon_pid': proc.pid, 'ledger': rows(), 'model_inputs': texts,
                                       'observer_closed_before_completion': True}))
@@ -167,4 +173,4 @@ async def probe(root, base):
 
 
 if __name__ == '__main__':
-    asyncio.run(probe(Path(__file__).resolve().parents[3], Path(sys.argv[1])))
+    asyncio.run(probe(Path(__file__).resolve().parents[3], Path(sys.argv[1]), sys.argv[2]))

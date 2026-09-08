@@ -138,6 +138,8 @@ def restore_native(payload, runner=None):
                         **deepcopy(envelope['event']))
     if 'automation' in envelope:
         event.internal = True
+        if envelope['automation'].get('heartbeat'):
+            event._heartbeat_session_id = envelope['automation']['heartbeat']
         event.metadata = {'gateway_session_key': envelope['route'],
                           'gateway_session_id': envelope['automation']['owner']}
     return event

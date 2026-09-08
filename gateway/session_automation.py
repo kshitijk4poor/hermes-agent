@@ -84,6 +84,8 @@ def snapshot_automation(authority, adapter, event, identity):
         'timestamp': datetime.fromtimestamp(0, timezone.utc).isoformat(),
         'event': {'message_id': identity}, 'provenance': provenance,
         'automation': {'identity': identity, 'owner': entry.session_id}}
+    if getattr(event, '_heartbeat_session_id', None):
+        envelope['automation']['heartbeat'] = event._heartbeat_session_id
     identities = event.metadata.get('automation_identities')
     if identities:
         envelope['automation']['identities'] = sorted(set(identities))
