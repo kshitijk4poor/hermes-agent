@@ -118,6 +118,7 @@ async def exercise_control_boundaries(tmp_path, monkeypatch):
         tasks.append(orphan)
         orphan_prompt = await wait_prompt()
         settle_session_input(db, epoch=epoch, admission_id=row['admission_id'], generation=row['generation'], outcome='completed')
+        assert not (await authority.attach(actor, ref)).prompts, 'snapshot presents retired worker approval'
         with pytest.raises(RuntimeStoreError) as exc:
             await authority.respond(actor, ref, row['generation'], orphan_prompt['prompt_id'], {'choice': 'once'})
         assert exc.value.reason == 'stale_generation'

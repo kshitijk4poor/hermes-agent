@@ -90,7 +90,8 @@ class SessionAuthority:
             if transport is not None:
                 live.event_stream.fanout.attach(transport)
             handle = self._handle(ref)
-            prompts = live.controls.snapshot(ref.session_id, handle.execution_generation)
+            active_generation = handle.execution_generation if handle.execution_state == "running" else None
+            prompts = live.controls.snapshot(ref.session_id, active_generation)
             epoch, sequence = live.event_stream.watermark()
             return SubscriptionSnapshot(subscription, handle, epoch,
                                         sequence, tuple(self.db.get_messages_as_conversation(ref.session_id)),
@@ -254,7 +255,7 @@ class SessionAuthority:
                 outcome = 'failed'
             settled = settle_session_input(self.db, epoch=self.epoch, admission_id=admission_id,
                                            generation=row['generation'], outcome=outcome)
-            live.controls.snapshot(ref.session_id, row['generation'])
+            live.controls.snapshot(ref.session_id, None)
             live.event_stream.publish(ref.session_id, {
                 'text': response, 'content': response, 'admission_id': admission_id,
                 'outcome': settled['outcome']})
