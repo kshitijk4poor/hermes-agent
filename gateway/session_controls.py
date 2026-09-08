@@ -25,7 +25,7 @@ class AuthorityConnection:
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
         handlers = {'session.resume': self.resume, 'prompt.submit': self.submit,
                     'prompt.receipt': self.receipt, 'prompt.cancel': self.cancel,
-                    'session.interrupt': self.interrupt}
+                    'session.interrupt': self.interrupt, 'session.events.since': self.events_since}
         try:
             if method not in handlers:
                 raise RuntimeStoreError('invalid_params')
@@ -45,8 +45,18 @@ class AuthorityConnection:
                 'messages': list(snapshot.history), 'message_count': len(snapshot.history),
                 'running': snapshot.handle.execution_state == 'running',
                 'authority_epoch': snapshot.handle.authority_epoch,
+                'replay_epoch': snapshot.replay_epoch, 'last_sequence': snapshot.last_sequence,
+                'subscription_id': snapshot.subscription_id, 'revision': snapshot.handle.revision,
                 'execution_generation': snapshot.handle.execution_generation,
                 'pending': [asdict(r) for r in snapshot.pending], 'info': {}}
+
+    async def events_since(self, ref, params):
+        self.authority.authorize(self.actor, ref, 'session:read')
+        sequence = params.get('last_sequence', params.get('last_seen', 0))
+        epoch = params.get('replay_epoch')
+        if type(sequence) is not int or sequence < 0 or (epoch is not None and not isinstance(epoch, str)):
+            raise RuntimeStoreError('invalid_params')
+        return self.authority.sessions[ref.session_id].event_stream.since(epoch, sequence)
 
     async def submit(self, ref, params):
         if ref.session_id not in self.subscriptions:
