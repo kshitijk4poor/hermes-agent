@@ -82,6 +82,19 @@ async def probe(peer):
             assert 'result' in created, created
             sid = created['result']['session_id']
             sessions.append(sid)
+            from gateway.session_policy import policy_for_source
+            from hermes_state_runtime import RuntimeStoreError
+            live_source = authority.sessions[sid].source
+            adapter = runner._adapter_for_source(live_source)
+            saved_policy = adapter.policies.pop(live_source.chat_id)
+            try:
+                policy_for_source(runner, live_source)
+            except RuntimeStoreError as exc:
+                assert exc.reason == 'storage_unavailable'
+            else:
+                raise AssertionError('missing recovered policy silently selected CLI')
+            finally:
+                adapter.policies[live_source.chat_id] = saved_policy
             again = await rpc(ws, 'session.create', **params)
             assert again['result']['session_id'] == sid
             conflict = await rpc(ws, 'session.create', **{**params, 'model': 'conflict'})

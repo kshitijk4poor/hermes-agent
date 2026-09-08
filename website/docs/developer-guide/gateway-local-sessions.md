@@ -1,6 +1,6 @@
 # Gateway-owned fresh local sessions
 
-The composed gateway listener can create a fresh local **CLI-policy** session without
+The composed gateway listener can create fresh local **CLI, TUI, or GUI-policy** sessions without
 starting `tui_gateway`'s separate agent runtime. The existing `GatewayRunner` / `TurnRunner`
 own execution, approval waiters, tool calls, session storage, and canonical event delivery.
 
@@ -25,13 +25,23 @@ pending approval alive. A new viewer can resume the same identity and answer thr
 
 ## Deliberately limited compatibility
 
-- Only `source: "cli"` (also the default) is currently accepted. It maps to the existing
-  `Platform.LOCAL` → CLI tool/display policy. GUI/TUI policy is **not** inferred from
-  process environment or the identity of an attaching viewer. Explicit GUI/TUI/native/
-  automation source selections are rejected until their own policy is wired and tested.
-- Creation currently accepts only `request_id` and `source`. Model/provider/reasoning,
-  cwd/worktree, toolsets/skills, seeded history, profile switching, YOLO, and other launch
-  options return `invalid_params`; none silently modify daemon-wide configuration.
+- `source` accepts `cli` (default), `tui`, or `gui`. These select the existing agent
+  platforms `cli`, `tui`, and `desktop`, respectively. The native local routing identity
+  remains server-owned `Platform.LOCAL`; source never grants messaging/native trust.
+  Default TUI selection folds in `project`; GUI folds in `project` and `desktop_ui`.
+  GUI policy is independent of `HERMES_DESKTOP` and of the attaching viewer's identity.
+- Optional flat creation fields: `cwd` (existing absolute gateway-local directory),
+  `model` (nonempty model identifier on the daemon's configured provider), and `toolsets`
+  (explicit array of established toolset names, including an empty array). Unknown or
+  policy-filtered toolsets reject instead of silently disappearing. Explicit toolsets
+  override the default surface additions; CLI/TUI cannot explicitly request `desktop_ui`.
+  `cwd`, model selection, source and effective toolsets are captured at creation; attach
+  cannot change them. A conflicting repeat `request_id` returns `invalid_params`.
+- Provider/base URL overrides, reasoning/service-tier, skills, cwd worktree creation,
+  seeded history, profile switching, YOLO, and other launch options still return
+  `invalid_params`. Provider credentials/routing and reasoning/service-tier defaults still
+  use the existing gateway resolution lifecycle; this is not full launch-option parity.
+  No supported launch field mutates daemon-wide configuration or process environment.
 - Fresh creation currently requires the identity stamped by the existing gated WS ticket
   path. The legacy ungated `?token=` path in this base does not stamp identity and cannot
   create. The authentication/bootstrap integration must supply the proper server principal;
@@ -61,3 +71,12 @@ reattaches after all viewers close, and verifies the answer reaches the next loo
 model request. No native messaging allow-all credential authorizes the execution; a
 separate negative control enables messaging allow-all only while proving reconstructed
 local source/profile objects still fail closed.
+
+`tests/gateway/test_session_policy.py` adds three simultaneous CLI/TUI/GUI turns against
+an owned loopback model. A barrier holds their first requests concurrently; real terminal
+calls write separate files in three owned working directories. The next requests expose
+the correct cwd results, distinct requested models and surface-specific tool schemas.
+Reconnect preserves each agent; launcher environment carriers and config bytes do not
+change. This is loopback integration evidence, not native launcher or vendor evidence.
+The frozen policy is currently adapter-owned memory; restart integration must persist and
+restore it before execution. A registered local source missing its policy fails closed.

@@ -75,7 +75,12 @@ def policy_for_source(runner, source):
         return None
     adapter = runner._adapter_for_source(source)
     if isinstance(adapter, LocalSessionAdapter) and adapter.authorize_source(source):
-        return adapter.policies.get(source.chat_id)
+        policy = adapter.policies.get(source.chat_id)
+        if policy is None:
+            # Cold recovery must restore the frozen policy before executing, not
+            # reinterpret a LOCAL route as a default CLI launch.
+            raise RuntimeStoreError('storage_unavailable')
+        return policy
     return None
 
 

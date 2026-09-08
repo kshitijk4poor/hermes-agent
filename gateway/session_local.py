@@ -1,7 +1,6 @@
 """Fresh local routes owned by the authenticated gateway, not by a viewer.
 
-This initial surface uses CLI policy. Unsupported launch policies fail explicitly
-rather than mutating the daemon environment or pretending to provide GUI parity.
+Source and supported launch settings are frozen per route, never process env.
 """
 from __future__ import annotations
 
