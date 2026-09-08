@@ -201,6 +201,17 @@ class SessionAuthority:
             agent.interrupt()
         return self._handle(ref)
 
+    def check_approval_generation(self, session_id, generation):
+        handle = self._handle(SessionRef(self.profile_id, session_id))
+        if handle.execution_generation != generation or handle.execution_state != "running":
+            raise RuntimeStoreError("stale_generation")
+
+    def register_approval(self, session_id, generation, route, data):
+        live = self.sessions[session_id]
+        with live.event_stream.lock:
+            self.check_approval_generation(session_id, generation)
+            live.controls.register(session_id, route, generation, data)
+
     async def respond(self, actor, ref, generation, prompt_id, response):
         self.authorize(actor, ref, "session:approve")
         live = self.sessions[ref.session_id]

@@ -19,3 +19,10 @@ def test_shared_approval_outlives_viewer_and_bypasses_fifo(tmp_path):
     receipt = json.loads((state / 'receipt.json').read_text())
     print(json.dumps(receipt))
     assert receipt['real_terminal_effect'] and receipt['fifo_bypassed'] and receipt['detach_kept_pending']
+
+
+def test_control_identity_rejects_foreign_and_retired_workers(tmp_path, monkeypatch):
+    import asyncio
+    import runpy
+    fixture = runpy.run_path(str(Path(__file__).parent / 'fixtures' / 'control_boundaries.py'))
+    asyncio.run(fixture['exercise_control_boundaries'](tmp_path, monkeypatch))

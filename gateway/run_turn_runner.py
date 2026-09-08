@@ -452,12 +452,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         return response, answered
 
     def _approval_notify_sync(self, approval_data: dict) -> None:
+        if self._approval_owner is not None:
+            authority, session_id, generation = self._approval_owner
+            authority.check_approval_generation(session_id, generation)
         # A native decline must finish before any observer can authorize work.
         self._render_approval_sync(approval_data)
         if self._approval_owner is not None:
-            authority, session_id, generation = self._approval_owner
-            live = authority.sessions[session_id]
-            live.controls.register(session_id, self._ctx.session_key, generation, approval_data)
+            authority.register_approval(session_id, generation, self._ctx.session_key, approval_data)
 
     def _render_approval_sync(self, approval_data: dict) -> None:
         """Send the approval request from the agent thread: the adapter's interactive button
