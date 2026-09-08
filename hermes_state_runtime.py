@@ -359,7 +359,7 @@ def _secret_digest(secret):
 
 
 def register_worker_execution(db, *, epoch: int, execution_id: str, session_id: str,
-                              generation: int, kind: str, adoption_secret: str) -> dict:
+                              generation: int, kind: str, adoption_secret: str, require_idle: bool = False) -> dict:
     for value in (execution_id, session_id):
         _text(value)
     if kind not in ('cron', 'child', 'compute', 'kanban'):
@@ -375,6 +375,8 @@ def register_worker_execution(db, *, epoch: int, execution_id: str, session_id: 
             if (old['session_id'], old['generation'], old['kind'], old['owner_epoch'], old['adoption_digest']) != (session_id, generation, kind, epoch, digest):
                 raise RuntimeStoreError('admission_conflict')
             return _worker_public(old)
+        if require_idle and conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id=? AND status!='terminal'", (session_id,)).fetchone():
+            raise RuntimeStoreError('stale_generation')
         if conn.execute("SELECT 1 FROM worker_executions WHERE session_id=? AND status!='terminal'", (session_id,)).fetchone():
             raise RuntimeStoreError('stale_generation')
         if conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id=? AND status='unknown'", (session_id,)).fetchone():

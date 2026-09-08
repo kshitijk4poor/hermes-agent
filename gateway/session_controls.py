@@ -36,6 +36,8 @@ class AuthorityConnection:
                     'slash.exec': self.slash_exec, 'command.dispatch': self.command_dispatch,
                     'session.list': self.list_sessions, 'session.info': self.info,
                     'session.mutate': self.mutate,
+                    'worker.register': self.worker_register, 'worker.adopt': self.worker_adopt,
+                    'worker.persist': self.worker_persist,
                     'setup.status': self.setup_status, 'setup.runtime_check': self.setup_runtime_check,
                     'session.resume': self.resume, 'prompt.submit': self.submit,
                     'prompt.receipt': self.receipt, 'prompt.cancel': self.cancel,
@@ -52,6 +54,18 @@ class AuthorityConnection:
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+
+    async def worker_register(self, ref, params):
+        from gateway.session_worker import worker_request
+        return await worker_request(self, ref, params, operation='register')
+
+    async def worker_adopt(self, ref, params):
+        from gateway.session_worker import worker_request
+        return await worker_request(self, ref, params, operation='adopt')
+
+    async def worker_persist(self, ref, params):
+        from gateway.session_worker import worker_request
+        return await worker_request(self, ref, params, operation='persist')
 
     async def slash_exec(self, ref, params):
         from gateway.session_commands import execute_command
