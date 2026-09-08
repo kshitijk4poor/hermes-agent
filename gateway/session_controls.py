@@ -16,9 +16,10 @@ class AuthorityConnection:
             capabilities |= {'session:create'}
         if 'capabilities' in identity:
             capabilities = frozenset(identity['capabilities'])
-        if identity.get('instance_id', authority.instance_id) != authority.instance_id:
+        if (not identity.get('user_id')
+                or identity.get('instance_id', authority.instance_id) != authority.instance_id):
             capabilities = frozenset()
-        self.actor = Principal(str(identity.get('user_id') or 'authenticated-dashboard'),
+        self.actor = Principal(str(identity.get('user_id') or 'unbound'),
                                identity.get('profile_id', authority.profile_id),
                                capabilities, uuid.uuid4().hex)
         self.subscriptions = {}
