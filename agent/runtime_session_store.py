@@ -247,6 +247,40 @@ class RuntimeSessionStore:
         self._session(session_id)
         return self._apply('session.context', {})['session']
 
+    def get_session_title(self, session_id):
+        return self.get_session(session_id).get('title')
+
+    def get_compression_failure_cooldown_row(self, session_id):
+        row = self.get_session(session_id)
+        return {'session_exists': True, 'cooldown_until': row.get('compression_failure_cooldown_until'),
+                'error': row.get('compression_failure_error')}
+
+    def get_compression_failure_cooldown(self, session_id):
+        import time
+        now = time.time()
+        row = self.get_compression_failure_cooldown_row(session_id)
+        deadline = row['cooldown_until']
+        if deadline is None or float(deadline) <= now:
+            return None
+        return {'cooldown_until': float(deadline), 'remaining_seconds': float(deadline) - now,
+                'error': row['error']}
+
+    def _session_number(self, session_id, column, cast, zero):
+        row = self.get_session(session_id)
+        try:
+            return max(zero, cast(row.get(column) or zero))
+        except (TypeError, ValueError):
+            return zero
+
+    def get_compression_fallback_streak(self, session_id):
+        return self._session_number(session_id, 'compression_fallback_streak', int, 0)
+
+    def get_compression_ineffective_count(self, session_id):
+        return self._session_number(session_id, 'compression_ineffective_count', int, 0)
+
+    def get_compression_recovery_deadline(self, session_id):
+        return self._session_number(session_id, 'compression_recovery_deadline', float, 0.0)
+
     def get_session_model_config_value(self, session_id, key, default=None):
         from hermes_state_sessions import _parse_model_config
         return _parse_model_config(self.get_session(session_id).get('model_config')).get(key, default)

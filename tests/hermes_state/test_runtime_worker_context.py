@@ -42,3 +42,35 @@ def test_worker_context_preserves_authority_identity_and_prompt_receipts(tmp_pat
             store.close()
     finally:
         db.close()
+
+
+def test_worker_constructor_restores_persisted_compressor_guards(tmp_path):
+    import time
+    from agent.context_compressor import ContextCompressor
+    db = SessionDB(tmp_path / 'state.db')
+    try:
+        db.create_session('owned', 'cli', model_config={'_proactive_prune_rearm_tokens': 1234})
+        db.set_compression_fallback_streak('owned', 4)
+        db.set_compression_ineffective_count('owned', 3)
+        deadline = time.time() + 3600
+        db.set_compression_recovery_deadline('owned', deadline)
+        db.record_compression_failure_cooldown('owned', deadline, 'fixture-cooldown')
+        epoch = begin_runtime_epoch(db, instance_id='fixture')
+        scope = dict(epoch=epoch, execution_id='worker', session_id='owned', generation=0)
+        register_worker_execution(db, **scope, kind='compute', adoption_secret='test-secret')
+        store = RuntimeSessionStore(lambda method, **p: mutate_worker_execution(db, **p), scope, tmp_path / 'outbox')
+        try:
+            compressor = ContextCompressor(model='fixture', config_context_length=100000, quiet_mode=True)
+            compressor.bind_session_state(store, 'owned')
+            assert compressor._fallback_compression_streak == 4
+            assert compressor._ineffective_compression_count == 3
+            assert compressor._anti_thrash_recovery_deadline == deadline
+            assert compressor._proactive_prune_rearm_tokens == 1234
+            assert store.get_compression_failure_cooldown_row('owned') == db.get_compression_failure_cooldown_row('owned')
+            assert store.get_compression_failure_cooldown('owned')['cooldown_until'] == deadline
+            db.set_session_title('owned', 'retained-title')
+            assert store.get_session_title('owned') == db.get_session_title('owned')
+        finally:
+            store.close()
+    finally:
+        db.close()
