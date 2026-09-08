@@ -12,6 +12,11 @@ def validate_action(operation, payload):
         return
     if operation == 'import' and set(payload) == {'sessions'} and isinstance(payload['sessions'], list):
         return
+    if (operation == 'rewind' and 'target_message_id' in payload
+            and not set(payload) - {'target_message_id', 'preserve_compaction_handoff'}
+            and type(payload['target_message_id']) is int and payload['target_message_id'] > 0
+            and type(payload.get('preserve_compaction_handoff', False)) is bool):
+        return
     required = {'rename': {'title'}, 'archive': {'archived'}}
     if operation == 'sidebar':
         valid = bool(payload) and not set(payload) - METADATA_FIELDS.keys()
@@ -22,7 +27,7 @@ def validate_action(operation, payload):
 
 
 def apply_action(db, conn, session_id, operation, payload):
-    handlers = {'delete': _delete, 'import': _import}
+    handlers = {'delete': _delete, 'import': _import, 'rewind': _rewind}
     if operation in handlers:
         return handlers[operation](db, conn, session_id, payload)
     affected = set()
@@ -56,6 +61,18 @@ def _delete(db, conn, session_id, payload):
     conn.executemany('DELETE FROM sessions WHERE id=?', [(sid,) for sid in targets])
     db._delete_unreferenced_system_prompts(conn)
     return set(), {'deleted_ids': targets}
+
+
+def _rewind(db, conn, session_id, payload):
+    from hermes_state_mutation_guards import require_idle
+    from hermes_state_mutation_transcript import rewind_in_transaction
+    require_idle(db, conn, [session_id])
+    target, ids, head, replacement = rewind_in_transaction(db, conn, session_id,
+        payload['target_message_id'], preserve_compaction_handoff=payload.get('preserve_compaction_handoff', False))
+    target['content'] = db._decode_content(target.get('content'))
+    conn.execute('UPDATE sessions SET runtime_generation=runtime_generation+1 WHERE id=?', (session_id,))
+    return {session_id}, {'rewound_count': len(ids), 'target_message': target,
+        'new_head_id': head, 'replacement_message_id': replacement}
 
 
 def _import(db, conn, session_id, payload):
