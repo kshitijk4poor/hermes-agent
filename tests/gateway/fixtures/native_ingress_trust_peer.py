@@ -85,6 +85,14 @@ async def probe(mode, peer):
         print(json.dumps({'rejected': rejected}))
         return
     event = MessageEvent(text='TRUST_CALLBACK_INPUT', source=source, message_id='trust-1')
+    # Pre-provenance ordinary inputs were accepted via the normal unscoped callback.
+    from hermes_state_runtime import admit_session_input
+    payload = snapshot_native(runner, event)
+    ref = authority.register(source)
+    identity = json.dumps([source.profile, source.platform.value, source.chat_id,
+                           source.thread_id, source.user_id], separators=(',', ':'))
+    accepted = admit_session_input(authority.db, epoch=authority.epoch, principal_id='messaging:' + identity,
+                                   session_id=ref.session_id, request_id='trust-1', payload=payload)
     await adapter.handle_message(event)
     async with asyncio.timeout(15):
         while adapter._active_sessions:
@@ -92,7 +100,8 @@ async def probe(mode, peer):
     entry = runner.session_store.get_or_create_session(source)
     rows = list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False)
     assert rows and rows[0]['status'] == 'terminal' and rows[0]['outcome'] == 'completed', (rows, adapter.deliveries)
-    assert 'provenance' in rows[0]['payload']['native_text_v1'], rows
+    assert len(rows) == 1 and rows[0]['admission_id'] == accepted['admission_id'], rows
+    assert rows[0]['payload'] == payload, rows
     assert len(peer.requests) == 1, peer.requests
     assert any('LOCAL_ACK_MESSAGING_WARM' in d['content'] for d in adapter.deliveries), adapter.deliveries
     print(json.dumps({'rows': rows, 'deliveries': adapter.deliveries, 'model_calls': len(peer.requests)}))

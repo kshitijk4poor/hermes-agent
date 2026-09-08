@@ -69,7 +69,9 @@ def snapshot_native(runner, event):
                 'route': runner.session_store._generate_session_key(event.source),
                 'event': deepcopy({name: getattr(event, name) for name in _EVENT_FIELDS}),
                 'timestamp': event.timestamp.isoformat()}
-    if provenance is not None:
+    # Single-profile homes are necessarily the owned primary. Keep its existing
+    # wire identity so retrying a pre-provenance admission cannot become a conflict.
+    if provenance is not None and getattr(runner.config, 'multiplex_profiles', False):
         envelope['provenance'] = provenance
     # Omit new defaults so an identical retry of an older text admission retains
     # its fingerprint. Explicit context (including an empty skill list) is exact.
