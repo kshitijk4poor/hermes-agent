@@ -29,8 +29,9 @@ def completion_admission(runner, event):
         return None
     from hermes_state_runtime import list_session_admissions
     identity = producer_identity(runner, event)
-    for row in list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False):
-        descriptor = row['payload'].get('native_text_v1', {}).get('automation', {})
+    sid = entry.origin.chat_id if entry.origin.platform == Platform.LOCAL else entry.session_id
+    for row in list_session_admissions(authority.db, session_id=sid, pending_only=False):
+        descriptor = row['payload'].get('local_automation_v1') or row['payload'].get('native_text_v1', {}).get('automation', {})
         if identity in descriptor.get('identities', [descriptor.get('identity')]):
             return row
     return None
@@ -62,9 +63,7 @@ def snapshot_automation(authority, adapter, event, identity):
         raise RuntimeStoreError('invalid_params')
     entry = _owner(runner, event)
     if event.source.platform == Platform.LOCAL:
-        # Local frozen policy uses a different payload preflight; do not ACK work
-        # until that consumer supports a private internal envelope too.
-        raise RuntimeStoreError('invalid_params')
+        return snapshot_local_automation(authority, adapter, event, identity, entry)
     from gateway.session_envelope import restore_native
     from hermes_state_runtime import list_session_admissions
     prior = list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False)
@@ -106,11 +105,56 @@ def check_automation_route(runner, payload, session_id, available_source, adapte
     return event.source, entry.session_key
 
 
+def snapshot_local_automation(authority, adapter, event, identity, entry):
+    from gateway.session_local_recovery import restore_local_session
+    ref = restore_local_session(authority, event.source.chat_id)
+    live = authority.sessions[ref.session_id]
+    if (live.source is not event.source or not adapter.authorize_source(event.source)
+            or authority.runner._adapter_for_source(live.source) is not adapter):
+        raise RuntimeStoreError('permission_denied')
+    descriptor = {'identity': identity, 'owner': ref.session_id,
+                  'route': entry.session_key, 'target': entry.session_id}
+    if event.metadata.get('automation_identities'):
+        descriptor['identities'] = sorted(set(event.metadata['automation_identities']))
+    if getattr(event, '_heartbeat_session_id', None):
+        descriptor['heartbeat'] = event._heartbeat_session_id
+    return {'text': event.text, 'local_automation_v1': descriptor}, entry
+
+
+def check_local_automation(authority, ref, row):
+    live = authority.sessions[ref.session_id]
+    payload = row['payload']
+    descriptor = payload['local_automation_v1']
+    if (set(payload) != {'text', 'local_automation_v1'}
+            or row['principal_id'] != 'automation:' + live.route
+            or descriptor['owner'] != ref.session_id or descriptor['route'] != live.route
+            or descriptor['identity'] != row['request_id']):
+        raise RuntimeStoreError('permission_denied')
+    entry = authority.runner.session_store.lookup_by_session_key(live.route)
+    if (entry is None or entry.suspended or (entry.session_id != descriptor['target']
+            and authority.db.get_compression_tip(descriptor['target']) != entry.session_id)):
+        raise RuntimeStoreError('admission_conflict')
+
+
+def restore_local_automation(authority, ref, row):
+    check_local_automation(authority, ref, row)
+    live = authority.sessions[ref.session_id]
+    descriptor = row['payload']['local_automation_v1']
+    entry = authority.runner.session_store.lookup_by_session_key(live.route)
+    event = MessageEvent(text=row['payload']['text'], source=live.source, internal=True,
+        message_id=descriptor['identity'], metadata={'gateway_session_key': live.route,
+            'gateway_session_id': entry.session_id})
+    if descriptor.get('heartbeat'):
+        event._heartbeat_session_id = descriptor['heartbeat']
+    return event
+
+
 async def admit_automation(authority, adapter, event, identity):
     authority._require_admission_open()
     payload, entry = snapshot_automation(authority, adapter, event, identity)
     from gateway.session_authority import LiveSession
-    ref = SessionRef(authority.profile_id, entry.session_id)
+    sid = payload.get('local_automation_v1', {}).get('owner', entry.session_id)
+    ref = SessionRef(authority.profile_id, sid)
     authority.sessions.setdefault(ref.session_id, LiveSession(event.source, entry.session_key))
     row = admit_session_input(authority.db, epoch=authority.epoch, principal_id='automation:' + entry.session_key,
         session_id=ref.session_id, request_id=identity, payload=deepcopy(payload))

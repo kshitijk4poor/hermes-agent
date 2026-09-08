@@ -29,6 +29,9 @@ async def execute_admission(authority, ref, row):
     else:
         event = MessageEvent(text=row['payload']['text'], source=live.source,
                              message_id=row['admission_id'])
+        if 'local_automation_v1' in row['payload']:
+            from gateway.session_automation import restore_local_automation
+            event = restore_local_automation(authority, ref, row)
     provenance = row['payload'].get('native_text_v1', {}).get('provenance')
     scope = nullcontext()
     if provenance is not None:

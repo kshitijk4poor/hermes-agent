@@ -305,7 +305,10 @@ class SessionAuthority:
                 if first is not None and live.source.platform == Platform.LOCAL:
                     from gateway.session_local_recovery import restore_local_session
                     restore_local_session(self, ref.session_id)
-                    if first['principal_id'] != live.source.user_id or set(first['payload']) != {'text'}:
+                    if 'local_automation_v1' in first['payload']:
+                        from gateway.session_automation import check_local_automation
+                        check_local_automation(self, ref, first)
+                    elif first['principal_id'] != live.source.user_id or set(first['payload']) != {'text'}:
                         raise RuntimeStoreError('permission_denied')
                 if first is not None and 'native_text_v1' in first['payload']:
                     from gateway.session_envelope import check_native_route
