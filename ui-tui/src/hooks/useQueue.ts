@@ -25,6 +25,7 @@ export interface QueueItem {
   inFlight?: boolean
   failed?: boolean
   preparedText?: string
+  legacyAttempted?: boolean
   settle?: (accepted: boolean) => void
 }
 

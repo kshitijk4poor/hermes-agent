@@ -63,6 +63,18 @@ export function submitPrompt(
     return deps.sys('session not ready yet')
   }
 
+  // An identityless write cannot be deduplicated, even after the owner upgrades.
+  if (opts.queueItem?.legacyAttempted) {
+    opts.queueItem.settle?.(false)
+
+    if (focused()) {
+      deps.sys('legacy delivery unconfirmed — check the session before sending a new input; retained input was not resent')
+      patchUiState({ status: 'delivery unconfirmed' })
+    }
+
+    return
+  }
+
   // Close the async-busy gap up front, before the detect_drop round-trip.
   if (focused()) {
     markSubmitting()
@@ -127,6 +139,8 @@ export function submitPrompt(
           if (focused()) {deps.sys('durable admission unavailable for this session — using legacy delivery')}
 
           try {
+            item.legacyAttempted = true
+            savePendingInput(item)
             const r = await deps.gw.request<PromptSubmitResponse>('prompt.submit', {
               session_id: sid,
               text: item.preparedText ?? submitText,
@@ -139,7 +153,7 @@ export function submitPrompt(
             if (focused()) {
               if (r?.voice_stopped) {patchUiState({ busy: false, status: 'ready' })}
               else if (!accepted) {
-                deps.sys('legacy delivery unconfirmed — input retained; retry may duplicate execution')
+                deps.sys('legacy delivery unconfirmed — input retained; check the session before sending a new input')
                 patchUiState({ status: 'delivery unconfirmed' })
               }
             }
@@ -147,7 +161,7 @@ export function submitPrompt(
             item.settle?.(false)
 
             if (focused()) {
-              deps.sys(`legacy delivery unconfirmed: ${error instanceof Error ? error.message : String(error)} — input retained; retry may duplicate execution`)
+              deps.sys(`legacy delivery unconfirmed: ${error instanceof Error ? error.message : String(error)} — input retained; check the session before sending a new input`)
               patchUiState({ status: 'delivery unconfirmed' })
             }
           }
