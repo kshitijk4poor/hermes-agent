@@ -54,6 +54,11 @@ async def probe(peer, target):
         assert 'result' in created, created
         sid = created['result']['session_id']
         assert sid == created['result']['stored_session_id']
+        listed = await rpc(a, 'session.list', limit=10)
+        assert any(row['session_id'] == sid for row in listed['result']['sessions']), listed
+        info = await rpc(a, 'session.info', session_id=sid)
+        assert info['result']['source'] == 'cli', info
+        assert info['result']['lazy'] is True, info
         assert authority.db.get_session(sid) is not None
         repeated = await rpc(a, 'session.create', request_id='fresh', source='cli')
         assert repeated['result']['session_id'] == sid, repeated

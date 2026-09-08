@@ -25,6 +25,7 @@ class AuthorityConnection:
         params = request.get('params') or {}
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
         handlers = {'session.create': self.create, 'ping': self.ping, 'runtime.describe': self.describe,
+                    'session.list': self.list_sessions, 'session.info': self.info,
                     'session.resume': self.resume, 'prompt.submit': self.submit,
                     'prompt.receipt': self.receipt, 'prompt.cancel': self.cancel,
                     'session.interrupt': self.interrupt, 'session.events.since': self.events_since,
@@ -61,6 +62,36 @@ class AuthorityConnection:
                 'authority_epoch': self.authority.epoch,
                 'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1'],
                 'session_create': {'sources': ['cli'], 'parameters': ['request_id', 'source']}}
+
+    async def info(self, ref, params):
+        from gateway.session_local import local_session_info
+        if set(params) != {'session_id'}:
+            raise RuntimeStoreError('invalid_params')
+        await self.authority.resolve(self.actor, ref)
+        return local_session_info(self.authority, ref)
+
+    async def list_sessions(self, ref, params):
+        if 'session:read' not in self.actor.capabilities:
+            raise RuntimeStoreError('permission_denied')
+        limit = params.get('limit', 200)
+        if set(params) - {'limit'} or type(limit) is not int or not 1 <= limit <= 200:
+            raise RuntimeStoreError('invalid_params')
+        sessions = []
+        for sid in tuple(self.authority.sessions):
+            candidate = SessionRef(self.actor.profile_id, sid)
+            try:
+                handle = await self.authority.resolve(self.actor, candidate)
+            except RuntimeStoreError as exc:
+                if exc.reason not in {'permission_denied', 'profile_mismatch', 'not_found'}:
+                    raise
+                continue
+            row = self.authority.db.get_session(sid)
+            sessions.append({'session_id': sid, 'id': sid, 'title': row.get('title') or '',
+                             'source': row.get('source'), 'started_at': row.get('started_at'),
+                             'message_count': row.get('message_count', 0),
+                             'running': handle.execution_state == 'running'})
+        sessions.sort(key=lambda row: row['started_at'] or 0, reverse=True)
+        return {'sessions': sessions[:limit], 'scope': 'live'}
 
     async def resume(self, ref, params):
         snapshot = await self.authority.attach(self.actor, ref)
