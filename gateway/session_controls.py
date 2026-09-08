@@ -11,7 +11,8 @@ class AuthorityConnection:
     def __init__(self, authority, transport, identity):
         self.authority = authority
         self.transport = transport
-        capabilities = frozenset({'session:read', 'session:submit', 'session:control', 'session:approve'})
+        capabilities = frozenset({'session:read', 'session:submit', 'session:control',
+                                  'session:approve', 'session:respond'})
         if identity:
             capabilities |= {'session:create'}
         if 'capabilities' in identity:

@@ -240,7 +240,7 @@ class SessionAuthority:
             live.controls.register_clarify(session_id, generation, entry)
 
     async def respond(self, actor, ref, generation, prompt_id, response, *, kind="approval"):
-        capability = {"approval": "session:approve", "clarify": "session:control"}.get(kind)
+        capability = {"approval": "session:approve", "clarify": "session:respond"}.get(kind)
         if capability is None:
             raise RuntimeStoreError("invalid_params")
         self.authorize(actor, ref, capability)
