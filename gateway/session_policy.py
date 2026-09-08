@@ -22,9 +22,20 @@ class LocalSessionPolicy:
     request_json: str
     terminal_json: str
     credential_ref: str | None = None
+    config_secret_ref: str | None = None
 
-    def config(self):
-        return json.loads(self.config_json)
+    def config(self, authority=None):
+        config = json.loads(self.config_json)
+        if self.config_secret_ref is not None and authority is not None:
+            secrets = getattr(authority, '_local_config_secrets', {}).get(self.config_secret_ref)
+            if secrets is None:
+                raise RuntimeStoreError('launch_credentials_unavailable')
+            for path, value in secrets.items():
+                target = config
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+        return config
 
     @property
     def provider(self):
@@ -50,7 +61,7 @@ class LocalSessionPolicy:
         return resolve_reasoning_config(self.config(), self.model or '')
 
 
-def build_policy(params, config):
+def build_policy(params, config, *, private_secrets=None):
     from hermes_cli.tools_config import _get_platform_tools
     from toolsets import validate_toolset
     from agent.runtime_cwd import resolve_agent_cwd
@@ -117,11 +128,28 @@ def build_policy(params, config):
     terminal['TERMINAL_CWD'] = cwd
     request = {k: v for k, v in params.items() if k not in {'request_id', 'api_key'}}
     request.setdefault('source', 'cli')
+    _extract_config_secrets(config, private_secrets)
     return LocalSessionPolicy(source, SURFACES[source], cwd, model, tuple(sorted(enabled)),
                               json.dumps(config), json.dumps(request, sort_keys=True), json.dumps(terminal))
 
 
-def bind_launch_key(authority, session_id, policy, api_key):
+def _extract_config_secrets(value, private, path=()):
+    # Reuse the configuration owner's structural classification; opaque keys need
+    # not match a vendor prefix. Only the authority keeps their original values.
+    from hermes_cli.config import _SECRET_CONFIG_KEYS
+    items = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
+    for key, child in items:
+        child_path = path + (key,)
+        if isinstance(key, str) and key.lower() in _SECRET_CONFIG_KEYS and isinstance(child, str) and child:
+            if private is None:
+                raise RuntimeStoreError('launch_credentials_unavailable')
+            private[child_path] = child
+            value[key] = None
+        else:
+            _extract_config_secrets(child, private, child_path)
+
+
+def bind_launch_key(authority, session_id, policy, api_key, *, config_secrets=None):
     """CLI keys live only in this authority lifetime, never its durable receipt.
 
     Restart deliberately revokes them. History remains readable; inference must
@@ -129,17 +157,26 @@ def bind_launch_key(authority, session_id, policy, api_key):
     """
     from dataclasses import replace
     import hmac
-    if api_key is None:
+    if api_key is None and not config_secrets:
         return policy
     keys = getattr(authority, '_local_launch_keys', None)
     if keys is None:
         keys = authority._local_launch_keys = {}
     ref = f'{authority.instance_id}:{authority.epoch}:{session_id}'
     old = keys.get(ref)
-    if old is not None and not hmac.compare_digest(old, api_key):
+    if old is not None and (api_key is None or not hmac.compare_digest(old, api_key)):
         raise RuntimeStoreError('admission_conflict')
-    keys[ref] = api_key
-    return replace(policy, credential_ref=ref)
+    configs = getattr(authority, '_local_config_secrets', None)
+    if configs is None:
+        configs = authority._local_config_secrets = {}
+    if ref in configs and configs[ref] != config_secrets:
+        raise RuntimeStoreError('admission_conflict')
+    if config_secrets:
+        configs[ref] = dict(config_secrets)
+    if api_key is not None:
+        keys[ref] = api_key
+    return replace(policy, credential_ref=ref if api_key is not None else None,
+                   config_secret_ref=ref if config_secrets else None)
 
 
 def launch_key(authority, policy):

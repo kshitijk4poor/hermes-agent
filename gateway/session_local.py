@@ -83,7 +83,8 @@ def create_local_session(authority, actor, params):
     from gateway.session_policy import build_policy
     from gateway.run import _load_gateway_config, _resolve_gateway_model
     from dataclasses import replace
-    policy = build_policy(params, _load_gateway_config())
+    private_secrets = {}
+    policy = build_policy(params, _load_gateway_config(), private_secrets=private_secrets)
     if policy.model is None:
         policy = replace(policy, model=_resolve_gateway_model(policy.config()))
     request_id = params.get('request_id', uuid.uuid4().hex)
@@ -97,7 +98,7 @@ def create_local_session(authority, actor, params):
     authority._require_admission_open()
     sid = local_identity(authority.profile_id, actor.subject, request_id)
     from gateway.session_policy import bind_launch_key
-    policy = bind_launch_key(authority, sid, policy, params.get("api_key"))
+    policy = bind_launch_key(authority, sid, policy, params.get("api_key"), config_secrets=private_secrets)
     source = SessionSource(platform=Platform.LOCAL, chat_id=sid,
                            user_id=actor.subject, chat_type='dm')
     route = authority.runner.session_store._generate_session_key(source)

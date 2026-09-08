@@ -87,14 +87,20 @@ def test_explicit_key_is_private_and_missing_after_restart_fails_closed(tmp_path
     raw = 'UNIQUE-PRIVATE-LAUNCH-KEY'
     before = dict(os.environ)
     params = dict(cwd=str(tmp_path), model='fixture', api_key=raw)
-    policy = build_policy(params, {})
-    policy = bind_launch_key(authority, 'session-a', policy, raw)
+    private = {}
+    policy = build_policy(params, {'model': {'api_key': raw}}, private_secrets=private)
+    policy = bind_launch_key(authority, 'session-a', policy, raw, config_secrets=private)
+    assert policy.config(authority)['model']['api_key'] == raw
     assert raw not in json.dumps(asdict(policy))
     assert launch_key(authority, policy) == raw
-    assert bind_launch_key(authority, 'session-a', build_policy(params, {}), raw) == policy
+    retry_private = {}
+    retry = build_policy(params, {'model': {'api_key': raw}}, private_secrets=retry_private)
+    assert bind_launch_key(authority, 'session-a', retry, raw, config_secrets=retry_private) == policy
     for other in (sibling, SimpleNamespace(instance_id='owned', profile_id='profile', epoch=2)):
         with pytest.raises(RuntimeStoreError, match='launch_credentials_unavailable'):
             launch_key(other, policy)
+        with pytest.raises(RuntimeStoreError, match='launch_credentials_unavailable'):
+            policy.config(other)
     with pytest.raises(RuntimeStoreError, match='admission_conflict'):
         bind_launch_key(authority, 'session-a', build_policy(params, {}), 'different')
     assert dict(os.environ) == before
