@@ -44,7 +44,7 @@ class ProfileOwnership:
                     handle = os.fdopen(fd, 'r+', encoding='utf-8')
                     try:
                         info = os.fstat(handle.fileno())
-                        if not stat.S_ISREG(info.st_mode) or (os.name != 'nt' and info.st_uid != os.getuid()):
+                        if not stat.S_ISREG(info.st_mode) or (os.name != 'nt' and info.st_uid != os.getuid()):  # windows-footgun: ok — guarded UID
                             raise PermissionError('unsafe gateway lock owner or type')
                         if not _try_acquire_file_lock(handle):
                             raise OwnershipConflict(f'Gateway runtime already owns profile {home}')

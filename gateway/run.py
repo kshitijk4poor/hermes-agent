@@ -4967,6 +4967,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         release_gateway_runtime_lock()
         return False
 
+    _control_server = None
+    _planned_stop_watcher_stop = None
     try:
         _start_gateway_configure_logging(verbosity)
 
@@ -5101,6 +5103,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
 
     finally:
+        if _planned_stop_watcher_stop is not None:
+            _planned_stop_watcher_stop.set()
+        if _control_server is not None:
+            await _control_server.stop()
         remove_pid_file()
         release_gateway_runtime_lock()
 

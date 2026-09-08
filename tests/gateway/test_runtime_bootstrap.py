@@ -73,3 +73,49 @@ def test_ticket_atomic_single_use_profile_purpose_expiry_and_capacity(monkeypatc
         store.mint(profile_id='a', subject='uid:1', purpose='interactive')
     with pytest.raises(PermissionError):
         store.mint(profile_id='a', subject='uid:1', purpose='interactive')
+
+
+@pytest.mark.linux_only
+@pytest.mark.asyncio
+async def test_old_socket_cleanup_cannot_unlink_replacement(tmp_path):
+    from gateway.control_socket import GatewayControlServer, resolve_client_socket_path
+    home = tmp_path / 'private'
+    home.mkdir(mode=0o700)
+    old = GatewayControlServer(home)
+    new = GatewayControlServer(home)
+    assert await old.start()
+    await old.stop()
+    assert await new.start()
+    try:
+        old.cleanup_files()
+        assert resolve_client_socket_path(home) is not None
+        reader, writer = await asyncio.open_unix_connection(str(resolve_client_socket_path(home)))
+        writer.write(b'{"verb":"identify"}\n')
+        await writer.drain()
+        assert json.loads(await reader.readline())['ok']
+        writer.close()
+        await writer.wait_closed()
+    finally:
+        await new.stop()
+
+
+@pytest.mark.windows_only
+def test_native_pipe_authenticated_peer_and_deadline(tmp_path):
+    import time
+    from gateway.runtime_bootstrap_windows import NativeControlServer, query_runtime_control
+    def handler(raw, subject):
+        assert subject.startswith('sid:S-1-')
+        if raw == b'stall':
+            time.sleep(1)
+        return json.dumps({'subject': subject}).encode() + b'\n'
+    server = NativeControlServer(tmp_path, handler)
+    server.start()
+    try:
+        assert json.loads(query_runtime_control(tmp_path, b'hello', 5))['subject'].startswith('sid:')
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            query_runtime_control(tmp_path, b'stall', 0.1)
+        assert time.monotonic() - started < 2
+    finally:
+        server.close()
+    assert not server._thread.is_alive()
