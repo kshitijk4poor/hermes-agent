@@ -6,7 +6,6 @@ issuer. A browser Origin (including an empty one) always disqualifies this path.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from fastapi import HTTPException
