@@ -82,6 +82,14 @@ def probe(base, source):
         texts = [next((m.get('content', '') for m in reversed(r['messages']) if m['role'] == 'user'), '')
                  for r in model.requests if r.get('messages')]
         assert 'REAL_TERMINAL_COMPLETION' in str(texts[-1]), texts
+        assert sum('REAL_TERMINAL_COMPLETION' in str(text) for text in texts) == 1, texts
+        with sqlite3.connect(home / 'state.db') as db:
+            notices = db.execute("SELECT display_kind FROM messages WHERE role='user' AND content LIKE ?",
+                                 ('%REAL_TERMINAL_COMPLETION%',)).fetchall()
+        assert notices == [('internal_notification',)], notices
+        prefixes = [json.dumps([m for m in r['messages'] if m['role'] in ('system', 'developer')], sort_keys=True)
+                    for r in model.requests if r.get('messages')]
+        assert len(set(prefixes)) == 1, 'automation changed the cached system prefix'
         assert 'HUMAN_FIFO_FOLLOWER' in str(texts[-2]), texts
         async with websocket(home, desc) as ws:
             resumed = await rpc(ws, 'session.resume', session_id=sid)
