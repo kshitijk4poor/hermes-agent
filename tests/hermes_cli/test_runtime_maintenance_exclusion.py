@@ -165,6 +165,12 @@ def test_import_and_startup_exclude_each_other_before_publication(tmp_path, monk
         assert refused.value.code == 1
     finally:
         owner.close()
+    # Unrelated SQLite stores have no authority epoch; retain corruption restore.
+    damaged = home / 'projects.db'
+    damaged.write_bytes(b'not a SQLite database')
+    assert backup._safe_restore_db(tmp_path / 'donor.db', damaged)
+    with sqlite3.connect(damaged) as db:
+        assert db.execute('SELECT value FROM marker').fetchall() == [('restored',)]
 
 
 def test_recovery_output_exemption_excludes_canonical_activation(tmp_path):

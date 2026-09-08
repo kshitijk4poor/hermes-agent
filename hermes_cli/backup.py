@@ -526,6 +526,9 @@ def _restore_epoch_source(src: Path, dst: Path):
     An unreadable destination cannot prove its epoch floor: use transcript salvage
     into a separate output rather than silently restoring with a recycled epoch.
     """
+    if dst.name != 'state.db' and dst.resolve().name != 'state.db':
+        yield src
+        return
     floor = _restore_epoch(dst)
     if floor <= _restore_epoch(src):
         yield src
