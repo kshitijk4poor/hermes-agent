@@ -85,6 +85,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
     def __init__(self, runner: "GatewayRunner", ctx: TurnContext) -> None:
         self._runner = runner
         self._ctx = ctx
+        authority = getattr(runner, "session_authority", None)
+        self._approval_owner = None
+        if authority is not None and ctx.session_id in authority.sessions:
+            generation = authority.db.get_session(ctx.session_id)["runtime_generation"]
+            self._approval_owner = (authority, ctx.session_id, generation)
 
 
     # ── stream consumer / interim commentary wiring ─────────────────────────────────────────
@@ -447,6 +452,14 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         return response, answered
 
     def _approval_notify_sync(self, approval_data: dict) -> None:
+        # A native decline must finish before any observer can authorize work.
+        self._render_approval_sync(approval_data)
+        if self._approval_owner is not None:
+            authority, session_id, generation = self._approval_owner
+            live = authority.sessions[session_id]
+            live.controls.register(session_id, self._ctx.session_key, generation, approval_data)
+
+    def _render_approval_sync(self, approval_data: dict) -> None:
         """Send the approval request from the agent thread: the adapter's interactive button
         approvals (``send_exec_approval``) when available, else plain text with ``/approve`` steps."""
         from gateway.run import _approval_send_outcome, _format_exec_approval_fallback, _interim_metadata, _redact_approval_command

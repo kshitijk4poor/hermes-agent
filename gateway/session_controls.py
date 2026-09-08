@@ -13,7 +13,7 @@ class AuthorityConnection:
         self.transport = transport
         self.actor = Principal(str(identity.get('user_id') or 'authenticated-dashboard'),
                                authority.profile_id,
-                               frozenset({'session:read', 'session:submit', 'session:control'}),
+                               frozenset({'session:read', 'session:submit', 'session:control', 'session:approve'}),
                                uuid.uuid4().hex)
         self.subscriptions = {}
         authority.events[self.actor.transport_id] = transport
@@ -25,7 +25,8 @@ class AuthorityConnection:
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
         handlers = {'session.resume': self.resume, 'prompt.submit': self.submit,
                     'prompt.receipt': self.receipt, 'prompt.cancel': self.cancel,
-                    'session.interrupt': self.interrupt, 'session.events.since': self.events_since}
+                    'session.interrupt': self.interrupt, 'session.events.since': self.events_since,
+                    'approval.respond': self.respond}
         try:
             if method not in handlers:
                 raise RuntimeStoreError('invalid_params')
@@ -48,7 +49,8 @@ class AuthorityConnection:
                 'replay_epoch': snapshot.replay_epoch, 'last_sequence': snapshot.last_sequence,
                 'subscription_id': snapshot.subscription_id, 'revision': snapshot.handle.revision,
                 'execution_generation': snapshot.handle.execution_generation,
-                'pending': [asdict(r) for r in snapshot.pending], 'info': {}}
+                'pending': [asdict(r) for r in snapshot.pending],
+                'prompts': list(snapshot.prompts), 'info': {}}
 
     async def events_since(self, ref, params):
         self.authority.authorize(self.actor, ref, 'session:read')
@@ -79,6 +81,12 @@ class AuthorityConnection:
 
     async def interrupt(self, ref, params):
         return asdict(await self.authority.interrupt(self.actor, ref, params.get('execution_generation')))
+
+    async def respond(self, ref, params):
+        if set(params) != {"session_id", "execution_generation", "prompt_id", "choice"}:
+            raise RuntimeStoreError("invalid_params")
+        return await self.authority.respond(self.actor, ref, params["execution_generation"],
+                                            params["prompt_id"], {"choice": params["choice"]})
 
     async def close(self):
         for subscription in self.subscriptions.values():

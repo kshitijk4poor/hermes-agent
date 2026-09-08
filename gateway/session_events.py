@@ -26,11 +26,11 @@ class SessionEvents:
                 self.sequence = 0
             return self.epoch, self.sequence
 
-    def publish(self, session_id, payload):
+    def publish(self, session_id, payload, *, event_type="message.complete"):
         with self.lock:
             self.watermark()
             frame = {'jsonrpc': '2.0', 'method': 'event', 'params': {
-                'type': 'message.complete', 'session_id': self._key,
+                'type': event_type, 'session_id': self._key,
                 'payload': deepcopy(payload), 'replay_epoch': self.epoch}}
             event_replay._stamp_event(frame)
             if frame['params']['seq'] <= self.sequence:

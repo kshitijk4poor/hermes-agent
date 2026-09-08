@@ -14,6 +14,7 @@ from gateway.session_contract import (
     SubscriptionSnapshot,
 )
 from gateway.session_events import SessionEvents
+from gateway.session_pending_controls import PendingApprovals
 from hermes_state_runtime import (
     RuntimeStoreError, admit_session_input, begin_runtime_epoch,
     cancel_session_input, claim_session_input, get_session_admission,
@@ -28,6 +29,10 @@ class LiveSession:
     task: asyncio.Task | None = None
     subscribers: dict = field(default_factory=dict)
     event_stream: SessionEvents = field(default_factory=SessionEvents)
+    controls: PendingApprovals = field(init=False)
+
+    def __post_init__(self):
+        self.controls = PendingApprovals(self.event_stream)
 
 
 class SessionAuthority:
@@ -84,11 +89,13 @@ class SessionAuthority:
             transport = self.events.get(actor.transport_id)
             if transport is not None:
                 live.event_stream.fanout.attach(transport)
+            handle = self._handle(ref)
+            prompts = live.controls.snapshot(ref.session_id, handle.execution_generation)
             epoch, sequence = live.event_stream.watermark()
-            return SubscriptionSnapshot(subscription, self._handle(ref), epoch,
+            return SubscriptionSnapshot(subscription, handle, epoch,
                                         sequence, tuple(self.db.get_messages_as_conversation(ref.session_id)),
                                         tuple(self._receipt(r) for r in list_session_admissions(
-                                            self.db, session_id=ref.session_id)), ())
+                                            self.db, session_id=ref.session_id)), prompts)
 
     async def detach(self, actor, subscription_id):
         for live in self.sessions.values():
@@ -194,6 +201,18 @@ class SessionAuthority:
             agent.interrupt()
         return self._handle(ref)
 
+    async def respond(self, actor, ref, generation, prompt_id, response):
+        self.authorize(actor, ref, "session:approve")
+        live = self.sessions[ref.session_id]
+        with live.event_stream.lock:
+            if actor not in live.subscribers.values():
+                raise RuntimeStoreError("permission_denied")
+            if type(generation) is not int or generation != self._handle(ref).execution_generation:
+                raise RuntimeStoreError("stale_generation")
+            if not isinstance(prompt_id, str) or not prompt_id:
+                raise RuntimeStoreError("invalid_params")
+            return live.controls.respond(ref.session_id, generation, prompt_id, response)
+
     async def _drain(self, ref):
         from gateway.session_ingress import execute_admission
         live = self.sessions[ref.session_id]
@@ -223,6 +242,7 @@ class SessionAuthority:
                 outcome = 'failed'
             settled = settle_session_input(self.db, epoch=self.epoch, admission_id=admission_id,
                                            generation=row['generation'], outcome=outcome)
+            live.controls.snapshot(ref.session_id, row['generation'])
             live.event_stream.publish(ref.session_id, {
                 'text': response, 'content': response, 'admission_id': admission_id,
                 'outcome': settled['outcome']})
