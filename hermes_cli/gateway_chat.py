@@ -85,7 +85,7 @@ def launch_from_args(args) -> int:
             args.query = sys.stdin.read() if query_file == "-" else Path(query_file).read_text(encoding="utf-8")
             if not args.query.strip():
                 raise GatewayClientError("--query-file is empty")
-        if not (getattr(args, "query", None) or getattr(args, "oneshot", None) or sys.stdin.isatty()):
+        if not (getattr(args, "query", None) or getattr(args, "q", None) or getattr(args, "oneshot", None) or sys.stdin.isatty()):
             raise GatewayClientError("Noninteractive chat requires --query or --oneshot")
         return asyncio.run(run_gateway_chat(args))
     except (GatewayClientError, OSError, TimeoutError, WebSocketException) as exc:

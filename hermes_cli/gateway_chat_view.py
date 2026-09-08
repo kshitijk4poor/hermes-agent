@@ -39,28 +39,39 @@ class GatewayChatView:
             kind, payload = params.get("type"), params.get("payload", {})
             self.generation = params.get("execution_generation", self.generation)
             admission = params.get("admission_id") or payload.get("admission_id")
-            if kind == "message.delta":
-                text = payload.get("text") or payload.get("delta") or payload.get("content") or ""
-                if isinstance(text, str):
-                    self.streams[admission] = self.streams.get(admission, "") + text
-                    if not self.quiet:
-                        print(text, end="", flush=True)
-            elif kind == "message.complete":
-                text = payload.get("text") or payload.get("content") or ""
-                streamed = self.streams.pop(admission, "")
-                if self.quiet or not streamed:
-                    print(text, flush=True)
-                elif text.startswith(streamed):
-                    print(text[len(streamed):], flush=True)
-                else:
-                    print("\n" + text, flush=True)
-                self.completions[admission] = payload.get("outcome")
-            elif kind in {"approval.request", "clarify.request"}:
-                self.prompts[payload["prompt_id"]] = payload
-                self.show_prompt(payload)
-            elif kind in {"approval.settled", "clarify.settled"}:
-                self.prompts.pop(payload["prompt_id"], None)
+            handler = {
+                "message.delta": self._delta, "message.complete": self._complete,
+                "approval.request": self._request, "clarify.request": self._request,
+                "approval.settled": self._settled, "clarify.settled": self._settled,
+            }.get(kind)
+            if handler:
+                handler(admission, payload)
             self.changed.set()
+
+    def _delta(self, admission, payload):
+        text = payload.get("text") or payload.get("delta") or payload.get("content") or ""
+        if isinstance(text, str) and not self.quiet:
+            self.streams[admission] = self.streams.get(admission, "") + text
+            print(text, end="", flush=True)
+
+    def _complete(self, admission, payload):
+        text = payload.get("text") or payload.get("content") or ""
+        streamed = self.streams.pop(admission, "")
+        if not self.quiet:
+            if not streamed:
+                print(text, flush=True)
+            elif text.startswith(streamed):
+                print(text[len(streamed):], flush=True)
+            else:
+                print("\n" + text, flush=True)
+        self.completions[admission] = payload
+
+    def _request(self, admission, payload):
+        self.prompts[payload["prompt_id"]] = payload
+        self.show_prompt(payload)
+
+    def _settled(self, admission, payload):
+        self.prompts.pop(payload["prompt_id"], None)
 
     async def submit(self, text):
         return await self.client.rpc("prompt.submit", session_id=self.session_id,
@@ -90,6 +101,7 @@ class GatewayChatView:
         raise GatewayClientError("Unsupported gateway CLI command; use /help. No local command was run.")
 
     async def run(self, query=None, *, oneshot=False):
+        self.quiet = self.quiet or oneshot
         for prompt in self.prompts.values():
             self.show_prompt(prompt)
         renderer = asyncio.create_task(self.render())
@@ -107,7 +119,9 @@ class GatewayChatView:
                         print("Input required; detached without cancelling. Resume this session interactively.", file=sys.stderr)
                         return 3
                     await self.changed.wait()
-                return 0 if self.completions[admission] == "completed" else 1
+                terminal = self.completions[admission]
+                print(terminal.get("text") or terminal.get("content") or "", flush=True)
+                return 0 if terminal.get("outcome") == "completed" else 1
             from prompt_toolkit import PromptSession
             from prompt_toolkit.patch_stdout import patch_stdout
             prompt = PromptSession()

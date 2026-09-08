@@ -47,7 +47,11 @@ def trace(frame, event, arg):
             owners.append(type(obj).__name__)
 sys.setprofile(trace)
 try:
-    runpy.run_module('hermes_cli.main', run_name='__main__')
+    module = 'hermes_cli.main'
+    if sys.argv[1:2] == ['--fixture-direct']:
+        sys.argv.pop(1)
+        module = 'cli'
+    runpy.run_module(module, run_name='__main__')
 finally:
     sys.setprofile(None)
     Path(sys.argv[0]).with_name('client-owner.json').write_text(json.dumps(owners))
@@ -119,6 +123,11 @@ finally:
             assert json.loads(witness.read_text()) == []
             assert control(home, "identify")["instance_id"] == descriptor["instance_id"]
             assert len(model_peer.requests) == 3
+            tmux("kill-session", "-t", "chat")
+            launch("--fixture-direct", "-q", "WS_SHARED direct", "--oneshot", "--quiet")
+            direct = until("CLI_RC=0")
+            assert "LOCAL_ACK_WS_SHARED" in direct
+            assert json.loads(witness.read_text()) == []
             tmux("kill-session", "-t", "chat")
 
             from tests.gateway.fixtures.authority_controls_peer import ModelPeer as ApprovalPeer
