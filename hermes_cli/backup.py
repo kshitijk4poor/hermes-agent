@@ -451,8 +451,82 @@ def verify_sqlite_integrity(
     return _done("header check passed", valid=True, size=size)
 
 
-def _discard_failed_zip_members(zf: zipfile.ZipFile, filelist_len: int) -> None:
-    """Drop the member(s) created by a failed write, both from the central directory and the file.
+def _foreign_db_holder_pids(db_path: Path) -> Optional[List[int]]:
+    """PIDs of OTHER processes holding *db_path* or its WAL/SHM open (Linux ``/proc`` scan).
+
+    An already-unlinked ``(deleted)`` sidecar — the #90950 split-brain fingerprint — still
+    counts as held. None off-Linux or when /proc fails.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+
+    def _canonical(path: str) -> str:
+        return os.path.normcase(os.path.abspath(path.removesuffix(" (deleted)")))
+
+    def _holds_watched(fds: List[str], fd_dir: str) -> bool:
+        for fd in fds:
+            try:
+                target = os.readlink(f"{fd_dir}/{fd}")
+            except OSError:
+                continue
+            if _canonical(target) in watched:
+                return True
+        return False
+
+    canonical_db = _canonical(os.fspath(db_path))
+    watched = {canonical_db, canonical_db + "-wal", canonical_db + "-shm"}
+    pids: List[int] = []
+    try:
+        own_pid = os.getpid()
+        for pid_str in os.listdir("/proc"):
+            if not pid_str.isdigit() or int(pid_str) == own_pid:
+                continue
+            fd_dir = f"/proc/{pid_str}/fd"
+            try:
+                fds = os.listdir(fd_dir)
+            except OSError:
+                continue
+            if _holds_watched(fds, fd_dir):
+                pids.append(int(pid_str))
+    except OSError:
+        return None
+    return pids
+
+
+def _safe_restore_db(src: Path, dst: Path) -> bool:
+    """Restore only while holding the destination authority's maintenance reservation."""
+    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
+    try:
+        with exclusive_maintenance([dst.resolve().parent]):
+            return _restore_db_pages(src, dst)
+    except OwnershipConflict as exc:
+        logger.error("%s", exc)
+        return False
+
+
+def _restore_db_pages(src: Path, dst: Path) -> bool:
+    """Restore snapshot *src* into live *dst* through the backup() API; unlink+move fallback.
+
+    Writing pages into the live file preserves its inode and WAL state, so other holders (gateway,
+    dashboard, another CLI) see the restored data instead of stale pages from a replaced inode.
+    The fallback runs ONLY when no other process or in-process connection holds the file
+    (replacing the inode under a live holder is the #90950 split-brain); otherwise it fails closed
+    (``False``) and the caller reports the file as skipped.
+    """
+    try:
+        with closing(sqlite3.connect(str(dst))) as dst_conn:
+            # Checkpoint first so the backup starts clean rather than writing on top of a deep WAL.
+            with suppress(Exception):
+                dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            with closing(sqlite3.connect(f"file:{src}?mode=ro", uri=True)) as src_conn:
+                src_conn.backup(dst_conn)
+        with suppress(Exception):
+            dst.chmod(src.stat().st_mode)
+        return True
+    except Exception as exc:
+        logger.warning("SQLite safe restore failed for %s -> %s: %s", src, dst, exc)
+        return _unlink_move_restore_db(src, dst)
+
 
     ZipFile.write finalizes its destination member while unwinding a source-read
     failure, so the partial bytes can otherwise become a CRC-valid archive member.
@@ -758,8 +832,19 @@ def run_import(args) -> Optional[int]:
         print(f"Backup contains {file_count} files")
         print(f"Target: {display_hermes_home()}")
 
-        if prefix:
-            print(f"Detected archive prefix: {prefix!r} (will be stripped)")
+def _import_db_member(
+    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
+    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
+    try:
+        with exclusive_maintenance([target.resolve().parent]):
+            _import_db_member_exclusive(zf, member, target, new_file_mode)
+    except OwnershipConflict as exc:
+        raise OSError(str(exc)) from exc
+
+
+def _import_db_member_exclusive(
+    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
+    """Publish a SQLite ``.db`` member onto *target* without replacing its inode.
 
         # Check for existing installation
         has_config = (hermes_root / "config.yaml").exists()
@@ -844,8 +929,30 @@ def run_import(args) -> Optional[int]:
             else:
                 rel = member
 
-            if not rel:
-                continue
+def _import_members(
+    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Reserve all affected profiles before publishing even the first config file."""
+    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
+    homes = {hermes_root}
+    for member in members:
+        rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
+        parts = Path(rel).parts
+        if len(parts) >= 3 and parts[0] == 'profiles':
+            home = hermes_root / parts[0] / parts[1]
+            if _is_within(home, hermes_root.resolve()):
+                homes.add(home)
+    try:
+        with exclusive_maintenance(homes):
+            return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
+    except OwnershipConflict as exc:
+        return 0, 0, [str(exc)], [], []
+
+
+def _import_members_exclusive(
+    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
 
             try:
                 parts = tuple(normalize_archive_parts(rel))
@@ -1536,16 +1643,20 @@ def list_quick_snapshots(
     return results
 
 
-def restore_quick_snapshot(
-    snapshot_id: str,
-    hermes_home: Optional[Path] = None,
-) -> bool:
-    """Restore state from a quick snapshot.
-
-    Overwrites current state files with the snapshot's copies.
-    Returns True if at least one file was restored.
-    """
+def restore_quick_snapshot(snapshot_id: str, hermes_home: Optional[Path] = None) -> bool:
+    """Restore the whole snapshot offline, or refuse before changing any file."""
+    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
     home = hermes_home or get_hermes_home()
+    try:
+        with exclusive_maintenance([home]):
+            return _restore_quick_snapshot_exclusive(snapshot_id, home)
+    except OwnershipConflict as exc:
+        logger.error("%s", exc)
+        return False
+
+
+def _restore_quick_snapshot_exclusive(snapshot_id: str, home: Path) -> bool:
+    """Restore state from a quick snapshot."""
     root = _quick_snapshot_root(home)
 
     # Security: reject snapshot_id values that contain path separators or

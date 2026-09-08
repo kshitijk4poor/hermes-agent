@@ -4,6 +4,7 @@ Lock inodes are never removed: unlinking a locked inode creates a second owner.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -95,3 +96,35 @@ class ProfileOwnership:
 
 
 process_ownership = ProfileOwnership()
+_maintenance = threading.local()
+
+
+@contextmanager
+def exclusive_maintenance(homes):
+    """Reserve the authority's exact lock before touching managed state.
+
+    This is not an owner-presence check: the reservation remains held through
+    publication, excluding startup even before its PID/control socket exists.
+    Only nested synchronous maintenance in this thread may reuse a reservation;
+    being the runtime owner (even in this process) never grants maintenance.
+    Lock inodes must not be restored, removed, or replaced by callers.
+    """
+    state = getattr(_maintenance, 'state', None)
+    outermost = state is None or state[0] != os.getpid()
+    owner = ProfileOwnership() if outermost else state[1]
+    previous = set(owner.homes)
+    try:
+        owner.reserve(homes)
+        if outermost:
+            _maintenance.state = (os.getpid(), owner)
+        yield
+    except OwnershipConflict as exc:
+        raise OwnershipConflict(
+            f'Exclusive maintenance refused: {exc}. Drain and stop the gateway, then retry.'
+        ) from exc
+    finally:
+        for home in reversed(owner.homes):
+            if home not in previous:
+                owner.release(home)
+        if outermost:
+            _maintenance.state = None
