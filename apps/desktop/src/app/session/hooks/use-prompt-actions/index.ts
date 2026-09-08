@@ -71,7 +71,7 @@ import {
   type SurvivorUserRowIds
 } from './rewind'
 import { useSlashCommand } from './slash'
-import { captureSteeringSession } from './steering-session'
+import { captureSubmissionDestination } from './submission-destination'
 import { useSubmitPrompt } from './submit'
 import {
   blobToDataUrl,
@@ -116,7 +116,13 @@ export async function uploadComposerAttachment(
     terminalBackend?: string
   }
 ): Promise<ComposerAttachment> {
-  const { backendCwd, remote, requestGateway, storedSessionId, onRecovered, onSessionRecovered, terminalBackend } = opts
+  const { backendCwd, remote, storedSessionId, onSessionRecovered, terminalBackend } = opts
+
+  const requestGateway = captureSubmissionDestination(
+    storedSessionId ?? opts.sessionId,
+    opts.requestGateway
+  ).requestGateway
+
   const path = attachment.path ?? ''
   const label = attachment.label || pathLabel(path)
   const uploadBytes = remote || attachmentPathNeedsUpload(path, backendCwd, terminalBackend)
@@ -326,15 +332,23 @@ export function usePromptActions({
     async (
       sessionId: string,
       attachments: ComposerAttachment[],
-      options: { storedSessionId?: null | string; updateComposerAttachments?: boolean } = {}
+      options: {
+        updateComposerAttachments?: boolean
+        storedSessionId?: string | null
+        requestGateway?: GatewayRequest
+      } = {}
     ): Promise<{ attachments: ComposerAttachment[]; sessionId: string }> => {
       const updateComposerAttachments = options.updateComposerAttachments ?? true
-      // The submit's own target, never the chat on screen: a queued send drains
-      // after the user has moved on, so a stale runtime here must recover the
-      // session the text belongs to — not stage the files on, and then submit
-      // into, whichever chat is selected now (#46194, the attachments edition).
-      const storedSessionId = options.storedSessionId ?? selectedStoredSessionIdRef.current
-      const targetIsForeground = storedSessionId === selectedStoredSessionIdRef.current
+
+      const storedSessionId =
+        options.storedSessionId !== undefined ? options.storedSessionId : selectedStoredSessionIdRef.current
+
+      const uploadRequest =
+        options.requestGateway ??
+        captureSubmissionDestination(storedSessionId ?? sessionId, requestGateway).requestGateway
+
+      const backendCwd = $currentCwd.get()
+      const terminalBackend = $terminalBackend.get()
       const remote = isSessionRemote(storedSessionId ?? sessionId)
       let liveSessionId = sessionId
       const synced: ComposerAttachment[] = []
@@ -357,6 +371,11 @@ export function usePromptActions({
 
       const onSessionRecovered = (recoveredId: string) => {
         liveSessionId = recoveredId
+
+        if (activeSessionIdRef.current === sessionId) {
+          activeSessionIdRef.current = recoveredId
+          setActiveSessionId(recoveredId)
+        }
       }
 
       for (const original of attachments) {
@@ -387,14 +406,14 @@ export function usePromptActions({
 
         if (attachment.kind === 'image' || attachment.kind === 'file') {
           const nextAttachment = await uploadComposerAttachment(attachment, {
-            backendCwd: $currentCwd.get(),
+            backendCwd,
             remote,
-            requestGateway,
+            requestGateway: uploadRequest,
             sessionId: liveSessionId,
             storedSessionId,
             onRecovered,
             onSessionRecovered,
-            terminalBackend: $terminalBackend.get()
+            terminalBackend
           })
 
           // Update-only: never resurrect a chip the user removed mid-upload.
@@ -631,9 +650,7 @@ export function usePromptActions({
         triggerHaptic('selection')
         // Forward the explicit target (background queue drain, tile) — dropping
         // it ran the command against whatever chat happened to be in front.
-        await executeSlashCommand(visibleText, options?.sessionId ? { sessionId: options.sessionId } : undefined)
-
-        return true
+        return await executeSlashCommand(visibleText, options)
       }
 
       return await submitPromptText(rawText, options)
@@ -757,7 +774,7 @@ export function usePromptActions({
   // completed work intact. During a tool it waits for the safe result boundary.
   // Returns false when the turn raced to completion so the composer can queue.
   const redirectPrompt = useCallback(
-    async (rawText: string): Promise<boolean> => {
+    async (rawText: string, mode: 'interrupt' | 'steer' = 'interrupt'): Promise<boolean> => {
       const text = sanitizeComposerInput(rawText).trim()
 
       // Ref, not the closure-captured prop — see cancelRun above. A redirect
@@ -787,8 +804,8 @@ export function usePromptActions({
         // gateway, in arrival order: sealed already-streamed output above,
         // correction bubble below it, post-redirect deltas below that
         // (#73793, #83151).
-        const messageId = appendSessionTextMessage(id, 'user', text, target.storedSessionId, {
-          appendAfterActiveReply: true
+        const messageId = appendSessionTextMessage(id, 'user', text, undefined, {
+          appendAfterActiveReply: mode === 'interrupt'
         })
 
         const discardOptimisticMessage = () =>
@@ -807,10 +824,10 @@ export function usePromptActions({
           })
 
         try {
-          const result = await target.requestGateway<SessionRedirectResponse>('session.redirect', {
-            session_id: id,
-            text
-          })
+          const result = await requestGateway<SessionRedirectResponse>(
+            mode === 'steer' ? 'session.steer' : 'session.redirect',
+            { session_id: id, text }
+          )
 
           if (result?.status === 'redirected') {
             triggerHaptic('submit')
@@ -821,7 +838,10 @@ export function usePromptActions({
           if (result?.status === 'queued') {
             // Build-window redirects become the next turn, not part of the
             // active reply, so retain the optimistic row at the tail.
-            moveOptimisticMessageToEnd()
+            if (mode === 'interrupt') {
+              moveOptimisticMessageToEnd()
+            }
+
             triggerHaptic('submit')
 
             return true

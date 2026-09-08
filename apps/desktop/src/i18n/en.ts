@@ -3805,6 +3805,7 @@ export const en: Translations = {
     openDirective: 'Open',
     queueMessage: 'Queue message',
     steer: 'Steer the current run',
+    redirect: 'Redirect the current run',
     stop: 'Stop',
     send: 'Send',
     speaking: 'Speaking',

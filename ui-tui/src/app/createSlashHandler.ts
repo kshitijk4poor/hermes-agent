@@ -10,6 +10,7 @@ import type { SlashHandlerContext } from './interfaces.js'
 import { scoreSlashMenuItem } from './slash/fuzzyScore.js'
 import { findSlashCommand } from './slash/registry.js'
 import type { SlashRunCtx } from './slash/types.js'
+import { captureDestination, isCurrentDestination } from './submissionDestination.js'
 import { getUiState } from './uiStore.js'
 import { describeSlashExecError, shouldFallbackToDispatch } from './userMessages.js'
 
@@ -36,16 +37,11 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string, type
     const flight = ++ctx.slashFlightRef.current
     const ui = getUiState()
     const sid = ui.sid
+    const destination = captureDestination()
     const parsed = parseSlashCommand(cmd)
     const argTail = parsed.arg ? ` ${parsed.arg}` : ''
 
-    const countTyped = () => {
-      if (typed) {
-        reportSlashCommand(gw, parsed.name, sid)
-      }
-    }
-
-    const stale = () => flight !== ctx.slashFlightRef.current || getUiState().sid !== sid
+    const stale = () => flight !== ctx.slashFlightRef.current || !isCurrentDestination(destination)
 
     const guarded =
       <T>(fn: (r: T) => void) =>
@@ -193,20 +189,8 @@ export function createSlashHandler(ctx: SlashHandlerContext): (cmd: string, type
 
         long ? page(text, parsed.name[0]!.toUpperCase() + parsed.name.slice(1)) : sys(text)
       })
-      .catch((execErr: unknown) => {
-        // Only "slash.exec does not own this command" refusals (4011/4018) may
-        // fall through to command.dispatch. A helper timeout/crash (5030) must
-        // be shown as itself — the fallback's "not a quick/plugin/bundle/skill
-        // command" refusal used to bury the real cause and imply the command
-        // did not exist.
-        if (!shouldFallbackToDispatch(execErr)) {
-          if (!stale()) {
-            sys(`error: ${describeSlashExecError(parsed.name, execErr)}`)
-          }
-
-          return
-        }
-
+      .catch(() => {
+        if (stale()) {return}
         gw.request('command.dispatch', { arg: parsed.arg, name: parsed.name, session_id: sid })
           .then((raw: unknown) => {
             if (stale()) {

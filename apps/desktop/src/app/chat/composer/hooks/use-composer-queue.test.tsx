@@ -89,6 +89,9 @@ describe('useComposerQueue park integration', () => {
       }
 
       expect(onSubmit).toHaveBeenCalledTimes(MAX_AUTO_DRAIN_ATTEMPTS)
+      for (const [, options] of onSubmit.mock.calls) {
+        expect(options).toMatchObject({ submission_id: entry.id })
+      }
       await act(async () => {
         await vi.advanceTimersByTimeAsync(300_000)
       })

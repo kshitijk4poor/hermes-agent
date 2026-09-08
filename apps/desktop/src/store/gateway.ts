@@ -1648,8 +1648,11 @@ export async function retainGatewayForAgent(
   return release
 }
 
+import { acceptExecutionEvent } from '@/lib/execution-authority'
+
 const turnLeaseKey = (scope: string, sessionId: string): string => `${scope}\u0000${sessionId}`
 const TURN_LEASE_SETTLE_DELAY_MS = 500
+const turnExecutionAuthorities = new Map()
 
 function cancelTurnLeaseRelease(key: string): void {
   const timer = g.turnLeaseReleaseTimers.get(key)
@@ -1791,7 +1794,9 @@ function releaseTerminalTurnLease(scope: string, event: GatewayEvent): void {
 
   const key = turnLeaseKey(scope, sessionId)
 
-  if (event.type === 'message.start') {
+  if (!acceptExecutionEvent(turnExecutionAuthorities, key, event.type, event.payload as Record<string, unknown> | undefined)) {return}
+
+  if (event.type === 'message.start' || (event.type === 'session.info' && (event.payload as Record<string, unknown>)?.running === true)) {
     // The gateway emits settled session.info before immediately chaining a
     // queued/goal follow-up. Keep the same route alive for that next turn.
     cancelTurnLeaseRelease(key)

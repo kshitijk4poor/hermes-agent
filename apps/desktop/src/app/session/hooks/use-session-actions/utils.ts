@@ -17,6 +17,7 @@ import { isMessagingSource, normalizeSessionSource } from '@/lib/session-source'
 import { isLiveTailReplyId } from '@/lib/spoken-reply'
 import { reconcileApprovalModeForProfile } from '@/store/approval-mode'
 import { requestDesktopOnboardingForCredentialWarning } from '@/store/onboarding'
+import { reconcilePendingSubmissions } from '@/store/pending-submissions'
 import { $activeGatewayProfile, $profiles, normalizeProfileKey } from '@/store/profile'
 import { $projectTree } from '@/store/projects'
 import {
@@ -2342,6 +2343,10 @@ export function applyRuntimeInfo(
 ): SessionRuntimeStatePatch | null {
   if (!info) {
     return null
+  }
+
+  if (info.stored_session_id) {
+    reconcilePendingSubmissions(info.stored_session_id, info.pending_submissions)
   }
 
   // App/profile-level reporting is session-independent — a tile's runtime

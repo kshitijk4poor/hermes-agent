@@ -104,7 +104,7 @@ export function useComposerQueue({
   const [drainRetryTick, setDrainRetryTick] = useState(0)
 
   const beginQueuedEdit = (entry: QueuedPromptEntry) => {
-    if (!activeQueueSessionKey || queueEdit) {
+    if (!activeQueueSessionKey || queueEdit || entry.serverStatus) {
       return
     }
 
@@ -215,44 +215,40 @@ export function useComposerQueue({
 
       const drainQueueSessionKey = activeQueueSessionKey
       const drainRuntimeSessionId = sessionId ?? null
+      const entry = pickEntry(getQueuedPrompts(drainQueueSessionKey).filter(entry => !entry.serverStatus))
+
+      if (!entry) {
+        return false
+      }
 
       drainingQueueRef.current = true
 
       try {
-        return await withQueueDrainClaim(drainQueueSessionKey, async queue => {
-          const entry = pickEntry(queue)
+        const accepted = await Promise.resolve(
+          onSubmit(entry.text, {
+            attachments: entry.attachments,
+            ...(entry.displayText ? { displayText: entry.displayText } : {}),
+            fromQueue: true,
+            submission_id: entry.id,
+            sessionId: drainRuntimeSessionId,
+            storedSessionId: drainQueueSessionKey
+          })
+        )
 
-          if (!entry) {
-            return null
-          }
+        if (accepted !== true) {
+          return false
+        }
 
-          const accepted = await Promise.resolve(
-            onSubmit(entry.text, {
-              attachments: entry.attachments,
-              ...(entry.displayText ? { displayText: entry.displayText } : {}),
-              ...(entry.displayKind ? { displayKind: entry.displayKind } : {}),
-              fromQueue: true,
-              sessionId: drainRuntimeSessionId,
-              storedSessionId: drainQueueSessionKey
-            })
-          )
+        drainFailuresRef.current.delete(entry.id)
+        removeQueuedPrompt(drainQueueSessionKey, entry.id)
+        resetBrowseState(drainRuntimeSessionId)
+        // A successful drain means the queue is flowing again — lift any park
+        // so the remaining entries follow. Manual drains (Enter on an empty
+        // composer, the per-row send arrow) are exactly the resume gestures a
+        // parked queue waits for; the auto path only reaches here unparked.
+        unparkQueuedPrompts(drainQueueSessionKey)
 
-          if (accepted === false) {
-            return false
-          }
-
-          drainFailuresRef.current.delete(entry.id)
-          // Submit now owns the blob: previews (optimistic bubble); do not revoke.
-          removeQueuedPrompt(drainQueueSessionKey, entry.id, { retainPreviewUrls: true })
-          resetBrowseState(drainRuntimeSessionId)
-          // A successful drain means the queue is flowing again — lift any park
-          // so the remaining entries follow. Manual drains (Enter on an empty
-          // composer, the per-row send arrow) are exactly the resume gestures a
-          // parked queue waits for; the auto path only reaches here unparked.
-          unparkQueuedPrompts(drainQueueSessionKey)
-
-          return true
-        })
+        return true
       } finally {
         drainingQueueRef.current = false
       }
@@ -264,7 +260,7 @@ export function useComposerQueue({
     (entries: QueuedPromptEntry[]) => {
       const skip = queueEditRef.current?.entryId
 
-      return skip ? entries.find(e => e.id !== skip) : entries[0]
+      return entries.find(e => !e.serverStatus && e.id !== skip)
     },
     [queueEditRef] // reads the edit id off a ref so the lock-holder always sees the latest
   )

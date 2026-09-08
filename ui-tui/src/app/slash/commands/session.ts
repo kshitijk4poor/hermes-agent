@@ -19,7 +19,7 @@ import type { PanelSection } from '../../../types.js'
 import { applyConfiguredTuiTheme } from '../../createGatewayEventHandler.js'
 import { DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES, type IndicatorStyle } from '../../interfaces.js'
 import { patchOverlayState } from '../../overlayStore.js'
-import { patchUiState } from '../../uiStore.js'
+import { getUiState, patchUiState } from '../../uiStore.js'
 import type { SlashCommand } from '../types.js'
 
 const TUI_SESSION_MODEL_RE = new RegExp(`(?:^|\\s)${TUI_SESSION_MODEL_FLAG}(?:\\s|$)`)
@@ -261,14 +261,37 @@ export const sessionCommands: SlashCommand[] = [
         })
         .then(
           ctx.guarded<SessionCompressResponse>(r => {
+            const current = getUiState()
+            const authorityKeys = ['stored_session_id', 'execution_epoch', 'execution_generation', 'execution_state', 'running'] as const
+
+            // Compression is not attachment: a delayed reply cannot replace a
+            // newer turn/owner, nor replace its transcript with an old snapshot.
+            if (
+              current.busy !== ctx.ui.busy ||
+              authorityKeys.some(key => current.info?.[key] !== ctx.ui.info?.[key])
+            ) {
+              return
+            }
+
+            if (
+              current.info?.execution_generation !== undefined &&
+              (r.info?.execution_epoch !== current.info.execution_epoch ||
+                !Number.isSafeInteger(r.info?.execution_generation) ||
+                (r.info?.execution_generation ?? -1) < current.info.execution_generation)
+            ) {
+              return
+            }
+
+            const info = r.info ? { ...current.info, ...r.info } : current.info
+
             if (Array.isArray(r.messages)) {
               const rows = toTranscriptMessages(r.messages)
 
-              ctx.transcript.setHistoryItems(r.info ? [introMsg(r.info), ...rows] : rows)
+              ctx.transcript.setHistoryItems(info ? [introMsg(info), ...rows] : rows)
             }
 
             if (r.info) {
-              patchUiState({ info: r.info })
+              patchUiState({ info })
             }
 
             if (r.usage) {
@@ -315,18 +338,16 @@ export const sessionCommands: SlashCommand[] = [
     help: 'branch the session',
     name: 'branch',
     run: (arg, ctx) => {
-      const prevSid = ctx.sid
-
       ctx.gateway.rpc<SessionBranchResponse>('session.branch', { name: arg, session_id: ctx.sid }).then(
         ctx.guarded<SessionBranchResponse>(r => {
           if (!r.session_id) {
             return
           }
 
-          void ctx.session.closeSession(prevSid)
-          patchUiState({ sid: r.session_id })
-          ctx.session.setSessionStartedAt(Date.now())
-          ctx.transcript.sys(t('slashCmd.session.branch.branched', r.title ?? ''))
+          // Resume hydrates destination authority/history before closing the
+          // source; changing only sid would inherit the source owner's epoch.
+          ctx.session.resumeById(r.session_id)
+          ctx.transcript.sys(`branched → ${r.title ?? ''}`)
         })
       )
     }

@@ -167,24 +167,26 @@ export function useBackgroundQueueDrain({
       void withQueueDrainClaim(sessionKey, async queue => {
         const liveEntry = queue.find(candidate => candidate.id === entry.id)
 
-        if (!liveEntry) {
-          return true
-        }
+          if (!liveEntry || liveEntry.serverStatus) {
+            return true
+          }
 
         const runtimeSessionId = runtimeIdByStoredSessionIdRef.current.get(sessionKey) ?? null
 
-        const accepted = await Promise.resolve(
-          submitTextRef.current(liveEntry.text, {
-            attachments: liveEntry.attachments,
-            fromQueue: true,
-            sessionId: runtimeSessionId,
-            storedSessionId: sessionKey
-          })
-        )
+          const accepted = await Promise.resolve(
+            submitTextRef.current(liveEntry.text, {
+              attachments: liveEntry.attachments,
+              fromQueue: true,
+              submission_id: liveEntry.id,
+              ...(liveEntry.displayText ? { displayText: liveEntry.displayText } : {}),
+              sessionId: runtimeSessionId,
+              storedSessionId: sessionKey
+            })
+          )
 
-        if (accepted === false) {
-          return false
-        }
+          if (accepted !== true) {
+            return false
+          }
 
         drainFailuresRef.current.delete(liveEntry.id)
         // Submit owns blob: previews after a successful drain handoff.
@@ -238,7 +240,7 @@ export function useBackgroundQueueDrain({
         continue
       }
 
-      const entry = entries[0]
+      const entry = entries.find(candidate => !candidate.serverStatus)
 
       if (!entry || (drainFailuresRef.current.get(entry.id) ?? entry.drainFailures ?? 0) >= MAX_AUTO_DRAIN_ATTEMPTS) {
         continue

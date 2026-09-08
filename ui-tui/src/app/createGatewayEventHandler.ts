@@ -34,8 +34,7 @@ import { applyGoalSnapshot } from './goalStatus.js'
 import type { GatewayEventHandlerContext, NoticeLevel } from './interfaces.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { flashGoodVibes, flashPet } from './petFlashStore.js'
-import { forgetServerRequest } from './serverRequestStore.js'
-import { reportStartupLatency } from './startupLatency.js'
+import { captureDestination, isCurrentDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
 import { getTurnState } from './turnStore.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -452,7 +451,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
   }
 
   const { appendMessage, panel, setHistoryItems } = ctx.transcript
-  const { setInput } = ctx.composer
+  const { setInput, enqueue } = ctx.composer
   const { submitLiteralRef, submitRef } = ctx.submission
   const { setProcessing: setVoiceProcessing, setRecording: setVoiceRecording, setVoiceEnabled } = ctx.voice
 
@@ -798,6 +797,31 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       return
     }
 
+    // Lifecycle authority is local to an owner epoch. Only attachment RPC
+    // snapshots replace that epoch; delayed push events cannot reset it.
+    const current = getUiState().info
+    const execution = (ev.payload ?? {}) as { execution_epoch?: string; execution_generation?: number }
+    const genericError = ev.type === 'error' &&
+      execution.execution_epoch === undefined && execution.execution_generation === undefined
+    const lifecycle = !genericError && ['session.info', 'message.start', 'message.complete', 'error'].includes(ev.type)
+
+    if (lifecycle && current?.execution_generation !== undefined) {
+      const incoming = (ev.payload ?? {}) as { execution_epoch?: string; execution_generation?: number }
+
+      if (
+        incoming.execution_epoch !== current.execution_epoch ||
+        typeof incoming.execution_generation !== 'number' ||
+        !Number.isSafeInteger(incoming.execution_generation) ||
+        incoming.execution_generation < current.execution_generation
+      ) {
+        return
+      }
+
+      if (ev.type !== 'session.info') {
+        patchUiState({ info: { ...current, execution_generation: incoming.execution_generation } })
+      }
+    }
+
     switch (ev.type) {
       case 'connection.request':
         if (ev.payload) {
@@ -828,15 +852,22 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         return
       case 'session.info': {
-        let info = ev.payload as SessionInfo | undefined
+        const current = getUiState().info
+        const incoming = ev.payload
 
-        if (!info) {
+        if (incoming.profile_name && current?.profile_name && incoming.profile_name !== current.profile_name) {
           return
         }
 
+        const info = { ...current, ...incoming }
+
         // A replayed snapshot can be the only terminal signal after reconnect.
         // Missing running on older gateways must not clear a live turn.
-        if (info.running === false) {
+        if (incoming.running === true) {
+          patchUiState({ busy: true, status: 'running…' })
+        }
+
+        if (incoming.running === false) {
           turnController.clearStatusTimer()
           turnController.idle()
           setStatus('ready')
@@ -1107,7 +1138,14 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           return
         }
 
+        const destination = captureDestination()
         void getFullConfigOnce().then(cfg => {
+          if (!isCurrentDestination(destination)) {
+            enqueue?.(text, text, destination)
+
+            return
+          }
+
           const submitMode = normalizeVoiceSubmitMode(cfg?.config?.voice?.submit_mode)
 
           if (submitMode === 'draft') {
@@ -1120,7 +1158,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           // is committed before submit reads it; invalid config also falls
           // back to this established direct-submit behavior.
           setInput('')
-          setTimeout(() => submitRef.current(text), 0)
+          setTimeout(() => {
+            if (isCurrentDestination(destination)) {
+              submitRef.current(text)
+            } else {
+              enqueue?.(text, text, destination)
+            }
+          }, 0)
         })
 
         return
@@ -1638,6 +1682,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       }
 
       case 'error':
+        // Build/RPC failures are not authority to settle a versioned turn.
+        if (genericError && current?.execution_generation !== undefined) {
+          sys(`error: ${String(ev.payload?.message || 'unknown error')}`)
+
+          return
+        }
+
         turnController.recordError()
         flashPet('failed')
 

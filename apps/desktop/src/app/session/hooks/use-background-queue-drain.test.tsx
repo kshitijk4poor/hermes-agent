@@ -97,13 +97,14 @@ describe('useBackgroundQueueDrain', () => {
     const runtimeMap = { current: new Map([['stored-session-a', 'rt-session-a']]) }
     const submitText = vi.fn(async () => true)
 
-    enqueueQueuedPrompt('stored-session-a', { text: 'continue in the background', attachments: [] })
+    const entry = enqueueQueuedPrompt('stored-session-a', { text: 'continue in the background', attachments: [] })!
     clearAllSessionStates()
 
     render(<Harness runtimeMap={runtimeMap} submitText={submitText} />)
 
     await waitFor(() => {
       expect(submitText).toHaveBeenCalledWith('continue in the background', {
+        submission_id: entry.id,
         attachments: [],
         fromQueue: true,
         sessionId: 'rt-session-a',
@@ -247,12 +248,13 @@ describe('useBackgroundQueueDrain', () => {
     const runtimeMap = { current: new Map<string, string>() }
     const submitText = vi.fn(async () => true)
 
-    enqueueQueuedPrompt('stored-session-a', { text: 'resume then send', attachments: [] })
+    const entry = enqueueQueuedPrompt('stored-session-a', { text: 'resume then send', attachments: [] })!
 
     render(<Harness runtimeMap={runtimeMap} submitText={submitText} />)
 
     await waitFor(() => {
       expect(submitText).toHaveBeenCalledWith('resume then send', {
+        submission_id: entry.id,
         attachments: [],
         fromQueue: true,
         sessionId: null,

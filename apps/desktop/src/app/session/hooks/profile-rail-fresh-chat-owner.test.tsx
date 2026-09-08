@@ -146,7 +146,7 @@ function answer(socket: MockGateway, method: string, params: Record<string, unkn
   }
 
   if (method === 'prompt.submit') {
-    return { ok: true }
+    return { admission_id: params.submission_id, status: 'started' }
   }
 
   if (method === 'session.resume' || method === 'session.activate') {

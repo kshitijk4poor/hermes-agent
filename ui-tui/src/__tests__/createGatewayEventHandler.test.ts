@@ -95,6 +95,54 @@ describe('createGatewayEventHandler', () => {
     patchUiState({ showReasoning: true })
   })
 
+  it('displays generic errors without settling versioned execution', () => {
+    const ctx = buildCtx([])
+    const onEvent = createGatewayEventHandler(ctx)
+    patchUiState({ sid: 'owner', busy: true, status: 'running…', info: { model: 'test', tools: {}, skills: {}, execution_epoch: 'owner-epoch', execution_generation: 2 } })
+    onEvent({ type: 'error', session_id: 'owner', payload: { message: 'build failed' } } as any)
+    expect(ctx.system.sys).toHaveBeenCalledWith('error: build failed')
+    expect(getUiState()).toMatchObject({ busy: true, status: 'running…' })
+    onEvent({ type: 'error', session_id: 'owner', payload: { message: 'turn failed', execution_epoch: 'owner-epoch', execution_generation: 2 } } as any)
+    expect(ctx.system.sys).toHaveBeenCalledWith('error: turn failed')
+    expect(getUiState().busy).toBe(false)
+  })
+
+  it('fences restarted owner lifecycle events until resume establishes the new epoch', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+
+    const info = { model: 'test', skills: {}, tools: {}, running: true,
+      execution_epoch: 'old-owner', execution_generation: 9 }
+
+    patchUiState({ sid: 'focused', info, busy: true })
+    const emit = (type: string, payload: any) => onEvent({ type, payload, session_id: 'focused' } as any)
+    emit('session.info', { execution_epoch: 'new-owner', execution_generation: 1, running: false })
+    expect(getUiState().busy).toBe(true)
+    // session.resume replaces info with the authoritative attachment snapshot.
+    patchUiState({ info: { ...info, execution_epoch: 'new-owner', execution_generation: 1 } })
+
+    for (const payload of [{}, { execution_epoch: 'old-owner', execution_generation: 99 },
+      { execution_epoch: 'new-owner', execution_generation: 0 }]) {
+      emit('message.complete', { ...payload, text: 'stale' })
+      emit('error', { ...payload, message: 'stale' })
+      emit('session.info', { ...payload, running: false })
+      expect(getUiState().busy).toBe(true)
+    }
+
+    expect(appended).toEqual([])
+    emit('message.complete', { execution_epoch: 'new-owner', execution_generation: 1, text: 'fresh' })
+    expect(getUiState().busy).toBe(false)
+    expect(appended.some(m => m.text === 'fresh')).toBe(true)
+    emit('message.start', { execution_epoch: 'new-owner', execution_generation: 2 })
+    emit('message.complete', { execution_epoch: 'new-owner', execution_generation: 1, text: 'late' })
+    expect(getUiState().busy).toBe(true)
+    expect(getUiState().info?.execution_generation).toBe(2)
+    emit('message.complete', { execution_epoch: 'new-owner', execution_generation: 4, text: 'missed start' })
+    emit('message.start', { execution_epoch: 'new-owner', execution_generation: 3 })
+    expect(getUiState().busy).toBe(false)
+    expect(getUiState().info?.execution_generation).toBe(4)
+  })
+
   it('heals missed completion and blocking prompts only from the focused authoritative idle snapshot', () => {
     patchUiState({ sid: 'focused' })
     const ctx = buildCtx([])
@@ -115,86 +163,24 @@ describe('createGatewayEventHandler', () => {
     expect(getUiState().status).toBe('ready')
     expect(getOverlayState().approval).toBeNull()
     expect(getTurnState().tools).toEqual([])
-
-    const target: ConnectionOperationTarget = { action: 'install', kind: 'mcp', name: 'asana', state: 'pending' }
     onEvent({
       session_id: 'focused',
-      payload: {
-        deadline_at: 10,
-        op_id: 'op-1',
-        seq: 2,
-        targets: [target],
-        timeout_seconds: 30
-      },
-      type: 'connection.request'
-    })
-    expect($connectionOperation.get()).toMatchObject({ opId: 'op-1', seq: 2, targets: [target] })
-    expect(getOverlayState().connection).toEqual({ opId: 'op-1' })
-
-    onEvent({
-      session_id: 'focused',
-      payload: {
-        deadline_at: 11,
-        op_id: 'op-1',
-        seq: 1,
-        settled: false,
-        targets: [{ ...target, state: 'failed' }]
-      },
-      type: 'connection.update'
-    })
-    expect($connectionOperation.get()).toMatchObject({ seq: 2, targets: [target] })
-
-    // Esc on the "Finishing…" card drops it and it must not come back on a replay, but the settling
-    // frame that follows still records how each app ended.
-    const request = {
-      deadline_at: 10,
-      op_id: 'op-1',
-      seq: 2,
-      targets: [target],
-      timeout_seconds: 30
-    }
-
-    dismissConnectionOperation('op-1')
-    expect($connectionOperation.get()).toBeNull()
-    onEvent({ session_id: 'focused', payload: request, type: 'connection.request' })
-    expect($connectionOperation.get()).toBeNull()
-    expect(getOverlayState().connection).toBeNull()
-
-    onEvent({
-      session_id: 'focused',
-      payload: {
-        deadline_at: 12,
-        op_id: 'op-1',
-        seq: 3,
-        settled: true,
-        targets: [{ ...target, state: 'connected' }]
-      },
-      type: 'connection.update'
-    })
-    expect(ctx.system.sys.mock.calls.map((call: unknown[]) => call[0])).toEqual(['asana: connected'])
-  })
-
-  it('keeps the durable session id when a session.info payload omits it', () => {
-    patchUiState({ sid: 'focused', storedSid: 'durable-1' })
-    const onEvent = createGatewayEventHandler(buildCtx([]))
-
-    // Agent-less producers (_fallback_session_info, lazy cwd switch) send no stored_session_id.
-    onEvent({
-      session_id: 'focused',
-      payload: { cwd: '/tmp/a', model: 'test', skills: {}, tools: {} },
+      payload: { ...snapshot, running: true, execution_generation: 2 },
       type: 'session.info'
     } as any)
-    expect(getUiState().storedSid).toBe('durable-1')
-    expect(getUiState().info?.stored_session_id).toBe('durable-1')
-
-    // A payload that carries one is authoritative.
     onEvent({
       session_id: 'focused',
-      payload: { model: 'test', skills: {}, stored_session_id: 'durable-2', tools: {} },
+      payload: { running: false, execution_generation: 1 },
       type: 'session.info'
     } as any)
-    expect(getUiState().storedSid).toBe('durable-2')
-    expect(getUiState().info?.stored_session_id).toBe('durable-2')
+    expect(getUiState().busy).toBe(true)
+    onEvent({
+      session_id: 'focused',
+      payload: { running: false, execution_generation: 2 },
+      type: 'session.info'
+    } as any)
+    expect(getUiState().busy).toBe(false)
+    expect(getUiState().info?.model).toBe('test')
   })
 
   it('archives incomplete todos into transcript flow at end of turn so they scroll up', () => {

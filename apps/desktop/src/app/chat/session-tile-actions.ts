@@ -407,7 +407,7 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
   )
 
   const steerPrompt = useCallback(
-    async (rawText: string): Promise<boolean> => {
+    async (rawText: string, mode: 'interrupt' | 'steer' = 'interrupt'): Promise<boolean> => {
       const text = rawText.trim()
       const sessionId = runtimeIdRef.current
 
@@ -427,13 +427,13 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
       // bubble above output the user had already read (#73793), and its
       // last-assistant fallback could land it mid-thread when the stream id
       // was missing or stale (#83151).
-      mutate(state =>
-        appendMidTurnUserMessage(state, {
-          id: messageId,
-          role: 'user' as const,
-          parts: [textPart(text)]
-        })
-      )
+      mutate(state => {
+        const message = { id: messageId, role: 'user' as const, parts: [textPart(text)] }
+
+        return mode === 'interrupt'
+          ? appendMidTurnUserMessage(state, message)
+          : { ...state, messages: [...state.messages, message] }
+      })
 
       const discardOptimisticMessage = () =>
         mutate(state => ({
@@ -454,7 +454,11 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
         const { result } = await withSessionNotFoundResume(
           sessionId,
           storedIdRef.current,
-          liveId => requestSessionGateway<{ status?: string }>('session.redirect', { session_id: liveId, text }),
+          liveId =>
+            requestSessionGateway<{ status?: string }>(mode === 'steer' ? 'session.steer' : 'session.redirect', {
+              session_id: liveId,
+              text
+            }),
           {
             requestGateway: requestSessionGateway,
             onRecovered: bindRecoveredRuntime
@@ -468,7 +472,9 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
         }
 
         if (result?.status === 'queued') {
-          moveOptimisticMessageToEnd()
+          if (mode === 'interrupt') {
+            moveOptimisticMessageToEnd()
+          }
           triggerHaptic('submit')
 
           return true

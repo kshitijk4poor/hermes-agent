@@ -399,6 +399,10 @@ contextBridge.exposeInMainWorld('hermesDesktop', {
     setDefaultProjectDir: dir => ipcRenderer.invoke('hermes:setting:defaultProjectDir:set', dir),
     pickDefaultProjectDir: () => ipcRenderer.invoke('hermes:setting:defaultProjectDir:pick')
   },
+  preparedSubmissions: {
+    read: () => ipcRenderer.invoke('hermes:prepared-submissions:read'),
+    update: (key, entry) => ipcRenderer.invoke('hermes:prepared-submissions:update', key, entry)
+  },
   zoom: {
     // Current zoom of this window, as { level, percent }.
     get: () => ipcRenderer.invoke('hermes:zoom:get'),

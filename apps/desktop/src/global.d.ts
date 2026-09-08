@@ -406,6 +406,10 @@ declare global {
         pickDefaultProjectDir: () => Promise<{ canceled: boolean; dir: null | string }>
         setDefaultProjectDir: (dir: null | string) => Promise<{ dir: null | string }>
       }
+      preparedSubmissions?: {
+        read: () => Promise<string>
+        update: (key: string, entry: string | null) => Promise<void>
+      }
       zoom?: {
         get: () => Promise<{ level: number; percent: number }>
         /** Synchronous zoom factor of this window (1 = 100%). */

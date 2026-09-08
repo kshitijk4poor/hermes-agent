@@ -5,6 +5,7 @@ import { $sessionStates } from '@/store/session-states'
 import { isTargetSessionBusy } from './utils'
 
 export interface QueueIfBusyInput {
+  id?: string
   /** Runtime session the command was resolved against. */
   sessionId: string
   /** Stored session the composer queue is keyed by; defaults to the runtime id
@@ -28,6 +29,7 @@ export interface QueueIfBusyInput {
 export function queueKickoffIfSessionBusy({
   displayText,
   foregroundBusy = false,
+  id,
   sessionId,
   storedSessionId,
   text
@@ -41,5 +43,5 @@ export function queueKickoffIfSessionBusy({
   const stored = storedSessionId ?? states[sessionId]?.storedSessionId ?? null
   const queueKey = resolveComposerSessionKey(stored, $sessions.get()) || stored || sessionId
 
-  return enqueueQueuedPrompt(queueKey, { attachments: [], displayText, text }) ? 'queued' : 'busy'
+  return enqueueQueuedPrompt(queueKey, { attachments: [], displayText, id, text }) ? 'queued' : 'busy'
 }

@@ -202,7 +202,7 @@ describe('useSessionTileActions sleep/wake session recovery', () => {
           throw new Error('session not found')
         }
 
-        return {}
+        return { admission_id: params?.submission_id, status: 'started' }
       }
 
       if (method === 'session.resume') {

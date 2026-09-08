@@ -108,26 +108,7 @@ export function QueuePanel({
             key={entry.id}
             leading={<Codicon className="text-muted-foreground/70" name="comment" size="0.8rem" />}
             trailing={
-              <>
-                {canExpand && (
-                  <Tip label={isExpanded ? c.queueCollapse : c.queueExpand}>
-                    <Button
-                      aria-expanded={isExpanded}
-                      aria-label={isExpanded ? c.queueCollapse : c.queueExpand}
-                      className="size-5 rounded-md"
-                      onClick={() => toggleExpanded(entry.id)}
-                      size="icon-xs"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <Codicon
-                        className={cn('transition-transform', isExpanded && 'rotate-180')}
-                        name="chevron-down"
-                        size={iconSize.xs}
-                      />
-                    </Button>
-                  </Tip>
-                )}
+              !entry.serverStatus && <>
                 <Tip label={c.queueEdit}>
                   <Button
                     aria-label={c.queueEdit}

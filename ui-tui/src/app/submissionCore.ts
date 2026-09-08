@@ -1,9 +1,12 @@
 import type { GatewayClient } from '../gatewayClient.js'
 import type { InputDetectDropResponse, PromptSubmitResponse } from '../gatewayTypes.js'
+import type { QueueItem } from '../hooks/useQueue.js'
+import { savePendingInput } from '../lib/pendingInputs.js'
 import type { Msg } from '../types.js'
 
+import { captureDestination, isCurrentDestination, type SubmissionDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
-import { getUiState, patchUiState } from './uiStore.js'
+import { patchUiState } from './uiStore.js'
 
 const SESSION_BUSY_RE = /session busy|waiting for model response/i
 
@@ -11,7 +14,7 @@ export const isSessionBusyError = (e: unknown) => e instanceof Error && SESSION_
 
 export interface SubmitPromptDeps {
   appendMessage: (msg: Msg) => void
-  enqueue: (text: string) => void
+  enqueue: (text: string, display?: string, destination?: SubmissionDestination) => void
   expand: (text: string) => string
   gw: GatewayClient
   setLastUserMsg: (value: string) => void
@@ -50,55 +53,137 @@ export function submitPrompt(
   deps: SubmitPromptDeps,
   showUserMessage = true,
   displayOverride?: string,
-  opts: { skipDetectDrop?: boolean } = {}
+  opts: { skipDetectDrop?: boolean; destination?: SubmissionDestination; queueItem?: QueueItem } = {}
 ): void {
-  const sid = getUiState().sid
+  const destination = opts.destination ?? captureDestination()
+  const { sid } = destination
+  const focused = () => isCurrentDestination(destination)
 
   if (!sid) {
     return deps.sys('session not ready yet')
   }
 
   // Close the async-busy gap up front, before the detect_drop round-trip.
-  markSubmitting()
+  if (focused()) {
+    markSubmitting()
+  }
 
   const startSubmit = (displayText: string, submitText: string, show = true) => {
-    const liveSid = getUiState().sid
+    if (focused()) {
+      turnController.clearStatusTimer()
+      deps.setLastUserMsg(text)
 
-    if (!liveSid) {
-      return deps.sys('session not ready yet')
+      if (show) {
+        deps.appendMessage({ role: 'user', text: displayOverride || displayText })
+      }
+
+      patchUiState({ busy: true, status: 'running…' })
+      turnController.bufRef = ''
+      turnController.interrupted = false
     }
 
-    turnController.clearStatusTimer()
-    deps.setLastUserMsg(text)
+    const item = opts.queueItem
 
-    if (show) {
-      deps.appendMessage({ role: 'user', text: displayOverride || displayText })
+    if (item) {
+      item.preparedText ??= submitText
+      savePendingInput(item)
     }
-
-    patchUiState({ busy: true, status: 'running…' })
-    turnController.bufRef = ''
-    turnController.interrupted = false
 
     deps.gw
-      .request<PromptSubmitResponse>('prompt.submit', { session_id: liveSid, text: submitText })
+      .request<PromptSubmitResponse>('prompt.submit', {
+        session_id: sid,
+        text: item?.preparedText ?? submitText,
+        ...(item ? { submission_id: item.submissionId, queued: item.queued !== false } : {})
+      })
       .then(r => {
+        if (item) {
+          const accepted =
+            r?.admission_id === item.submissionId &&
+            Boolean(destination.storedSid) &&
+            r?.target_session_id === destination.storedSid &&
+            r?.target_profile_home === destination.profileHome &&
+            ['queued', 'started', 'terminal', 'unknown'].includes(r?.status ?? '')
+
+          item.settle?.(accepted)
+
+          if (!accepted && focused()) {
+            deps.sys('admission not confirmed — input retained; use Alt+K to retry with the same identity')
+            patchUiState({ status: 'admission unconfirmed' })
+          }
+        }
+
         // The gateway consumed a typed voice stop phrase server-side (voice
         // chat ended, no turn started) — release the busy latch; the
         // voice.transcript {stop_phrase} event handles the mode flags + notice.
-        if (r?.voice_stopped) {
+        if (r?.voice_stopped && focused()) {
           patchUiState({ busy: false, status: 'ready' })
         }
       })
-      .catch((e: Error) => {
+      .catch(async (e: Error & { code?: number }) => {
+        // 4094 is a pre-admission refusal, not an ambiguous write. Special
+        // compute modes still support legacy submit; retry only this refusal,
+        // keeping the prepared payload, destination and queue mode unchanged.
+        if (item && e.code === 4094) {
+          if (focused()) {deps.sys('durable admission unavailable for this session — using legacy delivery')}
+
+          try {
+            const r = await deps.gw.request<PromptSubmitResponse>('prompt.submit', {
+              session_id: sid,
+              text: item.preparedText ?? submitText,
+              queued: item.queued !== false
+            })
+
+            const accepted = Boolean(r?.voice_stopped || ['streaming', 'queued', 'steered', 'redirected'].includes(r?.status ?? ''))
+            item.settle?.(accepted)
+
+            if (focused()) {
+              if (r?.voice_stopped) {patchUiState({ busy: false, status: 'ready' })}
+              else if (!accepted) {
+                deps.sys('legacy delivery unconfirmed — input retained; retry may duplicate execution')
+                patchUiState({ status: 'delivery unconfirmed' })
+              }
+            }
+          } catch (error) {
+            item.settle?.(false)
+
+            if (focused()) {
+              deps.sys(`legacy delivery unconfirmed: ${error instanceof Error ? error.message : String(error)} — input retained; retry may duplicate execution`)
+              patchUiState({ status: 'delivery unconfirmed' })
+            }
+          }
+
+          return
+        }
+
+        if (item) {
+          item.settle?.(false)
+
+          if (focused()) {
+            deps.sys(`input retained: ${e.message} — Alt+K retries the same submission`)
+            patchUiState({ status: 'admission unconfirmed' })
+          }
+
+          return
+        }
+
         // Defensive: prompt.submit no longer rejects a mid-turn send with
         // "session busy" (the gateway queues it and returns success), but keep
         // the re-queue path as a safety net for any future/legacy gateway that
         // still errors, so a message is never silently dropped.
         if (isSessionBusyError(e)) {
-          deps.enqueue(submitText)
+          deps.enqueue(submitText, displayOverride, destination)
+
+          if (!focused()) {
+            return
+          }
+
           patchUiState({ busy: true, status: 'queued for next turn' })
 
           return deps.sys(`queued: "${submitText.slice(0, 50)}${submitText.length > 50 ? '…' : ''}"`)
+        }
+
+        if (!focused()) {
+          return
         }
 
         deps.sys(`error: ${e.message}`)
@@ -115,6 +200,10 @@ export function submitPrompt(
   // shows as an `[[ Image N ]]` token, and a matched non-image path is rewritten
   // in place. Announcing it a second time above the status bar was the old
   // out-of-band attachment UI.
+  if (opts.queueItem?.preparedText !== undefined) {
+    return startSubmit(text, opts.queueItem.preparedText, showUserMessage)
+  }
+
   if (opts.skipDetectDrop) {
     return startSubmit(text, deps.expand(text), showUserMessage)
   }

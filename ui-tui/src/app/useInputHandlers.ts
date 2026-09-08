@@ -21,8 +21,7 @@ import {
   type InputHandlerResult,
   type OverlayState
 } from './interfaces.js'
-import { $isBlocked, $overlayState, patchOverlayState } from './overlayStore.js'
-import { respondToServerRequest } from './serverRequestStore.js'
+import { $isBlocked, $overlayState, capturePromptResponseGuard, patchOverlayState } from './overlayStore.js'
 import { turnController } from './turnController.js'
 import { patchTurnState } from './turnStore.js'
 import { getUiState } from './uiStore.js'
@@ -255,11 +254,13 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     }
 
     if (overlay.approval) {
-      respondToServerRequest(overlay.approval.requestId, { choice: 'deny' })
-      patchOverlayState({ approval: null })
-      patchTurnState({ outcome: t('session.approval.denied') })
-
-      return
+      const fresh = capturePromptResponseGuard('approval', overlay.approval)
+      if (!fresh()) {
+        return
+      }
+      return gateway
+        .rpc<ApprovalRespondResponse>('approval.respond', { choice: 'deny', session_id: getUiState().sid })
+        .then(r => r && fresh() && (patchOverlayState({ approval: null }), patchTurnState({ outcome: 'denied' })))
     }
 
     // The connection card has no local dismissal: the operation belongs to the running turn, so
@@ -840,7 +841,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
     }
 
     if (isAction(key, ch, 'k') && cRefs.queueRef.current.length && live.sid) {
-      const next = cActions.dequeue()
+      const next = cActions.dequeue(true)
 
       if (next) {
         cActions.setQueueEdit(null)

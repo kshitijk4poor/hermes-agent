@@ -12,10 +12,10 @@ import {
 } from 'react'
 
 import { useTourMarker } from '@/app/chat/tour-marker'
+import type { GatewayRequester } from '@/app/contrib/types'
 import { useHudComposerDrag } from '@/app/hud/composer-drag'
-import { composerFloatingStrip, composerInputBacking } from '@/components/chat/composer-dock'
-import { $chatOnboardingSolo, $chatOnboardingThreadIds } from '@/components/onboarding-chat/assembly'
-import { OnboardingSkip } from '@/components/onboarding-chat/skip'
+import { useBusyInputMode } from '@/app/session/hooks/use-busy-input-mode'
+import { composerFill, composerFloatingStrip, composerSurfaceGlass } from '@/components/chat/composer-dock'
 import { Button } from '@/components/ui/button'
 import { Slot as ContribSlot } from '@/contrib/react/slot'
 import { useI18n } from '@/i18n'
@@ -209,6 +209,17 @@ export function ChatBar({
   const { collapsed: statusDrawerCollapsed, toggle: toggleStatusDrawer } = useStatusDrawer(activeQueueSessionKey)
   const statusDrawerId = useId()
   const codingDrawerId = useId()
+
+  const requestBusyConfig = useCallback<GatewayRequester>(
+    (method, params) => (gateway ? gateway.request(method, params) : Promise.reject(new Error('Gateway unavailable'))),
+    [gateway]
+  )
+
+  const busyInputMode = useBusyInputMode({
+    sessionId: sessionId ?? null,
+    storedSessionId: queueSessionKey ?? null,
+    requestGateway: requestBusyConfig
+  })
 
   // Status items (subagents, background processes) are keyed by the RUNTIME
   // session id — gateway events and process.list both speak that id. Only the
@@ -413,7 +424,9 @@ export function ChatBar({
   })
 
   const hasComposerPayload = hasText || attachments.length > 0
-  const canSubmit = busy || hasComposerPayload
+  const canSubmit =
+    (busy || hasComposerPayload) &&
+    !(busy && isSteerableText && attachments.length === 0 && !compacting && !blockingPrompt && busyInputMode === null)
 
   // Steer only makes sense mid-turn, text-only (the gateway can't carry images
   // into a tool result) and never for a slash command (those execute inline).
@@ -421,10 +434,9 @@ export function ChatBar({
   // is parked on the user, so a steer can't reach the model — text queues.
   const canSteer = busy && !compacting && !blockingPrompt && !!onSteer && attachments.length === 0 && isSteerableText
 
-  // While busy: text redirects the live turn (Cursor-style stop-and-correct),
-  // attachments queue for the next turn, an empty composer stops.
-  const busyAction: 'steer' | 'queue' | 'stop' = canSteer
-    ? 'steer'
+  // Ordinary busy Send follows backend policy; attachments queue and empty stops.
+  const busyAction: 'interrupt' | 'steer' | 'queue' | 'stop' = canSteer
+    ? (busyInputMode ?? 'interrupt')
     : compacting || hasComposerPayload
       ? 'queue'
       : 'stop'
@@ -432,6 +444,7 @@ export function ChatBar({
   // The submit engine — the orchestration seam where draft + queue meet. Owns
   // the submit decision tree, the send-with-restore primitive, and steer.
   const { queueDraft, steerDraft, submitDraft } = useComposerSubmit({
+    busyInputMode,
     activeQueueSessionKey,
     activeQueueSessionKeyRef,
     attachments,
@@ -1157,6 +1170,7 @@ export function ChatBar({
       minimal={minimal}
       onDictate={dictate}
       onQueue={queueDraft}
+      onSteer={canSteer ? () => steerDraft('steer') : undefined}
       onToggleAutoSpeak={handleToggleAutoSpeak}
       state={state}
       voiceStatus={voiceStatus}
