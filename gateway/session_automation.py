@@ -44,7 +44,9 @@ def _owner(runner, event):
     if runner.session_store._generate_session_key(event.source) != route:
         raise RuntimeStoreError('admission_conflict')
     expected = event.metadata.get('gateway_session_id')
-    if expected and expected != entry.session_id:
+    if not expected:
+        raise RuntimeStoreError('admission_conflict')
+    if expected != entry.session_id:
         # A completed child may follow compression, but never /new or an unrelated resume.
         if runner.session_authority.db.get_compression_tip(expected) != entry.session_id:
             raise RuntimeStoreError('admission_conflict')
