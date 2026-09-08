@@ -99,3 +99,44 @@ def ensure_gateway_service(context: str = "setup", *, interactive: bool = False,
         gw.print_warning(f"Gateway service setup failed: {exc}")
         gw.print_info("You can retry manually: hermes gateway install")
     return False
+
+
+def _wizard_install_service(backend: str) -> None:
+    """Fresh install from the wizard: ask start-now / start-on-login, install, then start."""
+    import subprocess
+    from hermes_cli.gateway import (
+        is_wsl, prompt_yes_no, _WIZARD_BACKEND_LABELS, print_info,
+        supports_systemd_services, install_linux_gateway_from_setup,
+        launchd_install, _gw_windows, _setup_service_action, print_error,
+    )
+
+    wsl_note = " (note: services may not survive WSL restarts)" if is_wsl() else ""
+    start_now = prompt_yes_no("  Start the gateway now?", True)
+    start_on_login = prompt_yes_no(
+        f"  Start the gateway automatically on login/boot as a {_WIZARD_BACKEND_LABELS[backend]} service?"
+        f"{wsl_note}",
+        True,
+    )
+    if not (start_now or start_on_login):
+        print_info("  Skipped start and auto-start setup.")
+        print_info("  You can install later: hermes gateway install")
+        if supports_systemd_services():
+            print_info("  Or as a boot-time service: sudo hermes gateway install --system")
+        print_info("  Or run in foreground:  hermes gateway run")
+        return
+    try:
+        installed_scope, did_install = None, True
+        if backend == "systemd":
+            installed_scope, did_install = install_linux_gateway_from_setup(
+                force=False, enable_on_startup=start_on_login
+            )
+        elif backend == "launchd":
+            launchd_install(force=False)
+        else:
+            _gw_windows().install(force=False)
+        print()
+        if did_install and start_now:
+            _setup_service_action("start", failed_label="Start failed", system=installed_scope == "system")
+    except subprocess.CalledProcessError as e:
+        print_error(f"  Install failed: {e}")
+        print_info("  You can try manually: hermes gateway install")

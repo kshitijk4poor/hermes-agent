@@ -102,3 +102,27 @@ def test_explicit_setup_consent_is_durable_only_after_success(supervisor, monkey
     if not answer:
         assert not gateway.get_systemd_unit_path().exists()
         assert not any(set(op) & {"enable", "enable-linger", "start", "daemon-reload"} for op in _operations(calls))
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("start_now", [False])
+def test_wizard_declined_service_does_not_install(supervisor, monkeypatch, start_now):
+    profile, calls = supervisor
+    config_api.save_config({"gateway": {"service_install_choice": None}})
+    answers = iter([start_now, False])
+    monkeypatch.setattr(gateway, "prompt_yes_no", lambda *args: next(answers))
+    monkeypatch.setattr(gateway, "prompt_choice", lambda *args, **kwargs: 0)
+    spawned = []
+    # Popen is the unmanaged process boundary; no real gateway is launched.
+    original_popen = gateway.subprocess.Popen
+
+    def popen(argv, *args, **kwargs):
+        if "hermes_cli.main" in argv:
+            spawned.append((argv, kwargs))
+            return None
+        return original_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(gateway.subprocess, "Popen", popen)
+    setup_service._wizard_install_service("systemd")
+    assert not gateway.get_systemd_unit_path().exists()
+    assert bool(spawned) is start_now

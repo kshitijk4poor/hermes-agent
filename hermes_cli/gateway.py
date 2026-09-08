@@ -4805,6 +4805,157 @@ def _service_call(backend: str, verb: str, system: bool | None = False) -> None:
     return fn() if system is None else fn(system=system)
 
 
+def _wizard_offer_service_action(action: str, question: str, failed_label: str, **kwargs) -> None:
+    """Wizard start/restart prompt; prints remediation instead when system scope would need root."""
+    if supports_systemd_services() and _system_scope_wizard_would_need_root():
+        _print_system_scope_remediation(action)
+    elif prompt_yes_no(question, True):
+        _setup_service_action(action, failed_label=failed_label, **kwargs)
+
+
+def _setup_service_action(
+    action: str, *, failed_label: str, windows: bool = True, system: bool = False
+) -> None:
+    """Run a wizard service start/restart, printing remediation instead of raising. ``windows=False``
+    skips Windows (pre-platform status block never offers it); ``system`` is a fresh install's scope."""
+    try:
+        backend = _service_backend(windows=windows)
+        if backend is not None:
+            _service_call(backend, action, None if action == "restart" else system)
+        elif action == "restart" and windows:
+            stop_profile_gateway()
+            print_info("Start manually: hermes gateway")
+    except UserSystemdUnavailableError as e:
+        print_error(f"  {failed_label} — user systemd not reachable:")
+        _print_indented(str(e))
+    except SystemScopeRequiresRootError as e:
+        # Defense in depth: the wizard's root pre-check should have caught this.
+        print_error(f"  {failed_label}: {e}")
+        _print_system_scope_remediation(action)
+    except subprocess.CalledProcessError as e:
+        print_error(f"  {failed_label}: {e}")
+
+
+_WIZARD_BANNER = (
+    "┌─────────────────────────────────────────────────────────┐",
+    "│             ⚕ Gateway Setup                            │",
+    "├─────────────────────────────────────────────────────────┤",
+    "│  Configure messaging platforms and the gateway service. │",
+    "│  Press Ctrl+C at any time to exit.                     │",
+    "└─────────────────────────────────────────────────────────┘",
+)
+_WIZARD_BACKEND_LABELS = {"systemd": "systemd", "launchd": "launchd", "windows": "Scheduled Task"}
+# Post-setup guidance when no service backend applies, keyed by the fallthrough reason.
+_WIZARD_NO_SERVICE_LINES = {
+    "wsl": (
+        "  WSL detected but systemd is not running.", "  Run in foreground: hermes gateway run",
+        "  For persistence:   tmux new -s hermes 'hermes gateway run'",
+        "  To enable systemd: add systemd=true to /etc/wsl.conf, then 'wsl --shutdown'",
+    ),
+    "termux": (
+        "  Termux does not use systemd/launchd services.", "  Run in foreground: hermes gateway run",
+        "  Or start it manually in the background (best effort): nohup hermes gateway run >{home}/logs/gateway.log 2>&1 &",
+    ),
+    "unsupported": (
+        "  Service install not supported on this platform.", "  Run in foreground: hermes gateway run",
+    ),
+}
+
+
+def _wizard_service_status_block() -> None:
+    """Pre-platform service status: warnings, then offer to start an installed-but-stopped service."""
+    print()
+    service_installed = _is_service_installed()
+    service_running = _is_service_running()
+
+    if supports_systemd_services() and has_conflicting_systemd_units():
+        print_systemd_scope_conflict_warning()
+        print()
+
+    if supports_systemd_services() and has_legacy_hermes_units():
+        print_legacy_unit_warning()
+        print()
+
+    if service_installed and service_running:
+        print_success("Gateway service is installed and running.")
+    elif service_installed:
+        print_warning("Gateway service is installed but not running.")
+        _wizard_offer_service_action("start", "  Start it now?", "Failed to start", windows=False)
+    else:
+        print_info("Gateway service is not installed yet.")
+        print_info("You'll be offered to install it after configuring platforms.")
+
+
+def _wizard_platform_loop() -> None:
+    while True:
+        print()
+        print_header("Messaging Platforms")
+
+        platforms = _all_platforms()
+        menu_items = [f"{p['emoji']} {p['label']}  ({_platform_status(p)})" for p in platforms] + ["Done"]
+        choice = prompt_choice("Select a platform to configure:", menu_items, len(menu_items) - 1)
+        if choice == len(platforms):
+            break
+        _configure_platform(platforms[choice])
+
+
+
+
+
+def _wizard_post_setup() -> None:
+    """Offer to install/start/restart the gateway once at least one platform has progress."""
+    print()
+    print(color("─" * 58, Colors.DIM))
+    service_installed = _is_service_installed()
+    service_running = _is_service_running()
+
+    if service_running:
+        _wizard_offer_service_action("restart", "  Restart the gateway to pick up changes?", "Restart failed")
+    elif service_installed:
+        _wizard_offer_service_action("start", "  Start the gateway service?", "Start failed")
+    else:
+        print()
+        backend = _service_backend()
+        if backend is not None:
+            from hermes_cli.gateway_setup_service import _wizard_install_service
+            _wizard_install_service(backend)
+            return
+        if is_wsl():
+            reason, home = "wsl", ""
+        elif is_termux():
+            from hermes_constants import display_hermes_home as _dhh
+            reason, home = "termux", _dhh()
+        else:
+            reason, home = "unsupported", ""
+        _print_info_lines(*(line.format(home=home) for line in _WIZARD_NO_SERVICE_LINES[reason]))
+
+
+def gateway_setup():
+    """Interactive setup for messaging platforms + gateway service."""
+    if is_managed():
+        managed_error("run gateway setup")
+        return
+
+    print()
+    for banner_line in _WIZARD_BANNER:
+        print(color(banner_line, Colors.MAGENTA))
+
+    _wizard_service_status_block()
+    _wizard_platform_loop()
+
+    # Meaningful progress on any platform; ``_platform_status`` already handles plugin dual states.
+    def _is_progress(status: str) -> bool:
+        s = status.lower()
+        return not (s == "not configured" or s.startswith("partially") or s.startswith("plugin disabled"))
+
+    if any(_is_progress(_platform_status(p)) for p in _all_platforms()):
+        _wizard_post_setup()
+    else:
+        print()
+        print_info("No platforms configured. Run 'hermes gateway setup' when ready.")
+
+    print()
+
 
 # =============================================================================
 # Main Command Handler
