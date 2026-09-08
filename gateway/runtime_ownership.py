@@ -1,0 +1,85 @@
+"""Nonblocking, all-or-nothing reservations of canonical profile homes.
+
+Lock inodes are never removed: unlinking a locked inode creates a second owner.
+"""
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+import stat
+import threading
+
+
+class OwnershipConflict(RuntimeError):
+    pass
+
+
+def canonical_home(home: Path) -> Path:
+    return Path(os.path.normcase(str(Path(home).expanduser().resolve())))
+
+
+class ProfileOwnership:
+    def __init__(self):
+        self._handles: dict[Path, object] = {}
+        self._mutex = threading.RLock()
+
+    @property
+    def homes(self) -> tuple[Path, ...]:
+        with self._mutex:
+            return tuple(self._handles)
+
+    def reserve(self, homes) -> None:
+        from gateway.status import _try_acquire_file_lock, _build_pid_record
+        with self._mutex:
+            added = []
+            try:
+                for home in sorted({canonical_home(p) for p in homes}):
+                    if home in self._handles:
+                        continue
+                    home.mkdir(parents=True, exist_ok=True)
+                    path = home / 'gateway.lock'
+                    flags = os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0)
+                    fd = os.open(path, flags, 0o600)
+                    handle = os.fdopen(fd, 'r+', encoding='utf-8')
+                    try:
+                        info = os.fstat(handle.fileno())
+                        if not stat.S_ISREG(info.st_mode) or (os.name != 'nt' and info.st_uid != os.getuid()):
+                            raise PermissionError('unsafe gateway lock owner or type')
+                        if not _try_acquire_file_lock(handle):
+                            raise OwnershipConflict(f'Gateway runtime already owns profile {home}')
+                        record = {**_build_pid_record(), 'hermes_home': str(home)}
+                        handle.seek(0)
+                        handle.truncate()
+                        json.dump(record, handle)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    except BaseException:
+                        handle.close()
+                        raise
+                    self._handles[home] = handle
+                    added.append(home)
+            except BaseException:
+                for home in reversed(added):
+                    self.release(home)
+                raise
+
+    def owns(self, home: Path) -> bool:
+        with self._mutex:
+            return canonical_home(home) in self._handles
+
+    def release(self, home: Path) -> None:
+        from gateway.status import _release_file_lock
+        with self._mutex:
+            handle = self._handles.pop(canonical_home(home), None)
+            if handle is not None:
+                _release_file_lock(handle)
+                handle.close()
+
+    def close(self) -> None:
+        with self._mutex:
+            for home in reversed(self.homes):
+                self.release(home)
+
+
+process_ownership = ProfileOwnership()

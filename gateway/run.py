@@ -1640,6 +1640,9 @@ class HygieneTurnHoldExceeded(Exception):
 
 def _multiplex_profile_homes(config: object) -> list[tuple[str, "Path"]]:
     """Return the authoritative profile set for one multiplex gateway config."""
+    reserved = getattr(config, "_runtime_profile_homes", None)
+    if reserved is not None:
+        return list(reserved)
     from hermes_cli.profiles import profiles_to_serve
     return list(profiles_to_serve(multiplex=True))
 
@@ -4947,150 +4950,159 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             and not await _start_gateway_replace_existing_instance(existing_pid, replace)):
         return False
 
-    _start_gateway_configure_logging(verbosity)
-
-    runner = GatewayRunner(config)
-    # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
-    # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
-    # See #82936.
-    _enable_multiplex_log_routing(runner.config)
-    # ``--replace`` is explicit startup authority, not a durable reconnect policy: GatewayRunner scopes
-    # it to cold adapter connects and clears it before the background reconnect watcher starts.
-    runner._platform_lock_takeover_on_start = bool(replace)
-
-    # Unexpected signals exit non-zero so service managers revive us; planned stops write a marker first.
-    _signal_initiated_shutdown = [False]
-
-    shutdown_signal_handler = _start_gateway_make_shutdown_signal_handler(
-        runner, _signal_initiated_shutdown)
-
-    restart_signal_handler = _start_gateway_make_restart_signal_handler(runner)
-
-    loop = asyncio.get_running_loop()
-
-    # Swallow transient network errors from background tasks; one unhandled httpx error would kill us.
-    # Issues #31066 / #31110: an unhandled ``telegram.error.TimedOut`` (or peer NetworkError / httpx
-    # connection error) in any awaited coroutine would propagate to the loop and kill the gateway process,
-    # taking down every profile attached to the same runner. systemd then restarts the service after ~5s but
-    # the active conversation turn is lost. The fix is intentionally narrow: only well-known transient
-    # network errors are swallowed (and logged with full traceback so the originating call site is still
-    # discoverable). Anything else is forwarded to the default handler so real bugs still surface.
-    loop.set_exception_handler(_gateway_loop_exception_handler)
-
-    if threading.current_thread() is threading.main_thread():
-        # add_signal_handler raises NotImplementedError on Windows; SIGUSR1 is POSIX-only.
-        handlers = [(sig, shutdown_signal_handler, (sig,)) for sig in (signal.SIGINT, signal.SIGTERM)]
-        if hasattr(signal, "SIGUSR1"):
-            handlers.append((signal.SIGUSR1, restart_signal_handler, ()))  # windows-footgun: ok — hasattr-guarded
-        for sig, handler, args in handlers:
-            with suppress(NotImplementedError):
-                loop.add_signal_handler(sig, handler, *args)  # windows-footgun: ok — suppress(NotImplementedError)
-    else:
-        logger.info("Skipping signal handlers (not running in main thread).")
-
-    # Windows has no add_signal_handler, so `hermes gateway stop`'s SIGTERM would never drain; poll the
-    # planned-stop marker (written BEFORE the kill) instead. Runs everywhere so masked-SIGTERM drains.
-    # Windows fallback: asyncio.add_signal_handler raises NotImplementedError on Windows, so `hermes gateway
-    # stop`'s SIGTERM (which Python maps to TerminateProcess on Windows) never invokes
-    # shutdown_signal_handler. That means the drain loop never runs, mark_resume_pending never fires, and
-    # sessions are silently lost across restarts (issue #33778). The fix is a marker-polling thread: `hermes
-    # gateway stop` writes the planned-stop marker BEFORE killing, and this thread notices it and drives the
-    # same shutdown path the signal handler would have. Runs on every platform (cheap, defensive) so
-    # non-signal-bearing environments (Windows native, sandboxed CI runners that mask SIGTERM) still get a
-    # clean drain.
-    _planned_stop_watcher_stop = threading.Event()
-    _planned_stop_watcher_thread = threading.Thread(
-        target=_run_planned_stop_watcher,
-        args=(_planned_stop_watcher_stop, runner, loop, shutdown_signal_handler), daemon=True,
-        name="planned-stop-watcher")
-    _planned_stop_watcher_thread.start()
-
-    # PID file BEFORE adapters: of two concurrent `run --replace`, only the O_EXCL winner opens sockets.
-    # Only --force skips the host-lock refusal. Every generated unit carries --replace, so reading it as
-    # --force there disabled the one arbiter of the two-units-at-once race; a replace that took the
-    # owner over already freed the lock with that process. Consequence: a live holder this process
-    # cannot interrogate (its record never published, or it speaks another HOST_PROTOCOL_VERSION
-    # mid-upgrade) blocks every other unit with exit 75 until it exits; only --force gets past it.
-    if not _start_gateway_claim_pid_file(force=force):
+    from gateway.runtime_ownership import process_ownership, OwnershipConflict
+    from gateway.status import remove_pid_file, release_gateway_runtime_lock
+    resolved_config = config if config is not None else load_gateway_config_for_runner()
+    profile_homes = (_multiplex_profile_homes(resolved_config)
+                     if getattr(resolved_config, 'multiplex_profiles', False) else [])
+    try:
+        process_ownership.reserve([get_hermes_home(), *(home for _, home in profile_homes)])
+    except (OwnershipConflict, OSError) as exc:
+        logger.error("Cannot reserve gateway profiles: %s", exc)
+        return False
+    # Freeze discovery: later profile additions must restart and reserve before opening stores.
+    if profile_homes:
+        resolved_config._runtime_profile_homes = tuple(profile_homes)
+    if not _start_gateway_claim_pid_file():
+        release_gateway_runtime_lock()
         return False
 
-    # Right after the PID claim (which makes us authoritative); non-fatal — consumers fall back to scan.
-    _control_server = await _start_gateway_start_control_socket(runner)
-    # Now the attach channel answers: republish the host record with the settled served set.
-    _refresh_host_gateway_record(runner)
-    _log_standalone_profiles_at_boot(runner)
-
-    def _lifecycle_record_startup() -> None:
-        # Report if the previous life died uncleanly (SIGKILL / OOM / VM death), then claim the
-        # sentinel for this life. After the PID-file claim so a --replace loser can't clobber it.
-        from gateway.lifecycle_ledger import record_startup
-        record_startup()
-
-    def _start_keepalive() -> None:
-        from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
-        start_nous_auth_keepalive()
-
-    _best_effort(_lifecycle_record_startup, "Lifecycle ledger startup record failed: %s")
-    _best_effort(_start_keepalive, "Nous auth keepalive did not start: %s")
-    _ensure_windows_gateway_venv_imports()
-
-    # discover_mcp_tools() blocks up to 120s; on the loop thread it would freeze platform heartbeats.
     try:
-        # MCP tool discovery — run in an executor so the asyncio event loop stays responsive even when a
-        # configured MCP server is slow or unreachable.  discover_mcp_tools() uses a blocking 120s wait
-        # internally; calling it from the loop thread would freeze platform heartbeats (Discord shard,
-        # Telegram polling) until it returned. See #16856.
-        await _discover_gateway_mcp_tools(runner.config)
-    except Exception as e:
-        logger.debug("MCP tool discovery failed: %s", e)
+        _start_gateway_configure_logging(verbosity)
 
-    try:
-        success = await runner.start()
-    except BaseException:
-        _shutdown_gateway_health_export(runner)
-        raise
-    if not success:
-        _shutdown_gateway_health_export(runner)
-        return False
+        runner = GatewayRunner(resolved_config)
+        # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
+        # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
+        # See #82936.
+        _enable_multiplex_log_routing(runner.config)
+        # ``--replace`` is explicit startup authority, not a durable reconnect policy: GatewayRunner scopes
+        # it to cold adapter connects and clears it before the background reconnect watcher starts.
+        runner._platform_lock_takeover_on_start = bool(replace)
 
-    def _recover_pending() -> None:
-        recovered = _recover_pending_flushes(runner)
-        if recovered:
-            logger.info("Recovered %d pending message(s) from shutdown flush", recovered)
+        # Unexpected signals exit non-zero so service managers revive us; planned stops write a marker first.
+        _signal_initiated_shutdown = [False]
 
-    _best_effort(_recover_pending)
-    if runner.should_exit_cleanly:
-        _shutdown_gateway_health_export(runner)
-        if runner.exit_reason:
-            logger.error("Gateway exiting cleanly: %s", runner.exit_reason)
-        # Explicit exit codes (GATEWAY_FATAL_CONFIG_EXIT_CODE) must propagate so s6 finish maps 78 → 125.
-        if runner.exit_code is not None:
-            raise SystemExit(runner.exit_code)
-        return True
-    if not runner._running:
-        # Startup aborted by restart/shutdown before running mode; preserve that path without starting cron.
+        shutdown_signal_handler = _start_gateway_make_shutdown_signal_handler(
+            runner, _signal_initiated_shutdown)
+
+        def restart_signal_handler():
+            runner.request_restart(detached=False, via_service=True)
+
+        loop = asyncio.get_running_loop()
+
+        # Swallow transient network errors from background tasks; one unhandled httpx error would kill us.
+        # Issues #31066 / #31110: an unhandled ``telegram.error.TimedOut`` (or peer NetworkError / httpx
+        # connection error) in any awaited coroutine would propagate to the loop and kill the gateway process,
+        # taking down every profile attached to the same runner. systemd then restarts the service after ~5s but
+        # the active conversation turn is lost. The fix is intentionally narrow: only well-known transient
+        # network errors are swallowed (and logged with full traceback so the originating call site is still
+        # discoverable). Anything else is forwarded to the default handler so real bugs still surface.
+        loop.set_exception_handler(_gateway_loop_exception_handler)
+
+        if threading.current_thread() is threading.main_thread():
+            # add_signal_handler raises NotImplementedError on Windows; SIGUSR1 is POSIX-only.
+            handlers = [(sig, shutdown_signal_handler, (sig,)) for sig in (signal.SIGINT, signal.SIGTERM)]
+            if hasattr(signal, "SIGUSR1"):
+                handlers.append((signal.SIGUSR1, restart_signal_handler, ()))  # windows-footgun: ok — hasattr-guarded
+            for sig, handler, args in handlers:
+                with suppress(NotImplementedError):
+                    loop.add_signal_handler(sig, handler, *args)  # windows-footgun: ok — suppress(NotImplementedError)
+        else:
+            logger.info("Skipping signal handlers (not running in main thread).")
+
+        # Windows has no add_signal_handler, so `hermes gateway stop`'s SIGTERM would never drain; poll the
+        # planned-stop marker (written BEFORE the kill) instead. Runs everywhere so masked-SIGTERM drains.
+        # Windows fallback: asyncio.add_signal_handler raises NotImplementedError on Windows, so `hermes gateway
+        # stop`'s SIGTERM (which Python maps to TerminateProcess on Windows) never invokes
+        # shutdown_signal_handler. That means the drain loop never runs, mark_resume_pending never fires, and
+        # sessions are silently lost across restarts (issue #33778). The fix is a marker-polling thread: `hermes
+        # gateway stop` writes the planned-stop marker BEFORE killing, and this thread notices it and drives the
+        # same shutdown path the signal handler would have. Runs on every platform (cheap, defensive) so
+        # non-signal-bearing environments (Windows native, sandboxed CI runners that mask SIGTERM) still get a
+        # clean drain.
+        _planned_stop_watcher_stop = threading.Event()
+        _planned_stop_watcher_thread = threading.Thread(
+            target=_run_planned_stop_watcher,
+            args=(_planned_stop_watcher_stop, runner, loop, shutdown_signal_handler), daemon=True,
+            name="planned-stop-watcher")
+        _planned_stop_watcher_thread.start()
+
+        # Right after the PID claim (which makes us authoritative); non-fatal — consumers fall back to scan.
+        _control_server = await _start_gateway_start_control_socket(runner)
+
+        def _lifecycle_record_startup() -> None:
+            # Report if the previous life died uncleanly (SIGKILL / OOM / VM death), then claim the
+            # sentinel for this life. After the PID-file claim so a --replace loser can't clobber it.
+            from gateway.lifecycle_ledger import record_startup
+            record_startup()
+
+        def _start_keepalive() -> None:
+            from hermes_cli.nous_auth_keepalive import start_nous_auth_keepalive
+            start_nous_auth_keepalive()
+
+        _best_effort(_lifecycle_record_startup, "Lifecycle ledger startup record failed: %s")
+        _best_effort(_start_keepalive, "Nous auth keepalive did not start: %s")
+        _ensure_windows_gateway_venv_imports()
+
+        # discover_mcp_tools() blocks up to 120s; on the loop thread it would freeze platform heartbeats.
         try:
-            await runner.wait_for_shutdown()
-            try:
-                await _shutdown_mcp_servers_nonblocking(config=getattr(runner, "config", None))
-            except Exception:
-                logger.warning("MCP shutdown failed; connections may be left open", exc_info=True)
-            return _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
-        finally:
+            # MCP tool discovery — run in an executor so the asyncio event loop stays responsive even when a
+            # configured MCP server is slow or unreachable.  discover_mcp_tools() uses a blocking 120s wait
+            # internally; calling it from the loop thread would freeze platform heartbeats (Discord shard,
+            # Telegram polling) until it returned. See #16856.
+            await _discover_gateway_mcp_tools(runner.config)
+        except Exception as e:
+            logger.debug("MCP tool discovery failed: %s", e)
+
+        try:
+            success = await runner.start()
+        except BaseException:
             _shutdown_gateway_health_export(runner)
+            raise
+        if not success:
+            _shutdown_gateway_health_export(runner)
+            return False
 
-    cron_stop, cron_provider, cron_thread, housekeeping_thread = (
-        _start_gateway_start_cron_and_housekeeping(runner))
+        def _recover_pending() -> None:
+            from gateway.shutdown_flush import recover_pending_to_db
+            recovered = recover_pending_to_db()
+            if recovered:
+                logger.info("Recovered %d pending message(s) from shutdown flush", recovered)
 
-    # READY only once adapters, cron and housekeeping run; missing systemd state just disables watchdog.
-    runner._start_systemd_watchdog()
+        _best_effort(_recover_pending)
+        if runner.should_exit_cleanly:
+            _shutdown_gateway_health_export(runner)
+            if runner.exit_reason:
+                logger.error("Gateway exiting cleanly: %s", runner.exit_reason)
+            # Explicit exit codes (GATEWAY_FATAL_CONFIG_EXIT_CODE) must propagate so s6 finish maps 78 → 125.
+            if runner.exit_code is not None:
+                raise SystemExit(runner.exit_code)
+            return True
+        if not runner._running:
+            # Startup aborted by restart/shutdown before running mode; preserve that path without starting cron.
+            try:
+                await runner.wait_for_shutdown()
+                with suppress(Exception):
+                    await _shutdown_mcp_servers_nonblocking()
+                return _resolve_gateway_exit_verdict(runner, _signal_initiated_shutdown[0])
+            finally:
+                _shutdown_gateway_health_export(runner)
 
-    await runner.wait_for_shutdown()
+        cron_stop, cron_provider, cron_thread, housekeeping_thread = (
+            _start_gateway_start_cron_and_housekeeping(runner))
 
-    return await _start_gateway_shutdown_tail(
-        runner, _control_server, cron_stop, cron_provider, cron_thread, housekeeping_thread,
-        _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
+        # READY only once adapters, cron and housekeeping run; missing systemd state just disables watchdog.
+        runner._start_systemd_watchdog()
 
+        await runner.wait_for_shutdown()
+
+        return await _start_gateway_shutdown_tail(
+            runner, _control_server, cron_stop, cron_provider, cron_thread, housekeeping_thread,
+            _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
+
+    finally:
+        remove_pid_file()
+        release_gateway_runtime_lock()
 
 def _guard_corrupt_user_config() -> None:
     """Fail closed when the active profile's config.yaml cannot be parsed: nobody can repair it on this
