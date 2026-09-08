@@ -7,8 +7,7 @@ import sys
 import pytest
 
 
-@pytest.mark.parametrize('source', ['cli', 'tui', 'gui'])
-def test_local_completion_joins_fifo_without_an_observer(tmp_path, source):
+def _probe(tmp_path, source):
     root = Path(__file__).resolve().parents[2]
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
     env['PYTHONPATH'] = str(root)
@@ -17,3 +16,12 @@ def test_local_completion_joins_fifo_without_an_observer(tmp_path, source):
         capture_output=True, text=True, timeout=150)
     assert result.returncode == 0, result.stdout + result.stderr
     print(result.stdout)
+
+
+@pytest.mark.parametrize('source', ['cli', 'tui', 'gui'])
+def test_local_completion_joins_fifo_without_an_observer(tmp_path, source):
+    _probe(tmp_path, source)
+
+
+def test_local_completion_survives_owner_kill_without_duplicate(tmp_path):
+    _probe(tmp_path, 'restart')

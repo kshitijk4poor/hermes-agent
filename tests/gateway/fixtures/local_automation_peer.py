@@ -13,6 +13,8 @@ from local_recovery_probe import daemon, websocket, rpc
 
 
 def probe(base, source):
+    restart = source == 'restart'
+    source = 'gui' if restart else source
     root = Path(__file__).resolve().parents[3]
     home, user = base / 'state', base / 'user'
     home.mkdir(); user.mkdir()
@@ -53,6 +55,11 @@ def probe(base, source):
             await submit('spawn', 'SPAWN_AUTOMATION')
             await wait(lambda: rows()[0]['status'] == 'terminal')
             assert 'REAL_TERMINAL_COMPLETION' in json.dumps(model.requests)
+            if restart:
+                model.gate.touch()
+                await wait(lambda: any(r['principal_id'].startswith('automation:') for r in rows()))
+                assert rows()[-1]['status'] == 'queued', rows()
+                return {'session_id': sid, 'committed': rows()}
             await submit('held', 'HOLD_AUTOMATION')
             assert await asyncio.to_thread(model.blocked.wait, 20)
             await submit('follower', 'HUMAN_FIFO_FOLLOWER')
@@ -79,14 +86,38 @@ def probe(base, source):
                 'observer_closed_before_completion': True}
 
     try:
-        with daemon(root, home, env, barrier=False) as (proc, desc):
+        with daemon(root, home, env, barrier=restart, fixture='local_automation_daemon.py') as (proc, desc):
             try:
                 receipt = asyncio.run(run(desc))
                 receipt['daemon_pid'] = proc.pid
-                print(json.dumps(receipt))
+                if not restart:
+                    print(json.dumps(receipt))
             except BaseException:
-                print((home / 'restart.log').read_text()[-15000:], file=sys.stderr)
+                print((home / ('first.log' if restart else 'restart.log')).read_text()[-15000:], file=sys.stderr)
                 raise
+        if restart:
+            pids = [receipt['daemon_pid']]
+            epochs = [desc['authority_epoch']]
+            async def recovered(desc):
+                await wait(lambda: all(r['status'] == 'terminal' for r in rows()))
+                # Retry the unacknowledged producer on its real recovered watcher cadence.
+                await asyncio.sleep(8)
+                assert len(rows()) == len(receipt['committed']), rows()
+                assert rows()[-1]['outcome'] == 'completed', rows()
+                async with websocket(home, desc) as ws:
+                    result = await rpc(ws, 'session.resume', session_id=receipt['session_id'])
+                    assert 'result' in result, result
+            for _ in range(2):
+                with daemon(root, home, env, barrier=False) as (proc, desc):
+                    pids.append(proc.pid); epochs.append(desc['authority_epoch'])
+                    asyncio.run(recovered(desc))
+            texts = [next((m.get('content', '') for m in reversed(r['messages']) if m['role'] == 'user'), '')
+                     for r in model.requests if r.get('messages')]
+            completion_inputs = [t for t in texts if 'REAL_TERMINAL_COMPLETION' in str(t)]
+            assert len(completion_inputs) == 1, texts
+            assert len(set(pids)) == 3 and epochs == sorted(set(epochs))
+            print(json.dumps({'pids': pids, 'epochs': epochs, 'ledger': rows(),
+                              'model_inputs': texts, 'lost_producer_ack': True}))
     finally:
         model.gate.touch(); model.release.set()
         model.shutdown(); model.server_close()
