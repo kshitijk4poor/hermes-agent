@@ -5354,6 +5354,9 @@ def _cmd_install(args):
         )
     else:
         _handle_no_backend("install", wsl=True, s6=True)
+    if backend is not None and _is_service_installed():
+        from hermes_cli.gateway_setup_service import record_service_choice
+        record_service_choice("install")
 
 
 def _cmd_uninstall(args):

@@ -102,41 +102,47 @@ def ensure_gateway_service(context: str = "setup", *, interactive: bool = False,
 
 
 def _wizard_install_service(backend: str) -> None:
-    """Fresh install from the wizard: ask start-now / start-on-login, install, then start."""
+    """Choose persistence once; start-now without persistence stays unmanaged."""
     import subprocess
-    from hermes_cli.gateway import (
-        is_wsl, prompt_yes_no, _WIZARD_BACKEND_LABELS, print_info,
-        supports_systemd_services, install_linux_gateway_from_setup,
-        launchd_install, _gw_windows, _setup_service_action, print_error,
-    )
+    from hermes_cli import gateway as gw
+    from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
 
-    wsl_note = " (note: services may not survive WSL restarts)" if is_wsl() else ""
-    start_now = prompt_yes_no("  Start the gateway now?", True)
-    start_on_login = prompt_yes_no(
-        f"  Start the gateway automatically on login/boot as a {_WIZARD_BACKEND_LABELS[backend]} service?"
-        f"{wsl_note}",
-        True,
-    )
-    if not (start_now or start_on_login):
-        print_info("  Skipped start and auto-start setup.")
-        print_info("  You can install later: hermes gateway install")
-        if supports_systemd_services():
-            print_info("  Or as a boot-time service: sudo hermes gateway install --system")
-        print_info("  Or run in foreground:  hermes gateway run")
+    if not sys.stdin.isatty():
+        return
+    start_now = gw.prompt_yes_no("  Start the gateway now?", True)
+    if not wants_service_install(interactive=True):
+        gw.print_info("Without a service, messaging and scheduled jobs stop at logout/reboot; jobs cannot run while the host is off.")
+        if start_now:
+            log_dir = gw.get_hermes_home() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            # A setup start is not a request to evict an existing runtime.
+            command = [arg for arg in gw._timestamped_stderr_gateway_command(
+                log_dir / "gateway.error.log"
+            ) if arg != "--replace"]
+            try:
+                with (log_dir / "gateway.log").open("ab") as output:
+                    subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
+                                     stderr=subprocess.DEVNULL, **windows_detach_popen_kwargs())
+                gw.print_info("Gateway launch requested without installing a service. Check: hermes gateway status")
+            except OSError as exc:
+                gw.print_error(f"Gateway launch failed: {exc}")
+        else:
+            gw.print_info("Run later: hermes gateway run. Install later: hermes gateway install")
         return
     try:
-        installed_scope, did_install = None, True
+        scope, did_install = None, True
         if backend == "systemd":
-            installed_scope, did_install = install_linux_gateway_from_setup(
-                force=False, enable_on_startup=start_on_login
-            )
+            scope, did_install = gw.install_linux_gateway_from_setup(force=False, enable_on_startup=True)
         elif backend == "launchd":
-            launchd_install(force=False)
+            gw.launchd_install(force=False)
         else:
-            _gw_windows().install(force=False)
-        print()
-        if did_install and start_now:
-            _setup_service_action("start", failed_label="Start failed", system=installed_scope == "system")
-    except subprocess.CalledProcessError as e:
-        print_error(f"  Install failed: {e}")
-        print_info("  You can try manually: hermes gateway install")
+            gw._gw_windows().install(force=False, start_now=start_now, start_on_login=True)
+        if not did_install or not gw._is_service_installed():
+            gw.print_warning("Gateway service install did not complete. Retry: hermes gateway install")
+            return
+        record_service_choice("install")
+        if start_now and backend != "windows":
+            gw._setup_service_action("start", failed_label="Start failed", system=scope == "system")
+    except (subprocess.CalledProcessError, SystemExit) as exc:
+        gw.print_error(f"Install failed: {exc}")
+        gw.print_info("You can try manually: hermes gateway install")

@@ -105,10 +105,13 @@ def test_explicit_setup_consent_is_durable_only_after_success(supervisor, monkey
 
 
 @pytest.mark.linux_only
-@pytest.mark.parametrize("start_now", [False])
+@pytest.mark.parametrize("start_now", [False, True])
 def test_wizard_declined_service_does_not_install(supervisor, monkeypatch, start_now):
     profile, calls = supervisor
     config_api.save_config({"gateway": {"service_install_choice": None}})
+    stream = io.StringIO()
+    stream.isatty = lambda: True
+    monkeypatch.setattr(sys, "stdin", stream)
     answers = iter([start_now, False])
     monkeypatch.setattr(gateway, "prompt_yes_no", lambda *args: next(answers))
     monkeypatch.setattr(gateway, "prompt_choice", lambda *args, **kwargs: 0)
@@ -126,3 +129,24 @@ def test_wizard_declined_service_does_not_install(supervisor, monkeypatch, start
     setup_service._wizard_install_service("systemd")
     assert not gateway.get_systemd_unit_path().exists()
     assert bool(spawned) is start_now
+    assert config_api.load_config()["gateway"]["service_install_choice"] == "decline"
+    if spawned:
+        assert "--replace" not in spawned[0][0]
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("fail", [False, True])
+def test_explicit_install_records_only_completed_install(supervisor, monkeypatch, fail):
+    from argparse import Namespace
+    import subprocess
+
+    config_api.save_config({"gateway": {"service_install_choice": "decline"}})
+    if fail:
+        monkeypatch.setenv("CHOICE_FAIL", "1")
+    args = Namespace(start_now=False, start_on_login=True)
+    if fail:
+        with pytest.raises(subprocess.CalledProcessError):
+            gateway._cmd_install(args)
+    else:
+        gateway._cmd_install(args)
+    assert config_api.load_config()["gateway"]["service_install_choice"] == ("decline" if fail else "install")
