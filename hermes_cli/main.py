@@ -3162,8 +3162,9 @@ def _set_chat_arg_defaults(args) -> None:
 def _run_oneshot_from_args(args) -> None:
     """Top-level --oneshot / -z: single-shot mode, stdout = final response only.
 
-    Bypasses cli.py entirely; _run_and_exit_oneshot never returns.
+    Bypasses cli.py entirely; the transport launcher never returns.
     """
+    _confirm_startup_expensive_model_override(args)
     from hermes_cli.gateway_chat import launch_from_args
     sys.exit(launch_from_args(args))
 
