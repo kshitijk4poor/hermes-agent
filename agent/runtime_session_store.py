@@ -13,6 +13,19 @@ import tempfile
 import threading
 
 
+_worker_process = False
+
+
+def is_worker_process():
+    """A successful self-registration makes this interpreter compute-only.
+
+    Process-scoped (not ContextVar): import-time recovery and fresh helper threads
+    must not regain owner-ledger access. This is cooperative runtime ownership,
+    not OS confinement or an authorization credential.
+    """
+    return _worker_process
+
+
 class WorkerPersistenceError(RuntimeError):
     pass
 
@@ -63,6 +76,9 @@ class WorkerRPC:
                         break
                 if 'error' in response:
                     raise WorkerPersistenceError(response['error'].get('message', 'persistence_failed'))
+                if method in ('worker.register', 'worker.adopt') and params.get('pid') == os.getpid():
+                    global _worker_process
+                    _worker_process = True
                 return response['result']
 
 
