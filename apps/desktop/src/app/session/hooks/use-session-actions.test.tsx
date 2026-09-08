@@ -1055,6 +1055,26 @@ describe('startFreshSessionDraft', () => {
 })
 
 describe('createBackendSessionForSend profile routing', () => {
+  it('reuses the create intent after ACK loss but not after New chat', async () => {
+    $newChatRoute.set(null)
+    $activeGatewayProfile.set('default')
+    const calls: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.create') { calls.push(params!); throw new Error('lost create ACK') }
+      return {} as never
+    })
+    let handle: HarnessHandle | null = null
+    render(<Harness onReady={value => { handle = value }} requestGateway={requestGateway} />)
+    await waitFor(() => expect(handle).not.toBeNull())
+    await act(async () => { await expect(handle!.createBackendSessionForSend()).rejects.toThrow('lost create ACK') })
+    await act(async () => { await expect(handle!.createBackendSessionForSend()).rejects.toThrow('lost create ACK') })
+    expect(calls[0].request_id).toEqual(expect.any(String))
+    expect(calls[1].request_id).toBe(calls[0].request_id)
+    act(() => handle!.startFreshSessionDraft())
+    await act(async () => { await expect(handle!.createBackendSessionForSend()).rejects.toThrow('lost create ACK') })
+    expect(calls[2].request_id).not.toBe(calls[0].request_id)
+  })
+
   afterEach(() => {
     cleanup()
     $newChatProfile.set(null)

@@ -473,8 +473,7 @@ export function useSessionActions({
   const { t } = useI18n()
   const copy = t.desktop
   const resumeRequestRef = useRef(0)
-  const transcriptHydrationByRuntimeRef = useRef(new Map<string, symbol>())
-  const coldDisplayReadsRef = useRef(new Map<string, symbol>())
+  const createIntentRef = useRef<string | null>(null)
   const branchCreateFlightsRef = useRef(new Map<string, Promise<SessionCreateResponse>>())
 
   // Follow auto-compression's stored-id rotation only while the exact runtime,
@@ -571,6 +570,7 @@ export function useSessionActions({
     (options: boolean | FreshSessionDraftOptions = false) => {
       const draftOptions = typeof options === 'boolean' ? { replaceRoute: options } : options
       const preserveRoute = draftOptions.preserveRoute ?? false
+      createIntentRef.current = null
       const replaceRoute = draftOptions.replaceRoute ?? false
 
       const hasWorkspaceTarget =
@@ -674,6 +674,7 @@ export function useSessionActions({
     ): Promise<string | null> => {
       const startingStoredSessionId = selectedStoredSessionIdRef.current
       const startingRouteToken = getRouteToken()
+      const createIntent = createIntentRef.current ??= crypto.randomUUID()
 
       creatingSessionRef.current = true
 
@@ -701,13 +702,8 @@ export function useSessionActions({
         // reduce the owner to a bare profile name that later RPCs dial on a
         // different socket than the one that minted the runtime.
         const capturedRoute = resolveNewChatOwnerRoute()
-        const capturedProfile = $newChatProfile.get() || normalizeProfileKey($activeGatewayProfile.get())
-        const legacyProfileIntent = isLegacyNewChatProfile(capturedProfile)
-
-        const params = {
-          ...(await desktopSessionCreateParams(cwd, capturedRoute, capturedProfile, legacyProfileIntent)),
-          ...sessionCreateOverrideParams(createOverrides, seedMessages)
-        }
+        const params = await desktopSessionCreateParams(cwd, capturedRoute)
+        params.request_id = createIntent
 
         // Lease the owner socket for the whole create → owner-publication
         // sequence (#93602 primitive). The per-request lease inside
@@ -802,6 +798,8 @@ export function useSessionActions({
         }
 
         resetViewSync()
+
+        if (createIntentRef.current === createIntent) { createIntentRef.current = null }
         activeSessionIdRef.current = created.session_id
         selectedStoredSessionIdRef.current = stored
         ensureSessionState(created.session_id, stored)
@@ -972,37 +970,11 @@ export function useSessionActions({
         const cwd =
           options?.cwd === null ? '' : typeof options?.cwd === 'string' ? options.cwd.trim() : resolveNewSessionCwd()
 
-        // #52589 provenance for the tile path: an explicitly-passed cwd is a
-        // deliberate workspace pick; a resolved default is inherited.
-        setCurrentCwdExplicit(typeof options?.cwd === 'string')
-
-        // Bot-workspace tabs target an agent profile without switching the
-        // window's ambient composer. Do not leak that unrelated session's
-        // composer selection (manual model/provider, reasoning effort, fast
-        // flag) into the bot's chat; omitting them lets the selected profile
-        // supply its configured defaults. Ordinary Sessions tiles keep the
-        // sticky composer override.
-        //
-        // No `hidden` here, in either mode. Only Bot Mode's PLUMBING sessions
-        // are born hidden, and each mints its own row: the canonical Bot Chat
-        // (`hermes-bots/canonical-chat.ts`) and group member sessions
-        // (`hermes-bots/group-turns.ts`). Every session this path creates is a
-        // side chat the user asked for by hand — "New chat with this bot" and
-        // the Bot Mode tab-strip "+" / ⌘T — so it is an ordinary conversation
-        // in the bot's profile and stays listed, exactly as
-        // `apps/desktop/src/AGENTS.md` and the hide sweep's title allow-list
-        // (`hermes-bots/session-sweep.ts`) already promise. Blanket-hiding the
-        // mode stranded them: unlisted in the Sessions sidebar, skipped by
-        // `/resume`, and reachable only while their tab stayed open, since the
-        // bot row opens the canonical chat and "Open recent session" reads
-        // `last_session`, which never reports a hidden row.
-        const params = await desktopSessionCreateParams(
-          cwd,
-          capturedRoute,
-          requestedProfile,
-          options?.route === null || defaultTarget?.route === null,
-          workspaceScope.workspaceMode !== 'bots'
-        )
+        const params = {
+          ...(await desktopSessionCreateParams(cwd, capturedRoute)),
+          request_id: crypto.randomUUID(),
+          ...(workspaceScope.workspaceMode === 'bots' ? { hidden: true } : {})
+        }
 
         // Same lease chain as createBackendSessionForSend: owner socket held
         // across the create, then the foreground hold carries it until the
