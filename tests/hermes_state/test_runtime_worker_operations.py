@@ -21,7 +21,7 @@ def test_structured_worker_receipts_are_atomic_and_scoped(tmp_path):
                                                    operation=op, payload=payload)
         assert apply(1, 'turn.acquire', {'holder': 'worker-lease', 'ttl_seconds': 300})['value']
         messages = [
-            {'role': 'user', 'content': [{'type': 'text', 'text': 'hello'}], 'api_content': 'wire'},
+            {'role': 'user', 'content': [{'type': 'text', 'text': 'hello\ud800'}], 'api_content': 'wire'},
             {'role': 'assistant', 'content': None, 'reasoning': 'private reason',
              'tool_calls': [{'id': 'call1', 'type': 'function', 'function': {'name': 'terminal', 'arguments': '{}'}}]},
             {'role': 'tool', 'content': 'tool-marker', 'tool_call_id': 'call1', 'tool_name': 'terminal'},
@@ -46,12 +46,12 @@ def test_structured_worker_receipts_are_atomic_and_scoped(tmp_path):
             apply(3, 'SQL', {'sql': 'DELETE FROM messages'})
         assert apply(3, 'turn.renew', {'holder': 'worker-lease', 'ttl_seconds': 300})['value']
         assert apply(4, 'turn.release', {'holder': 'worker-lease'}) == {'value': None}
-        assistant = {'role': 'assistant', 'content': 'canonical winner'}
+        assistant = {'role': 'assistant', 'content': [{'type': 'text', 'text': 'canonical winner\ud800'}]}
         winner = apply(5, 'transcript.append', {'messages': [assistant]})
         repaired = apply(6, 'transcript.append', {'messages': [{'role': 'assistant',
             'content': 'loser', '_row_id': winner['annotations'][0]['_row_id']}]})
         assert repaired['count'] == 0
-        assert repaired['annotations'][0]['_canonical_content'] == 'canonical winner'
+        assert repaired['annotations'][0]['_canonical_content'] == assistant['content']
         terminal = apply(7, 'execution.finish', {})
         assert terminal['status'] == 'terminal'
         assert apply(7, 'execution.finish', {}) == terminal

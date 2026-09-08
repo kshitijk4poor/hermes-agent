@@ -437,7 +437,7 @@ def persist_worker_message(db, *, epoch: int, execution_id: str, session_id: str
         message = conn.execute('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)', (session_id, role, db._encode_content(content), now))
         conn.execute('UPDATE sessions SET message_count=message_count+1,last_activity_at=?,runtime_revision=runtime_revision+1 WHERE id=?', (now, session_id))
         result = {'message_id': message.lastrowid}
-        conn.execute('INSERT INTO worker_receipts(execution_id,sequence,payload_digest,result_json) VALUES(?,?,?,?)', (execution_id, sequence, digest, _json(result)))
+        conn.execute('INSERT INTO worker_receipts(execution_id,sequence,payload_digest,result_json) VALUES(?,?,?,?)', (execution_id, sequence, digest, json.dumps(result, ensure_ascii=True, allow_nan=False)))
         conn.execute("UPDATE worker_executions SET last_sequence=?,status='running' WHERE execution_id=?", (sequence, execution_id))
         return result
     return db._execute_write(write)
@@ -548,7 +548,7 @@ def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
     if type(sequence) is not int or sequence < 1 or not isinstance(operation, str) or operation not in handlers:
         raise RuntimeStoreError('invalid_params')
     encoded = _json(payload)
-    if len(encoded.encode('utf-8')) > 4 * 1024 * 1024:
+    if len(encoded.encode('utf-8', errors='surrogatepass')) > 4 * 1024 * 1024:
         raise RuntimeStoreError('invalid_params')
     digest = admission_fingerprint(canonical_target=session_id,
                                   payload={'operation': operation, 'payload': json.loads(encoded)})
@@ -570,7 +570,7 @@ def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
         # Each SQLite retry gets fresh rows; rolled-back annotations must not escape.
         result = handlers[operation](db, conn, session_id, json.loads(encoded))
         conn.execute('INSERT INTO worker_receipts(execution_id,sequence,payload_digest,result_json) VALUES(?,?,?,?)',
-                     (execution_id, sequence, digest, _json(result)))
+                     (execution_id, sequence, digest, json.dumps(result, ensure_ascii=True, allow_nan=False)))
         conn.execute("UPDATE worker_executions SET last_sequence=?,status=? WHERE execution_id=?",
                      (sequence, 'terminal' if operation == 'execution.finish' else 'running', execution_id))
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (session_id,))
