@@ -54,7 +54,7 @@ export function createLocalGatewayDials() {
       if (pending.size >= 100) throw new Error('Too many pending gateway dials')
       const url = `${origin.replace(/^http/, 'ws')}/api/ws?native_dial=${crypto.randomUUID()}`
       pending.set(url, { ticket, webContentsId, expires: Date.now() + 25_000 })
-      return url
+      return `${url}&ticket=${encodeURIComponent(ticket)}`
     },
     headers(details: { url: string; webContentsId?: number; resourceType: string; requestHeaders?: Record<string, string> }) {
       const grant = pending.get(details.url)
@@ -63,7 +63,7 @@ export function createLocalGatewayDials() {
       if (grant.expires <= Date.now()) return null
       const headers = { ...details.requestHeaders }
       for (const key of Object.keys(headers)) if (['origin', 'sec-websocket-protocol'].includes(key.toLowerCase())) delete headers[key]
-      headers['Sec-WebSocket-Protocol'] = `hermes-gateway-v1, hermes-gateway-ticket.${grant.ticket}`
+      headers['Sec-WebSocket-Protocol'] = details.requestHeaders?.['Sec-WebSocket-Protocol'] || ''
       return headers
     }
   }

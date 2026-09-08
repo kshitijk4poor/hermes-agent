@@ -36,7 +36,14 @@ export class HermesGateway extends JsonRpcGatewayClient {
       createRequestId: nextId => nextId,
       notConnectedErrorMessage: 'Hermes gateway is not connected',
       requestTimeoutMs: DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS,
-      socketFactory: url => new WebSocket(url, new URL(url).searchParams.has('native_dial') ? ['hermes-gateway-v1'] : [])
+      socketFactory: url => {
+        const parsed = new URL(url)
+        if (!parsed.searchParams.has('native_dial')) return new WebSocket(url)
+        const ticket = parsed.searchParams.get('ticket')
+        if (!ticket) throw new Error('Native gateway requires a fresh private ticket')
+        parsed.searchParams.delete('ticket')
+        return new WebSocket(parsed.toString(), ['hermes-gateway-v1', `hermes-gateway-ticket.${ticket}`])
+      }
     })
   }
 }

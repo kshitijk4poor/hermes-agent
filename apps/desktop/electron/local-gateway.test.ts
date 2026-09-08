@@ -13,9 +13,12 @@ test('ensure consumes structured readiness without acquiring a child owner', asy
 
 test('private dial credential is one-use and bound to the requesting native window', () => {
   const dials = createLocalGatewayDials()
-  const url = dials.prepare('http://127.0.0.1:1234', 'private-ticket', 7)
+  const dial = new URL(dials.prepare('http://127.0.0.1:1234', 'private-ticket', 7))
+  expect(dial.searchParams.get('ticket')).toBe('private-ticket')
+  dial.searchParams.delete('ticket')
+  const url = dial.toString()
   expect(url).not.toContain('private-ticket')
-  const details = { url, webContentsId: 8, resourceType: 'webSocket', requestHeaders: { Origin: 'http://renderer', 'Sec-WebSocket-Protocol': 'hermes-gateway-v1' } }
+  const details = { url, webContentsId: 8, resourceType: 'webSocket', requestHeaders: { Origin: 'http://renderer', 'Sec-WebSocket-Protocol': 'hermes-gateway-v1, hermes-gateway-ticket.private-ticket' } }
   expect(dials.headers(details)).toBeNull()
   const headers = dials.headers({ ...details, webContentsId: 7 })!
   expect(headers).not.toHaveProperty('Origin')
