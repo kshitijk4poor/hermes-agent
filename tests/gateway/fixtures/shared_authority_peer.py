@@ -112,21 +112,27 @@ async def probe():
     warm_agent = runner._cached_agent_for(entry.session_key)
     assert isinstance(warm_agent, AIAgent), "Messaging warmup must retain a real live agent"
 
-    app = web_server.app
-    app.state.auth_required = True
-    app.state.session_authority = getattr(runner, "session_authority", None)
-    listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
-    listener.listen()
-    listener.setblocking(False)
-    port = listener.getsockname()[1]
-    http = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="off", ws="websockets"))
-    task = asyncio.create_task(http.serve(sockets=[listener]))
-    async with asyncio.timeout(10):
-        while not http.started:
-            if task.done():
-                await task
-            await asyncio.sleep(0.01)
+    api_handle = None
+    if importlib.util.find_spec("gateway.run_api") is not None:
+        from gateway.run_api import start_gateway_api
+        api_handle = await start_gateway_api(runner)
+        port = api_handle.socket.getsockname()[1]
+    else:
+        # Retain the historical transport only for the pre-authority A/B tree.
+        app = web_server.app
+        app.state.auth_required = True
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        listener.setblocking(False)
+        port = listener.getsockname()[1]
+        http = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="off", ws="websockets"))
+        task = asyncio.create_task(http.serve(sockets=[listener]))
+        async with asyncio.timeout(10):
+            while not http.started:
+                if task.done():
+                    await task
+                await asyncio.sleep(0.01)
     frames = []
     receipt = {"messaging_completed": True, "stored_id": entry.session_id,
                "unauthenticated_rejected": False, "ws_completed": False, "same_agent": False}
@@ -137,8 +143,11 @@ async def probe():
         except websockets.exceptions.InvalidStatus as exc:
             assert exc.response.status_code == 403, str(exc)
             receipt["unauthenticated_rejected"] = True
-        ticket = mint_ticket(user_id="fixture-user", provider="fixture")
-        async with websockets.connect(f"ws://127.0.0.1:{port}/api/ws?ticket={ticket}") as ws:
+        if api_handle is not None:
+            credential = f"token={web_server._SESSION_TOKEN}"
+        else:
+            credential = f"ticket={mint_ticket(user_id='fixture-user', provider='fixture')}"
+        async with websockets.connect(f"ws://127.0.0.1:{port}/api/ws?{credential}") as ws:
             async def until(predicate):
                 async with asyncio.timeout(35):
                     while True:
@@ -222,9 +231,13 @@ async def probe():
     finally:
         Path(os.environ["HERMES_HOME"], "receipt.json").write_text(json.dumps(receipt, indent=2))
         Path(os.environ["HERMES_HOME"], "frames.json").write_text(json.dumps(frames, indent=2))
-        http.should_exit = True
-        await asyncio.wait_for(task, 10)
-        listener.close()
+        if api_handle is not None:
+            from gateway.run_api import stop_gateway_api
+            await stop_gateway_api(api_handle)
+        else:
+            http.should_exit = True
+            await asyncio.wait_for(task, 10)
+            listener.close()
     print(json.dumps(receipt))
 
 
