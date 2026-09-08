@@ -28,6 +28,9 @@ class ModelPeer(BaseHTTPRequestHandler):
                      if m.get("role") == "user"), "")
         marker = "WS_SHARED" if "WS_SHARED" in json.dumps(last) else "MESSAGING_WARM"
         reply = f"LOCAL_ACK_{marker}"
+        if 'BLOCK_FIFO' in json.dumps(last):
+            self.server.blocked.set()
+            assert self.server.release.wait(15), 'fixture model gate timed out'
         self.server.requests.append(request)
         base = {"id": "chatcmpl-local", "model": "local-wire-stub", "created": 1}
         self.send_response(200)
@@ -160,6 +163,41 @@ async def probe():
                     else:
                         receipt["same_agent"] = server._sessions[sid].get("agent") is warm_agent
             receipt["messaging_outputs"] = adapter.sent
+            if getattr(runner, 'session_authority', None) is not None:
+                from hermes_state_runtime import list_session_admissions
+                await adapter.handle_message(MessageEvent(text='BLOCK_FIFO', source=source, message_id='fifo-1'))
+                assert await asyncio.to_thread(peer.blocked.wait, 5)
+                queued_event = MessageEvent(text='FIFO_SECOND', source=source, message_id='fifo-2')
+                queued_task = asyncio.create_task(adapter.handle_message(queued_event))
+                try:
+                    async with asyncio.timeout(3):
+                        while not any(r['request_id'] == 'fifo-2' for r in list_session_admissions(
+                                runner.session_authority.db, session_id=entry.session_id)):
+                            await asyncio.sleep(0.01)
+                    assert not adapter._pending_messages, 'second frontend queue owns accepted work'
+                    receipt['durable_native_fifo'] = True
+                finally:
+                    peer.release.set()
+                    await queued_task
+                    async with asyncio.timeout(10):
+                        while adapter._active_sessions:
+                            await asyncio.sleep(0.01)
+                    task_owner = runner.session_authority.sessions[entry.session_id].task
+                    if task_owner is not None:
+                        await task_owner
+                rows = list_session_admissions(runner.session_authority.db,
+                                                session_id=entry.session_id, pending_only=False)
+                assert [r['request_id'] for r in rows] == ['warm-1', 'ws-1', 'fifo-1', 'fifo-2'], rows
+                assert all(r['status'] == 'terminal' and r['outcome'] == 'completed' for r in rows), rows
+                assert runner._cached_agent_for(entry.session_key) is warm_agent
+                assert any('LOCAL_ACK_WS_SHARED' in text for text in adapter.sent), adapter.sent
+                before = len(rows)
+                rejected = MessageEvent(text='UNAUTHORIZED', message_id='denied', source=SessionSource(
+                    platform=Platform.TELEGRAM, chat_id='fixture-chat', chat_type='group', user_id='foreign'))
+                await runner._handle_message(rejected)
+                assert len(list_session_admissions(runner.session_authority.db,
+                           session_id=entry.session_id, pending_only=False)) == before
+                receipt['admissions'] = rows
     finally:
         Path(os.environ["HERMES_HOME"], "receipt.json").write_text(json.dumps(receipt, indent=2))
         Path(os.environ["HERMES_HOME"], "frames.json").write_text(json.dumps(frames, indent=2))
@@ -172,6 +210,8 @@ async def probe():
 if __name__ == "__main__":
     peer = ThreadingHTTPServer(("127.0.0.1", 0), ModelPeer)
     peer.requests = []
+    peer.blocked = threading.Event()
+    peer.release = threading.Event()
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     base_url = f"http://127.0.0.1:{peer.server_port}/v1"
     os.environ.update(OPENAI_API_KEY="explicit-loopback-fixture", OPENAI_BASE_URL=base_url,

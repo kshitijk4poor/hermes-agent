@@ -19,6 +19,7 @@ async def admit_message(authority, event):
                       frozenset({'session:submit'}), '')
     request_id = str(event.message_id or uuid.uuid4().hex)
     receipt = await authority.submit(actor, Submission(request_id, ref, {'text': event.text}, 'queue'))
+    event._gateway_accepted = True
     if receipt.status == 'terminal':
         return None
     # These are execution envelopes, not a second queue. The durable ledger alone orders claims.
@@ -40,8 +41,26 @@ async def execute_admission(authority, ref, row):
         if not native and response:
             adapter = authority.runner._adapter_for_source(event.source)
             if adapter is not None:
-                await adapter.send(event.source.chat_id, response,
-                                   metadata={'thread_id': event.source.thread_id})
+                await deliver_response(adapter, event, live.route, response)
         return response
     finally:
         executing_admission.reset(token)
+
+
+async def deliver_response(adapter, event, session_key, response):
+    from gateway.platforms.base import _thread_metadata_for_event, _mark_notify_metadata
+    text, ttl = adapter._unwrap_ephemeral(response)
+    if not text:
+        return
+    extracted = await adapter._extract_response_content(text, event, session_key, is_ephemeral_response=ttl > 0)
+    metadata = _mark_notify_metadata(_thread_metadata_for_event(event))
+    results = []
+    if extracted.text_content:
+        await adapter._send_final_text(event, session_key, extracted.text_content,
+                                       metadata, ttl > 0, ttl, results.append)
+    await adapter._deliver_attachments(event, extracted, metadata, anything_sent=bool(results))
+
+
+async def dispatch_shared_busy(adapter, event, session_key):
+    response = await adapter._message_handler(event)
+    await deliver_response(adapter, event, session_key, response)
