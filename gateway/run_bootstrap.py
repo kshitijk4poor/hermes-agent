@@ -324,7 +324,8 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     cron_thread = threading.Thread(
         target=cron_provider.start, args=(cron_stop,), kwargs=cron_start_kwargs, daemon=True,
         name="cron-scheduler")
-    cron_thread.start()
+    from gateway.runtime_ownership import process_ownership
+    process_ownership.start_writer(cron_thread)
 
     # External providers fire over loopback HTTP to THIS process's api_server; if it never came up (usually
     # API_SERVER_KEY missing) every fire fails while manual runs work — misread as a job bug. Say it ONCE.
@@ -350,7 +351,7 @@ def _start_gateway_start_cron_and_housekeeping(runner):
         kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop(),
                 "cron_provider": cron_provider, "runner": runner},
         daemon=True, name="gateway-housekeeping")
-    housekeeping_thread.start()
+    process_ownership.start_writer(housekeeping_thread)
     return cron_stop, cron_provider, cron_thread, housekeeping_thread
 
 

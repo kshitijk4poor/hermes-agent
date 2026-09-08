@@ -22,6 +22,7 @@ def canonical_home(home: Path) -> Path:
 class ProfileOwnership:
     def __init__(self):
         self._handles: dict[Path, object] = {}
+        self._writers: list[threading.Thread] = []
         self._mutex = threading.RLock()
 
     @property
@@ -76,8 +77,19 @@ class ProfileOwnership:
                 _release_file_lock(handle)
                 handle.close()
 
+    def start_writer(self, thread: threading.Thread) -> None:
+        """Register before starting so partial startup cannot forget a live writer."""
+        with self._mutex:
+            self._writers.append(thread)
+            thread.start()
+
     def close(self) -> None:
         with self._mutex:
+            # A timed-out daemon can still write during finally/atexit. Keep the
+            # handles alive; process exit releases them atomically in the OS.
+            if any(thread.is_alive() for thread in self._writers):
+                return
+            self._writers.clear()
             for home in reversed(self.homes):
                 self.release(home)
 
