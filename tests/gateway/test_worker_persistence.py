@@ -54,19 +54,25 @@ def test_worker_survives_owner_restart_without_repeating_tool(tmp_path):
                 assert first['conflict'] == 'admission_conflict'
                 assert first['outbox_full'] == 'outbox_full'
                 assert first['writable_canonical_fds'] == []
+                assert first['canonical_opens'] == []
                 with sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True) as db:
                     assert db.execute('SELECT COUNT(*) FROM messages WHERE session_id=?', (sid,)).fetchone()[0] == 3
                     assert db.execute('SELECT input_tokens FROM sessions WHERE id=?', (sid,)).fetchone()[0] == 11
                 owner.kill(); owner.wait(timeout=10)
+                outage = command('outage')
+                assert outage['pending'] == 1 and outage['canonical_opens'] == []
             with daemon(root, home, env, barrier=False):
                 second = command('adopt')
                 assert second['stale'] == 'stale_epoch'
                 assert second['epoch'] > first['epoch']
                 assert second['writable_canonical_fds'] == []
+                assert second['canonical_opens'] == []
                 assert second['pid'] == first['pid'] == worker.pid
                 with sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True) as db:
                     assert db.execute("SELECT COUNT(*) FROM messages WHERE content='tool-marker'").fetchone()[0] == 1
                     assert db.execute('SELECT input_tokens FROM sessions WHERE id=?', (sid,)).fetchone()[0] == 11
+                    assert db.execute("SELECT input_tokens FROM session_model_usage WHERE task='compression'").fetchone()[0] == 5
+                    assert db.execute("SELECT status FROM worker_executions WHERE execution_id='owned-worker'").fetchone()[0] == 'terminal'
                 assert (home / 'tool-marker').read_text() == 'once'
             print(json.dumps({'first': first, 'second': second}))
         finally:

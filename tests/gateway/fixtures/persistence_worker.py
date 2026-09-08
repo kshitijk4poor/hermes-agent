@@ -30,6 +30,12 @@ def reason(fn):
     raise AssertionError('expected refusal')
 
 
+canonical_opens = []
+def audit(event, args):
+    if event == 'sqlite3.connect' and 'state.db' in str(args[0]):
+        canonical_opens.append(str(args[0]))
+sys.addaudithook(audit)
+
 for line in sys.stdin:
     try:
         command = json.loads(line)
@@ -73,16 +79,25 @@ for line in sys.stdin:
                 'wrong_profile': reason(lambda: original('worker.persist', **(saved | {'profile_id': '/foreign'}))),
                 'wrong_generation': reason(lambda: original('worker.persist', **(saved | {'generation': 99}))),
                 'outbox_full': reason(lambda: store.append_messages_batch(sid, [{'role': 'user', 'content': 'x' * 30000}])),
-                'writable_canonical_fds': writable_fds(home)}
+                'writable_canonical_fds': writable_fds(home), 'canonical_opens': list(canonical_opens)}
+        elif command['op'] == 'outage':
+            store.retry_pending()  # clear the deliberate full-entry rejection
+            failure = reason(lambda: store.record_auxiliary_usage(sid, 'compression', input_tokens=5, model='aux'))
+            assert store.failure and store.journal['pending']
+            output = {'pending': len(store.journal['pending']), 'failure': failure,
+                      'canonical_opens': list(canonical_opens)}
         else:
             stale = reason(lambda: transport('worker.persist', **saved))
             adopted = transport('worker.adopt', **{k: v for k, v in scope.items() if k != 'epoch'})
+            bad = dict(scope, birth=scope['birth'] + 1)
+            assert reason(lambda: transport('worker.adopt', **{k: v for k, v in bad.items() if k != 'epoch'})) == 'permission_denied'
             store.adopt(adopted['owner_epoch'])
+            assert len(store.retry_pending()) == 1
             store.refresh_session_turn_lease(sid, 'owned-worker-lease')
             store.release_session_turn_lease(sid, 'owned-worker-lease')
             assert store.finish()['status'] == 'terminal'
             output = {'stale': stale, 'epoch': adopted['owner_epoch'], 'pid': os.getpid(),
-                      'writable_canonical_fds': writable_fds(home)}
+                      'writable_canonical_fds': writable_fds(home), 'canonical_opens': list(canonical_opens)}
         sys.stdout.write(json.dumps(output) + '\n'); sys.stdout.flush()
     except Exception as exc:
         import traceback
