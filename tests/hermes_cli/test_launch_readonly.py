@@ -35,6 +35,8 @@ _print_tui_exit_summary('reader-fixture')
 from hermes_cli.main_agent_cmds import cmd_insights
 from types import SimpleNamespace
 cmd_insights(SimpleNamespace(days=30, source='tui'))
+from hermes_cli.cli_info_mixin import CLIInfoMixin
+CLIInfoMixin._show_insights(object(), '/insights --days 30 --source tui')
 after = path.read_bytes() if path.exists() else None
 assert after == before, 'launch reader created or mutated state.db'
 '''.replace('POPULATED', repr(populated))
