@@ -48,6 +48,23 @@ def publish_gateway_runtime_ready(runner):
         'session-authority-v1', 'durable-admission-v1', 'event-replay-v1'])
 
 
+async def wait_gateway_runtime(runner):
+    """A vanished interactive listener is fatal, not a healthy headless runtime."""
+    shutdown = asyncio.create_task(runner.wait_for_shutdown())
+    listener = runner.session_api.task
+    try:
+        done, _ = await asyncio.wait({shutdown, listener}, return_when=asyncio.FIRST_COMPLETED)
+        if listener in done and not runner._draining:
+            runner.session_runtime_descriptor.update(state='failed', capabilities=[])
+            error = None if listener.cancelled() else listener.exception()
+            raise RuntimeError('gateway session API stopped unexpectedly') from error
+        await shutdown
+    finally:
+        if not shutdown.done():
+            shutdown.cancel()
+        await asyncio.gather(shutdown, return_exceptions=True)
+
+
 async def drain_gateway_runtime(runner):
     """Withdraw admission before any await; close sockets before DB teardown."""
     from gateway.run_api import stop_gateway_api

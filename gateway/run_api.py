@@ -86,7 +86,9 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
 async def stop_gateway_api(handle: GatewayAPIHandle) -> None:
     """Drain sockets without stopping the session authority or taking signals."""
     handle.server.should_exit = True
-    await asyncio.shield(handle.task)
+    # The bootstrap supervisor reports listener failure. Cleanup must still
+    # reach adapter/worker settlement when that listener raised or was cancelled.
+    await asyncio.shield(asyncio.gather(handle.task, return_exceptions=True))
 
 
 class GatewayRuntimeAPI:

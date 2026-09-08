@@ -591,7 +591,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         publish_gateway_runtime_ready(runner)
         runner._start_systemd_watchdog()
 
-        await runner.wait_for_shutdown()
+        from gateway.run_runtime import wait_gateway_runtime
+        await wait_gateway_runtime(runner)
 
         return await _start_gateway_shutdown_tail(
             runner, _control_server, cron_stop, cron_provider, cron_thread, housekeeping_thread,
