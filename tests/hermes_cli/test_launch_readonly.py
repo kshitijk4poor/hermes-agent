@@ -29,6 +29,10 @@ if populated:
         db.append_message('reader-fixture', role='user', content='hello')
         db.set_session_title('reader-fixture', 'Reader fixture')
 before = path.read_bytes() if path.exists() else None
+from hermes_cli.terminal_breadcrumbs import write_breadcrumb, resolve_breadcrumb_session
+os.environ['TMUX_PANE'] = 'reader-fixture'
+write_breadcrumb('reader-fixture')
+assert resolve_breadcrumb_session() == ('reader-fixture' if populated else None)
 assert _resolve_last_session(source='tui') == ('reader-fixture' if populated else None)
 assert _resolve_session_by_name_or_id('reader-fixture') == ('reader-fixture' if populated else None)
 _print_tui_exit_summary('reader-fixture')
