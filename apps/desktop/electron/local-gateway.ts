@@ -32,7 +32,8 @@ export interface GatewayEndpoint {
   supervisor: string
 }
 
-export async function ensureLocalGateway(run: () => Promise<{ code: number; stdout: string }>) {
+export async function ensureLocalGateway(run: () => Promise<{ code: number; stdout: string }>, beforeEnsure?: () => Promise<void>) {
+  await beforeEnsure?.()
   const result = await run()
   const payload = JSON.parse(result.stdout)
 

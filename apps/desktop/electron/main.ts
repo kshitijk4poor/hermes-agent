@@ -12412,8 +12412,20 @@ async function runPoolBackendStart(
   assertLocalProfileCanStart(profile, profileDeletionGate, key =>
     directoryExists(path.join(HERMES_HOME, 'profiles', key))
   )
-  const backend = await ensureRuntime(resolveHermesBackend(['--profile', profile, 'gateway', 'ensure', '--json']))
-  const connection = await ensureLocalGateway(() => runGatewayEnsure(backend, resolveHermesCwd(), HERMES_HOME))
+
+  const connection = await ensureLocalGateway(async () => {
+    const backend = await ensureRuntime(resolveHermesBackend(['--profile', profile, 'gateway', 'ensure', '--json']))
+    profileDeletionGate.assertCanStart(profile)
+    assertPoolEntryStillOwned(poolKey, entry)
+
+    return runGatewayEnsure(backend, resolveHermesCwd(), HERMES_HOME)
+  }, async () => {
+    await waitForUpdateClearance(updateGateDeps(), { pollMs: UPDATE_WAIT_POLL_MS, timeoutMs: UPDATE_WAIT_TIMEOUT_MS })
+    // Update waits yield: retirement or profile deletion may win in that gap.
+    assertPoolEntryStillOwned(poolKey, entry)
+    assertLocalProfileCanStart(profile, profileDeletionGate, key => directoryExists(path.join(HERMES_HOME, 'profiles', key)))
+  })
+
   assertPoolEntryStillOwned(poolKey, entry)
 
   return { ...connection, profile, logs: hermesLog.slice(-80), ...getWindowState() }
@@ -12725,6 +12737,7 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
     setWslBridgeProfileState(primaryProfile, true)
 
     const connection = await ensureLocalGateway(() => runGatewayEnsure(setup.backend, resolveHermesCwd(), HERMES_HOME))
+    void showPluginCompatNoticeOnce()
 
     if (!backendConnectionState.isCurrentAttempt(connectionAttempt)) {
       throw new Error('Hermes backend start was superseded by a newer connection attempt.')

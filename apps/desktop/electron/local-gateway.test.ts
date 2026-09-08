@@ -2,6 +2,16 @@ import { expect, test } from 'vitest'
 
 import { createLocalGatewayDials, ensureLocalGateway } from './local-gateway'
 
+test('canonical ensure cannot cross a rejected update or profile lifecycle gate', async () => {
+  let ran = false
+  await expect(ensureLocalGateway(async () => { ran = true;
+
+ return { code: 0, stdout: '{}' } }, async () => {
+    throw new Error('profile retired during update')
+  })).rejects.toThrow('profile retired during update')
+  expect(ran).toBe(false)
+})
+
 test('native HTTP mints fresh purpose-bound grants without browser credentials', async () => {
   const fs = await import('node:fs/promises')
   const os = await import('node:os')
