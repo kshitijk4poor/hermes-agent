@@ -16,10 +16,10 @@ _UNSUPPORTED = (
     "image", "skills", "worktree", "w", "checkpoints", "pass_session_id",
     "ignore_user_config", "safe_mode", "yolo", "accept_hooks",
     "continue_last", "create_if_missing", "no_restore_cwd", "usage_file",
-    "run_budget", "api_key", "verbose", "compact",
+    "run_budget", "verbose", "compact",
     "list_tools", "list_toolsets",
 )
-_POLICY = ("model", "provider", "reasoning", "toolsets", "max_turns", "base_url", "ignore_rules")
+_POLICY = ("model", "provider", "reasoning", "toolsets", "max_turns", "base_url", "ignore_rules", "api_key")
 
 
 def validate_options(args):

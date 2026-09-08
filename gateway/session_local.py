@@ -96,6 +96,8 @@ def create_local_session(authority, actor, params):
     from hermes_state_local import commit_local_session
     authority._require_admission_open()
     sid = local_identity(authority.profile_id, actor.subject, request_id)
+    from gateway.session_policy import bind_launch_key
+    policy = bind_launch_key(authority, sid, policy, params.get("api_key"))
     source = SessionSource(platform=Platform.LOCAL, chat_id=sid,
                            user_id=actor.subject, chat_type='dm')
     route = authority.runner.session_store._generate_session_key(source)

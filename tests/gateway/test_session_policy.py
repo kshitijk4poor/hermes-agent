@@ -75,3 +75,28 @@ def test_launch_options_are_frozen_and_validated(tmp_path):
         with pytest.raises(RuntimeStoreError, match='invalid_params'):
             build_policy(dict(cwd=str(tmp_path), **bad), cfg)
 
+
+def test_explicit_key_is_private_and_missing_after_restart_fails_closed(tmp_path):
+    import json
+    from dataclasses import asdict
+    from types import SimpleNamespace
+    from gateway.session_policy import build_policy, bind_launch_key, launch_key
+    from hermes_state_runtime import RuntimeStoreError
+    authority = SimpleNamespace(instance_id='owned', profile_id='profile', epoch=1)
+    sibling = SimpleNamespace(instance_id='sibling', profile_id='profile', epoch=1)
+    raw = 'UNIQUE-PRIVATE-LAUNCH-KEY'
+    before = dict(os.environ)
+    params = dict(cwd=str(tmp_path), model='fixture', api_key=raw)
+    policy = build_policy(params, {})
+    policy = bind_launch_key(authority, 'session-a', policy, raw)
+    assert raw not in json.dumps(asdict(policy))
+    assert launch_key(authority, policy) == raw
+    assert bind_launch_key(authority, 'session-a', build_policy(params, {}), raw) == policy
+    for other in (sibling, SimpleNamespace(instance_id='owned', profile_id='profile', epoch=2)):
+        with pytest.raises(RuntimeStoreError, match='launch_credentials_unavailable'):
+            launch_key(other, policy)
+    with pytest.raises(RuntimeStoreError, match='admission_conflict'):
+        bind_launch_key(authority, 'session-a', build_policy(params, {}), 'different')
+    assert dict(os.environ) == before
+
+

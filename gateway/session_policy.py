@@ -7,7 +7,7 @@ from pathlib import Path
 from hermes_state_runtime import RuntimeStoreError
 
 CREATE_FIELDS = frozenset({'request_id', 'source', 'cwd', 'model', 'toolsets',
-                           'provider', 'base_url', 'reasoning', 'max_turns', 'ignore_rules'})
+                           'provider', 'base_url', 'reasoning', 'max_turns', 'ignore_rules', 'api_key'})
 SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop'}
 
 
@@ -21,6 +21,7 @@ class LocalSessionPolicy:
     config_json: str
     request_json: str
     terminal_json: str
+    credential_ref: str | None = None
 
     def config(self):
         return json.loads(self.config_json)
@@ -58,6 +59,8 @@ def build_policy(params, config):
 
     source = params.get('source', 'cli')
     if set(params) - CREATE_FIELDS or not isinstance(source, str) or source not in SURFACES:
+        raise RuntimeStoreError('invalid_params')
+    if 'api_key' in params and (not isinstance(params['api_key'], str) or not params['api_key'].strip()):
         raise RuntimeStoreError('invalid_params')
     model = params.get('model')
     if 'model' in params and (not isinstance(model, str) or not model.strip()):
@@ -112,10 +115,40 @@ def build_policy(params, config):
             enabled.add('desktop_ui')
     terminal = build_profile_terminal_scope(get_hermes_home())
     terminal['TERMINAL_CWD'] = cwd
-    request = {k: v for k, v in params.items() if k != 'request_id'}
+    request = {k: v for k, v in params.items() if k not in {'request_id', 'api_key'}}
     request.setdefault('source', 'cli')
     return LocalSessionPolicy(source, SURFACES[source], cwd, model, tuple(sorted(enabled)),
                               json.dumps(config), json.dumps(request, sort_keys=True), json.dumps(terminal))
+
+
+def bind_launch_key(authority, session_id, policy, api_key):
+    """CLI keys live only in this authority lifetime, never its durable receipt.
+
+    Restart deliberately revokes them. History remains readable; inference must
+    report launch_credentials_unavailable, never select a profile fallback key.
+    """
+    from dataclasses import replace
+    import hmac
+    if api_key is None:
+        return policy
+    keys = getattr(authority, '_local_launch_keys', None)
+    if keys is None:
+        keys = authority._local_launch_keys = {}
+    ref = f'{authority.instance_id}:{authority.epoch}:{session_id}'
+    old = keys.get(ref)
+    if old is not None and not hmac.compare_digest(old, api_key):
+        raise RuntimeStoreError('admission_conflict')
+    keys[ref] = api_key
+    return replace(policy, credential_ref=ref)
+
+
+def launch_key(authority, policy):
+    if policy.credential_ref is None:
+        return None
+    value = getattr(authority, '_local_launch_keys', {}).get(policy.credential_ref)
+    if value is None:
+        raise RuntimeStoreError('launch_credentials_unavailable')
+    return value
 
 
 def restore_policy(data):

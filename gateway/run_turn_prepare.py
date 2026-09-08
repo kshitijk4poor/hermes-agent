@@ -57,7 +57,9 @@ class GatewayTurnPrepareMixin:
         if policy is not None:
             from hermes_cli.runtime_provider import resolve_runtime_provider
             from gateway.run import _runtime_agent_kwargs
+            from gateway.session_policy import launch_key
             runtime = resolve_runtime_provider(requested=policy.provider,
+                explicit_api_key=launch_key(self.session_authority, policy),
                 explicit_base_url=policy.base_url, target_model=policy.model)
             return policy.model, _runtime_agent_kwargs(runtime)
         skey = self._resolve_session_key_or_none(source, session_key)
