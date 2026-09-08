@@ -1,4 +1,6 @@
-import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
+import { ensureLocalGateway, runGatewayEnsure, mintLocalGatewayTicket, createLocalGatewayDials } from './local-gateway'
+const localGatewayDials = createLocalGatewayDials()
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import http from 'node:http'
@@ -8344,7 +8346,7 @@ async function mintGatewayWsTicket(baseUrl: string, headers: Record<string, stri
 // calls this immediately before every gateway.connect() so each WS upgrade
 // carries a freshly-minted ticket. For local/token connections this just
 // reuses the static token (no minting needed).
-async function freshGatewayWsUrl(profile) {
+async function freshGatewayWsUrl(profile, webContentsId) {
   // Mint for the requested profile's backend, NOT always the primary. The
   // renderer re-mints right before every gateway.connect(); when swapping to a
   // pooled profile we must return THAT backend's ws URL, otherwise the connect
@@ -8352,6 +8354,11 @@ async function freshGatewayWsUrl(profile) {
   // the wrong profile's DB. A null/empty profile resolves to the primary, so
   // legacy callers and single-profile users are unchanged.
   const connection = await ensureBackend(profile)
+
+  if (connection.gatewayEndpoint) {
+    const ticket = await mintLocalGatewayTicket(connection.gatewayEndpoint)
+    return localGatewayDials.prepare(connection.baseUrl, ticket, webContentsId)
+  }
 
   if (connection.authMode === 'oauth') {
     const ticket = await mintGatewayWsTicket(connection.baseUrl, connection.headers)
@@ -8985,12 +8992,12 @@ function installRemoteHeaderRulesOnSession(sess) {
     return
   }
 
-  remoteHeaderSessions.add(sess)
-  attachRemoteRequestHeaderListener(sess, headersForRemoteRequest)
-}
-
-function installRemoteHeaderRules() {
-  installRemoteHeaderRulesOnSession(session.defaultSession)
+  remoteHeaderRulesInstalled = true
+  session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
+    const nativeHeaders = localGatewayDials.headers(details)
+    if (nativeHeaders) { callback({ requestHeaders: nativeHeaders }); return }
+    applyRemoteRequestHeaders(details, callback, headersForRemoteRequest)
+  })
 }
 
 // Validate + normalize the per-profile remote overrides map read from disk.
@@ -12376,713 +12383,13 @@ async function runPoolBackendStart(
     }
   }
 
-  // Everything below starts a LOCAL `hermes serve` child. Multiplex-only says
-  // the host has exactly one, and routing (resolveProfileBackendRoute case 6)
-  // keeps local profiles off this path — this is the backstop that makes the
-  // pool spawn path genuinely unreachable rather than merely unused.
-  // Same options object the router reads, so the guard cannot drift from it
-  // (profileRouteOptions folds the per-profile SSH override into
-  // profileRemoteOverride; a hand-rolled term here missed that).
-  const guardRoute = profileRouteOptions(profile)
-
-  assertNoSecondLocalBackend(poolKey, {
-    isolated: guardRoute.isolatedBackend,
-    primaryRemoteActive: guardRoute.primaryRemoteActive,
-    profileRemoteOverride: opts.forceLocal ? false : guardRoute.profileRemoteOverride,
-    unscopableRequest: opts.unscopableRequest
-  })
-
-  // Bound the slot wait BELOW the renderer's backend-boot budget (45s): once
-  // the renderer has given up on this spawn, a ticket still queued for the
-  // pool-idle window (10 min) would hold the pool key hostage and every
-  // later click on the profile would join that stale wait. Failing here
-  // surfaces the "all N slots busy" reason instead of a generic boot timeout.
-  // The caller stamped entry.spawnPriority from its own request; a foreground
-  // dial that joined the claim before this entry existed left a mark instead.
-  if (takeForegroundSpawn(poolKey, profile)) {
-    entry.spawnPriority = 'foreground'
-  }
-
-  const spawnPriority: LocalBackendSpawnPriority = spawnPriorityFrom(entry.spawnPriority)
-
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-
-  if (spawnPriority === 'background' && !backgroundSlotRetryBackoff.canAttempt(poolKey)) {
-    throw new BackgroundSlotRetryDeferredError(profile)
-  }
-
-  // The arbiter subscribes to the actual coordinator queue, so a later
-  // foreground promotion receives reclamation too, not just fresh starts.
-  const spawnRequest = localBackendSpawnCoordinator.request(poolKey, {
-    timeoutMs: POOL_SLOT_WAIT_MS,
-    priority: spawnPriority
-  })
-
-  entry.localBackendSlotKey = poolKey
-  entry.localBackendSpawnRequest = spawnRequest
-
-  if (spawnRequest.queued) {
-    rememberLog(
-      `Profile backend "${profile}" waiting for a free local slot (${localBackendSpawnCoordinator.activeCount}/${poolMaxBackends()} busy, ${localBackendSpawnCoordinator.queuedCount} queued)`
-    )
-  }
-
-  const cancelRequest = (): void => {
-    spawnRequest.cancel()
-  }
-
-  localBackendLifecycle.signal.addEventListener('abort', cancelRequest, { once: true })
-
-  try {
-    entry.releaseLocalBackendSlot = await spawnRequest.acquired
-    backgroundSlotRetryBackoff.clear(poolKey)
-  } catch (error) {
-    if (isBackgroundSlotWaitTimeout(error)) {
-      backgroundSlotRetryBackoff.recordFailure(poolKey)
-    }
-
-    throw error
-  } finally {
-    localBackendLifecycle.signal.removeEventListener('abort', cancelRequest)
-  }
-
-  if (entry.localBackendSpawnRequest === spawnRequest) {
-    entry.localBackendSpawnRequest = null
-  }
-
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-
-  const token = crypto.randomBytes(32).toString('base64url')
-
-  // Same update mutual exclusion as the primary window's waitForLocalStart
-  // (#73822): pool backends spawn from the same venv, so an ungated respawn
-  // during applyUpdates' critical section starts a backend on the runtime
-  // being replaced. No boot-progress UI here — pool backends boot
-  // silently for background profiles — so we only log while parked.
-  {
-    let poolAnnounced = false
-
-    await waitForUpdateClearance(updateGateDeps(), {
-      signal: localBackendLifecycle.signal,
-      isCancelled: (): boolean => backendPool.get(poolKey) !== entry,
-      onWaitTick: reason => {
-        if (!poolAnnounced) {
-          poolAnnounced = true
-          rememberLog(`[updates] update in progress (${reason}); deferring pool backend start for profile "${profile}"`)
-        }
-      },
-      pollMs: UPDATE_WAIT_POLL_MS,
-      timeoutMs: UPDATE_WAIT_TIMEOUT_MS
-    })
-  }
-
-  profileDeletionGate.assertCanStart(profile)
-
-  // --profile wins over the inherited HERMES_HOME env (see _apply_profile_override
-  // step 3 in hermes_cli/main.py), so the child re-homes to this profile.
-  // --port 0: the OS assigns an ephemeral port; the child announces it on stdout.
-  const backendArgs = ['--profile', profile, 'serve', '--host', '127.0.0.1', '--port', '0']
-
-  const backend = await ensureRuntime(await resolveHermesBackend(backendArgs), () =>
-    assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-  )
-
-  // Route old runtimes (no `serve`) through the legacy `dashboard --no-open`.
-  backend.args = await getBackendArgsForRuntime(backend)
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-  const hermesCwd = resolveHermesCwd()
-  const webDist = resolveWebDist()
-  const readyFile = backend.readyFile ? makeDashboardReadyFile() : null
-
-  // Guard BEFORE the "Starting" line: a profile that only exists on a remote
-  // backend (remote-primary desktop asked for a forced-local child) rejects
-  // here, and logging "Starting" first left an orphaned line with no READY
-  // and no exit — the exact undiagnosable burst signature in remote-gateway
-  // user bundles (Aug 2026, Dash's report).
   assertLocalProfileCanStart(profile, profileDeletionGate, key =>
     directoryExists(path.join(HERMES_HOME, 'profiles', key))
   )
-  rememberLog(`Starting Hermes backend for profile "${profile}" via ${backend.label}`)
-
-  const parentStartMarker = await desktopParentStartMarker()
-  const backendNonce = crypto.randomBytes(16).toString('hex')
-  const parentIdentityEnv = parentWatchdogEnv(process.pid, parentStartMarker, backendNonce)
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-
-  const child = spawnOwnedBackend(
-    windowsShellCommand(backend.command, Boolean(backend.shell)),
-    backend.args,
-    hiddenWindowsChildOptions({
-      cwd: hermesCwd,
-      env: desktopBackendSpawnEnv(
-        {
-          // Never another profile's dotenv credentials from the Desktop env (#68367).
-          ...profileBackendParentEnv({ hermesHome: HERMES_HOME, profile }),
-          HERMES_HOME,
-          ...backend.env,
-          // Pin the gateway's tool/terminal cwd to the same directory we chose for
-          // the child process. Inherited TERMINAL_CWD (or a stale config bridge)
-          // can still point at the install dir even when spawn cwd is home.
-          TERMINAL_CWD: hermesCwd,
-          HERMES_DASHBOARD_SESSION_TOKEN: token,
-          // Marks this dashboard backend as desktop-spawned so it runs the cron
-          // scheduler tick loop (the gateway isn't running under the app).
-          HERMES_DESKTOP: '1',
-          // Exact parent identity lets the backend self-exit after an unclean
-          // Desktop death without mistaking a reused PID for its owner. If the
-          // optional marker probe fails, retain legacy PID-only tracking.
-          ...parentIdentityEnv,
-          HERMES_WEB_DIST: webDist,
-          ...(readyFile ? { HERMES_DESKTOP_READY_FILE: readyFile } : {})
-        },
-        GUEST_ONBOARDING
-      ),
-      shell: backend.shell,
-      stdio: ['ignore', 'pipe', 'pipe']
-    })
-  )
-
-  entry.process = child
-  entry.token = token
-  registerLocalBackendExitFinalizer(backendPool, poolKey, entry, () => releaseLocalBackendSlot(entry))
-  // Buffer stdout+stderr from the instant of spawn (#93608): an early crash's
-  // traceback must survive into the claim error and the before-ready exit
-  // message instead of a bare exit code. rememberLog attaches later, after
-  // the claim, and would miss anything printed before it.
-  const outputTail = createBackendOutputTail()
-  outputTail.attach(child)
-
-  let ready = false
-  let rejectStart = null
-
-  const startFailed = new Promise((_resolve, reject) => {
-    rejectStart = reject
-  })
-
-  // Exit/error can now arrive while the ownership claim is still pending.
-  startFailed.catch(() => {})
-
-  child.once('error', error => {
-    rememberLog(`Hermes backend for profile "${profile}" failed to start: ${error.message}`)
-    void teardownFailedLocalBackend(poolKey, entry).catch(cleanupError => {
-      rememberLog(
-        `Hermes backend for profile "${profile}" cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`
-      )
-    })
-    rejectStart?.(error)
-  })
-  child.once('exit', (code, signal) => {
-    rememberLog(formatBackendExitLine(`Hermes backend for profile "${profile}" exited`, code, signal, outputTail))
-    releaseBackendChild(child)
-
-    if (!ready) {
-      rejectStart?.(
-        new Error(
-          `Hermes backend for profile "${profile}" exited before it became ready (${signal || code}).${outputTail.describe()}`
-        )
-      )
-    }
-  })
-
-  // Start watching for the READY announcement BEFORE any await (#60323):
-  // stdout is already flowing into the tail, and Node streams never replay
-  // consumed chunks to late listeners — a sentinel printed while
-  // claimBackendChild runs would otherwise be lost forever, timing out a
-  // healthy backend. The tail-buffer accessor covers any residual gap.
-  const portAnnouncement = waitForDashboardPortAnnouncement(child, {
-    bufferedOutput: () => outputTail.text(),
-    describeOutputTail: () => outputTail.describe(),
-    readyFile
-  })
-
-  portAnnouncement.catch(() => {})
-  await claimBackendChild(child, `${backend.command} ${backend.args.join(' ')}`, profile, backendNonce, outputTail)
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-
-  child.stdout.on('data', rememberLog)
-  child.stderr.on('data', rememberLog)
-
-  const port = await Promise.race([portAnnouncement, startFailed])
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-
-  if (readyFile) {
-    fs.unlink(readyFile, () => {})
-  }
-
-  entry.port = port
-
-  const baseUrl = `http://127.0.0.1:${port}`
-  await Promise.race([waitForHermes(baseUrl, token), startFailed])
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-  ready = true
-
-  const childAlive = () => child.exitCode === null && !child.killed
-
-  const authToken = await adoptServedDashboardToken(baseUrl, token, {
-    childAlive,
-    label: `Hermes backend for profile "${profile}"`,
-    rememberLog
-  })
-
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-
-  entry.token = authToken
-
-  // Verify the WebSocket session token before declaring backend ready.
-  // HTTP /api/status can pass while WS auth fails (separate transport, separate guards).
-  const wsUrl = `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(authToken)}`
-
-  // Our own child: a cold start can stall its loop past the base budget (#96177).
-  const wsProbe = await probeGatewayWebSocket(wsUrl, {
-    WebSocketImpl: globalThis.WebSocket,
-    ...spawnedBackendProbeOptions(childAlive)
-  })
-
-  assertPoolEntryStillOwned(poolKey, entry, backendPool, localBackendLifecycle.signal)
-
-  if (!wsProbe.ok) {
-    throw new Error(
-      `Hermes backend for profile "${profile}" is HTTP-reachable but the WebSocket (/api/ws) rejected the session token: ${wsProbe.reason}`
-    )
-  }
-
-  return {
-    baseUrl,
-    mode: 'local',
-    source: 'local',
-    authMode: 'token',
-    token: authToken,
-    profile,
-    wsUrl,
-    logs: hermesLog.slice(-80),
-    ...getWindowState()
-  }
-}
-
-// Bounded, deduplicated pool teardown (see pool-stop.ts): every stop path —
-// idle reaper, LRU eviction, profile delete/rename, quit — shares one
-// in-flight stop per key and retains the process handle until the bounded
-// physical shutdown promise resolves. Previously
-// SIGTERM + immediate entry delete dropped the handle and a slow child
-// survived detached under PID 1.
-const poolStopper = createPoolStopper({
-  pool: backendPool,
-  // localBackendLifecycle is the single owner of local child stop semantics:
-  // stopChild triggers its stop (stop + bounded exit wait + slot release);
-  // waitForExit resolves when that same stop promise settles. Remote /
-  // SSH-isolated pool entries keep `process: null` — child exit is immediate
-  // there, so the same in-flight fence carries only the bootstrap drain +
-  // SSH teardown below (#106935).
-  stopChild: child => {
-    void localBackendLifecycle.stop(child as ChildProcess | null | undefined)
-  },
-  waitForExit: child => localBackendLifecycle.stop(child as ChildProcess | null | undefined),
-  afterStop: async key => {
-    try {
-      await sshBootstrapCoordinator.cancelAndWait(key, () => teardownSshConnection(key))
-    } catch (err) {
-      // The idle reaper calls stopPoolBackend un-awaited; a failed SSH teardown
-      // must not surface as an unhandled rejection or block the pool fence.
-      sshRememberLog(`[ssh-teardown] ${key}: ${String(err)}`)
-    }
-  }
-})
-
-function stopPoolBackend(profile: string): Promise<void> {
-  const entry = backendPool.get(profile)
-
-  const stopping = releaseLocalBackendSlotAfterExit(
-    () => releaseLocalBackendSlot(entry),
-    () => poolStopper.stop(profile)
-  )
-
-  // Fire-and-forget callers still need diagnostics; awaiters receive the
-  // rejection, while physical ownership and the exit finalizer remain live.
-  void stopping.catch(error => {
-    rememberLog(`Profile backend "${profile}" stop failed: ${error instanceof Error ? error.message : String(error)}`)
-  })
-
-  return stopping
-}
-
-// Tell every window the pooled backend under `poolKey` is being retired so the
-// renderer parks that scope (wantOpen=false) instead of redialing into the
-// slot it just vacated. Fired BEFORE the SIGTERM (pool-retire.ts contract).
-function broadcastPoolBackendRetiring(poolKey: string) {
-  for (const win of BrowserWindow.getAllWindows()) {
-    const { webContents } = win
-
-    if (webContents && !webContents.isDestroyed()) {
-      webContents.send('hermes:pool:retiring', { poolKey })
-    }
-  }
-}
-
-const poolRetirer = createPoolRetirer({
-  pool: backendPool,
-  coordinator: localBackendSpawnCoordinator,
-  ...createPoolRetirementClient(fetchJson),
-  stopBackend: stopPoolBackend,
-  onRetiring: broadcastPoolBackendRetiring,
-  log: rememberLog
-})
-
-localBackendLifecycle.signal.addEventListener('abort', poolRetirer.dispose, { once: true })
-
-async function teardownPoolBackendAndWait(profile) {
-  await Promise.all(localProfilePoolKeys(profile).map(key => stopPoolBackend(key)))
-}
-
-async function stopAllPoolBackends() {
-  const entries = [...backendPool.values()]
-  await poolStopper.stopAll()
-  entries.forEach(releaseLocalBackendSlot)
-}
-
-/**
- * Last teardown act on Windows: kill orphaned tools still running out of
- * THIS install's artifact root, so no straggler pins the package silo
- * (0x80070020 on the next activation). The managed tool store is NOT a quit
- * root — it is machine-scoped and shared with the surviving gateway and
- * other installs; image locks there are the updater's pause/resume job.
- * Runs after the graceful backend teardown, skips the pids it owned and
- * every live Hermes runtime process, so it is only the net for what
- * detached. Best effort throughout; see package-process-reap.ts.
- */
-function reapInstallRootedStragglers(excludePids: number[]): void {
-  if (!IS_WINDOWS) {
-    return
-  }
-
-  const payloadRoot = installShape() === 'bundled' ? process.resourcesPath : null
-
-  try {
-    reapPackageRootedProcesses({
-      installRoots: [payloadRoot],
-      listProcesses: () =>
-        listWindowsProcesses(
-          (file, args, options) =>
-            execFileSync(file, args, {
-              ...hiddenWindowsChildOptions({ encoding: 'utf8', timeout: options.timeout }),
-              windowsHide: options.windowsHide
-            }) as unknown as string
-        ),
-      killProcess: pid => process.kill(pid, 'SIGKILL'),
-      selfPid: process.pid,
-      excludePids,
-      isWindows: true,
-      log: message => rememberLog(message)
-    })
-  } catch (err) {
-    rememberLog(`[package-reap] skipped: ${(err as Error).message}`)
-  }
-}
-
-const backendShutdown = createBackendShutdownCoordinator(async (): Promise<void> => {
-  const ownedChildren = IS_WINDOWS ? collectOwnedBackendChildren() : []
-  const localShutdown = localBackendLifecycle.shutdown()
-  const primary = backendConnectionState.getProcess()
-  const primaryStop = teardownPrimaryBackendAndWait(backendTeardownOptions('quit'))
-  const pooledStops = stopAllPoolBackends()
-
-  if (poolIdleReaper) {
-    clearInterval(poolIdleReaper)
-    poolIdleReaper = null
-  }
-
-  await waitForTeardown([localShutdown, primaryStop, pooledStops], 7_000)
-
-  reapInstallRootedStragglers(Number.isInteger(primary?.pid) ? [primary.pid] : [])
-
-  // Verify last, so a surviving child cannot skip the teardown above.
-  const closeStopFailure = windowsCloseStopOwnedBackends(ownedChildren)
-
-  if (closeStopFailure) {
-    rememberLog(`[close-stop] ${closeStopFailure.message}`)
-
-    throw closeStopFailure
-  }
-})
-
-const quitTeardown = createQuitTeardownCoordinator(() => app.quit())
-
-const quitFinalization = createQuitFinalization({
-  isWindows: IS_WINDOWS,
-  hardExit: code => {
-    rememberLog(`[quit] forcing Windows process exit after Electron quit finalization stalled`)
-    app.exit(code)
-  }
-})
-
-async function teardownSshForQuit(): Promise<void> {
-  for (const scope of sshConnections.keys()) {
-    void teardownSshConnection(scope || null).catch((error: unknown): void =>
-      rememberLog(`SSH teardown failed: ${error instanceof Error ? error.message : String(error)}`)
-    )
-  }
-
-  await sshTeardowns.finish(sshBootstrapCoordinator.promises(), (): Promise<void> =>
-    sshBootstrapCoordinator.forceCleanupAll()
-  )
-}
-
-async function exitAfterBackendShutdown(code) {
-  try {
-    await backendShutdown.run()
-  } catch {
-    // Already logged by backendShutdown; the exit must still happen.
-  }
-
-  // app.exit() skips will-quit, and every in-app relaunch lands here.
-  killTimedGitChildren()
-  app.exit(code)
-}
-
-// Returns the profile name whose backend was torn down, or null when the
-// request is not a profile-delete.  The caller uses this to skip ensureBackend
-// for the just-torn-down profile — otherwise ensureBackend respawns a pool
-// backend whose ensure_hermes_home() recreates the deleted profile directory.
-//
-// The routing *decision* (which branch fires, what profile name gets
-// returned) lives in the pure decideProfileDeleteAction() in
-// profile-delete-routing.ts; this function only performs the side effects
-// that decision calls for.
-async function prepareProfileDeleteRequest(request) {
-  const profile = profileNameFromDeleteRequest(request)
-
-  const decision = decideProfileDeleteAction(profile, {
-    isDefaultProfile: p => p === 'default',
-    isValidProfileName: p => PROFILE_NAME_RE.test(p),
-    primaryProfileKey
-  })
-
-  if (decision.action === 'noop') {
-    return null
-  }
-
-  if (decision.action === 'teardown-primary') {
-    writeActiveDesktopProfile('default')
-    await Promise.all([teardownPrimaryBackendAndWait(), teardownPoolBackendAndWait(decision.profile)])
-
-    return decision.profile
-  }
-
-  await teardownPoolBackendAndWait(decision.profile)
-
-  return decision.profile
-}
-
-async function prepareProfileRenameRequest(request) {
-  return prepareProfileRenameLifecycle(request, {
-    isValidProfileName: profile => PROFILE_NAME_RE.test(profile),
-    primaryProfileKey,
-    reloadPrimaryWindow: () => {
-      mainWindow?.reload()
-    },
-    restartPrimaryBackend: async () => {
-      await startHermes()
-    },
-    teardownPoolBackendAndWait,
-    teardownPrimaryBackendAndWait,
-    writeActiveDesktopProfile: profile => {
-      writeActiveDesktopProfile(profile)
-    }
-  })
-}
-
-// ── Attach-first: one backend per HOST (multiplex-only) ───────────────────
-// Escape hatch: a dedicated, private backend for this app instead of the host's.
-const ISOLATED_BACKEND = process.env.HERMES_DESKTOP_ISOLATED_BACKEND === '1'
-const ATTACHED_LIVENESS_POLL_MS = 15_000
-let attachedBackendMonitor: NodeJS.Timeout | null = null
-let hostSpawnReservation: SpawnReservation | null = null
-
-function stopAttachedBackendMonitor() {
-  if (attachedBackendMonitor) {
-    clearInterval(attachedBackendMonitor)
-    attachedBackendMonitor = null
-  }
-}
-
-/**
- * An attached backend has no child process, so `child.exit` can never drive
- * recovery. Poll its readiness instead; a backend that dies under us
- * invalidates the connection and hands the respawn to the same supervisor path
- * a dead child would (which re-runs discovery and spawns, since the host now
- * has no backend).
- *
- * A backend recycled by an external supervisor (e.g. launchd `KeepAlive`)
- * into a new process on the same port passes the readiness probe (it's a
- * public route) while serving a brand-new session token, so also re-read the
- * served token on every tick and treat drift the same as "gone" (#121988).
- *
- * This teardown is unexpected, not intentional (nobody asked for a re-home),
- * so it must clear the slot via `backendConnectionState.invalidate()` directly
- * rather than `invalidatePrimaryConnection()`: the latter also sets
- * `primaryRecoverySuppressed`, which `scheduleUnexpectedPrimaryRecovery()`
- * below would then read back as `intentionalTeardown` and refuse to claim,
- * leaving the app with no backend and no respawn scheduled.
- */
-function startAttachedBackendMonitor(attached: AttachedBackend) {
-  stopAttachedBackendMonitor()
-
-  attachedBackendMonitor = setInterval(() => {
-    void waitForHermes(attached.baseUrl, attached.token, undefined, 'token', {})
-      .then(() => resolveServedDashboardToken(attached.baseUrl, attached.token).catch(() => attached.token))
-      .then(servedToken => {
-        if (isAttachedBackendTokenDrifted({ servedToken, adoptedToken: attached.token })) {
-          throw new Error('attached backend is serving a different session token')
-        }
-      })
-      .catch(() => {
-        stopAttachedBackendMonitor()
-        rememberLog(`[attach] attached backend on ${attached.baseUrl} (pid ${attached.pid}) is gone; recovering`)
-        backendConnectionState.invalidate()
-        scheduleUnexpectedPrimaryRecovery({ error: 'The Hermes backend this app attached to exited.', ready: true })
-      })
-  }, ATTACHED_LIVENESS_POLL_MS)
-
-  attachedBackendMonitor.unref?.()
-}
-
-/** Discover and attach to the host's running backend; null means "spawn one". */
-function attachToRunningHostBackend(): Promise<AttachedBackend | null> {
-  const options = { isolated: ISOLATED_BACKEND, ledgerPath: spawnLedgerPath(HERMES_HOME, path.join) }
-
-  return attachOrReserveSpawn(options, hostBackendAttachDeps(), hostSpawnGateDeps())
-    .then(outcome => {
-      if ('attached' in outcome) {
-        releaseHostSpawnReservation()
-
-        return outcome.attached
-      }
-
-      hostSpawnReservation = outcome.reservation
-
-      return null
-    })
-    .catch(error => {
-      // Discovery must never be able to block boot: fall through to spawning.
-      rememberLog(`[attach] host backend discovery failed (${error.message}); spawning our own`)
-
-      return null
-    })
-}
-
-function hostBackendAttachDeps() {
-  return {
-    log: rememberLog,
-    readLedger: (target: string) => {
-      try {
-        return fs.readFileSync(target, 'utf8')
-      } catch {
-        return null
-      }
-    },
-    probeWebSocket: (wsUrl: string) => probeGatewayWebSocket(wsUrl, { WebSocketImpl: globalThis.WebSocket }),
-    publishedTokenFor: (record: HostBackendRecord) =>
-      lookupPublishedSessionToken(
-        record,
-        {
-          home: os.homedir(),
-          lockDir: process.env.HERMES_GATEWAY_LOCK_DIR,
-          platform: process.platform,
-          stateHome: process.env.XDG_STATE_HOME
-        },
-        {
-          lstat: target => fs.lstatSync(target),
-          readFile: target => fs.readFileSync(target, 'utf8'),
-          uid: typeof process.getuid === 'function' ? process.getuid() : null
-        }
-      ),
-    resolveServedToken: (baseUrl: string) => resolveServedDashboardToken(baseUrl, ''),
-    // A ledger record is written only after its backend binds, so a refused
-    // port is a dead record (a hard-killed backend leaves both the record and
-    // its published token behind), not one still starting.
-    waitForReady: (baseUrl: string, token: string) =>
-      waitForHermes(baseUrl, token, undefined, 'token', {}, { alreadyBound: true })
-  }
-}
-
-function hostSpawnGatePath() {
-  return path.join(HERMES_HOME, 'desktop-backend-spawn.json')
-}
-
-function hostSpawnGateDeps() {
-  return {
-    now: () => Date.now(),
-    read: () => {
-      try {
-        const record = JSON.parse(fs.readFileSync(hostSpawnGatePath(), 'utf8'))
-        const owner = Number(record?.pid)
-
-        if (!Number.isInteger(owner) || owner <= 0) {
-          return null
-        }
-
-        // A gate whose owner is gone is no gate at all.
-        try {
-          process.kill(owner, 0)
-        } catch {
-          return null
-        }
-
-        return { ownerAlive: true, startedAt: Number(record?.startedAt) || 0 }
-      } catch {
-        return null
-      }
-    },
-    take: () =>
-      claimHostSpawnGate(hostSpawnGatePath(), {
-        staleAfterMs: HOST_SPAWN_GATE_STALE_MS
-      }),
-    sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
-  }
-}
-
-function releaseHostSpawnReservation() {
-  hostSpawnReservation?.release()
-  hostSpawnReservation = null
-}
-
-function startHermes({ supervisorRecovery = false }: { supervisorRecovery?: boolean } = {}): Promise<
-  Awaited<ReturnType<typeof backendConnectionState.getPromise>>
-> {
-  primaryRecoverySuppressed = false
-  primaryStartsInFlight += 1
-
-  const start: Promise<Awaited<ReturnType<typeof backendConnectionState.getPromise>>> = localBackendLifecycle.start(
-    () => runHermesStart({ supervisorRecovery })
-  )
-
-  const releaseStart = (): void => {
-    primaryStartsInFlight -= 1
-  }
-
-  // Ordering contract: this reaction is registered on the SAME promise the
-  // caller receives, before any caller `.catch`, so releaseStart has already
-  // run (primaryStartsInFlight back to 0) when runPrimaryRecoverySpawn's
-  // `.catch` evaluates primaryRecoveryState(). Returning a derived promise
-  // (start.then(...)) or wrapping `start` would invert that order: every
-  // pre-ready retry would see hasPendingStart:true, be refused, and leave the
-  // recovery claim stuck with no retry and no UI.
-  void start.then(releaseStart, releaseStart)
-
-  return start
-}
-
-// A quit or update handoff kills renderers while their windows can still report
-// live; the renderer lifecycle must treat that as teardown, not a crash to reload.
-function rendererTeardownInProgress(): boolean {
-  return isQuittingForHandoff || backendShutdown.hasStarted()
-}
-
-function primaryRecoveryState() {
-  return {
-    hasCurrentOwner: backendConnectionState.getProcess() !== null || backendConnectionState.getPromise() !== null,
-    hasPendingStart: primaryStartsInFlight > 0,
-    intentionalTeardown: primaryRecoverySuppressed || isQuittingForHandoff || backendShutdown.hasStarted()
-  }
+  const backend = await ensureRuntime(resolveHermesBackend(['--profile', profile, 'gateway', 'ensure', '--json']))
+  const connection = await ensureLocalGateway(() => runGatewayEnsure(backend, resolveHermesCwd(), HERMES_HOME))
+  assertPoolEntryStillOwned(poolKey, entry)
+  return { ...connection, profile, logs: hermesLog.slice(-80), ...getWindowState() }
 }
 
 function reportPrimaryRecoveryCrashLoop(code: number | null, signal: string | null): boolean {
@@ -13297,16 +12604,17 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
       rememberLog(`[env] login-shell PATH resolution unavailable (${loginShellPath.reason}); keeping inherited PATH`)
     }
 
-    const token = crypto.randomBytes(32).toString('base64url')
-    // Pin the desktop's chosen profile via the global --profile flag. A launch
-    // override is persisted into active-profile.json before startHermes, so
-    // Hermes.exe --profile <name> and hermes -p <name> desktop both land here.
-    // Null (no stored preference, no launch flag) keeps the legacy bare serve
-    // so the child still follows the sticky active_profile file.
-    // `activeProfile` is the SAME decision that pinned routing above — never
-    // re-read here (#108417). (--port 0: the OS assigns an ephemeral port; the
-    // child announces it on stdout.)
-    const backendArgs = serveBackendArgs(activeProfile || undefined)
+    const backendArgs = ['gateway', 'ensure', '--json']
+    // Pin the desktop's chosen profile via the global --profile flag. This is
+    // deterministic (it wins over the sticky ~/.hermes/active_profile file) and
+    // resolves HERMES_HOME the same way `hermes -p <name>` does on the CLI. An
+    // unset preference keeps the legacy launch so existing installs are
+    // unaffected.
+    const activeProfile = readActiveDesktopProfile()
+
+    if (activeProfile) {
+      backendArgs.unshift('--profile', activeProfile)
+    }
 
     const setup = await runPrimaryBackendStartup({
       signal: localBackendLifecycle.signal,
@@ -13389,268 +12697,14 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
     // Local WSL backend — paths are bridgeable.
     setWslBridgeProfileState(primaryProfile, true)
 
-    stopAttachedBackendMonitor()
-
-    const backend = setup.backend
-    // Route old runtimes (no `serve`) through the legacy `dashboard --no-open`.
-    backend.args = await getBackendArgsForRuntime(backend)
-    backendConnectionState.assertCurrentAttempt(connectionAttempt)
-    const hermesCwd = resolveHermesCwd()
-    const webDist = resolveWebDist()
-    const readyFile = backend.readyFile ? makeDashboardReadyFile() : null
-
-    await advanceBootProgress('backend.spawn', `Starting Hermes backend via ${backend.label}`, 84)
-    rememberLog(`Starting Hermes backend via ${backend.label}`)
-
-    const profile = primaryProfile
-    const parentStartMarker = await desktopParentStartMarker()
-    const backendNonce = crypto.randomBytes(16).toString('hex')
-    const parentIdentityEnv = parentWatchdogEnv(process.pid, parentStartMarker, backendNonce)
-
-    backendConnectionState.assertCurrentAttempt(connectionAttempt)
-
-    const hermesProcess = spawnOwnedBackend(
-      windowsShellCommand(backend.command, Boolean(backend.shell)),
-      backend.args,
-      hiddenWindowsChildOptions({
-        cwd: hermesCwd,
-        env: desktopBackendSpawnEnv(
-          {
-            // Never another profile's dotenv credentials from the Desktop env (#68367).
-            ...profileBackendParentEnv({ hermesHome: HERMES_HOME, profile: activeProfile }),
-            // Explicitly pin HERMES_HOME for the child so Python's get_hermes_home()
-            // resolves to the SAME location our resolveHermesHome() picked. Without
-            // this pin, Python falls back to ~/.hermes on every platform — fine on
-            // mac/linux (where our default matches), but on Windows our default is
-            // %LOCALAPPDATA%\hermes, which differs from C:\Users\<u>\.hermes.
-            // Mismatch would split config / sessions / .env / logs across two
-            // directories. install.ps1 sets HERMES_HOME via setx; the desktop
-            // can't reliably do that, so we set it inline for every spawn.
-            HERMES_HOME,
-            ...backend.env,
-            TERMINAL_CWD: hermesCwd,
-            HERMES_DASHBOARD_SESSION_TOKEN: token,
-            // Marks this dashboard backend as desktop-spawned so it runs the cron
-            // scheduler tick loop (the gateway isn't running under the app).
-            HERMES_DESKTOP: '1',
-            // Exact parent identity lets the backend self-exit after an unclean
-            // Desktop death without mistaking a reused PID for its owner. If the
-            // optional marker probe fails, retain legacy PID-only tracking.
-            ...parentIdentityEnv,
-            HERMES_WEB_DIST: webDist,
-            ...(readyFile ? { HERMES_DESKTOP_READY_FILE: readyFile } : {})
-          },
-          GUEST_ONBOARDING
-        ),
-        shell: backend.shell,
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-    )
-
-    // Buffer stdout+stderr from the instant of spawn (#93608): an early
-    // crash's traceback must survive into the claim error and the
-    // before-ready exit message shown by the boot UI. rememberLog attaches
-    // later, after the claim, and would miss anything printed before it.
-    const primaryOutputTail = createBackendOutputTail()
-    primaryOutputTail.attach(hermesProcess)
-
-    // Start watching for the READY announcement BEFORE any await (#60323):
-    // claimBackendChild can take seconds (its Windows Get-Process probe cold
-    // start alone runs 2-8s) and advanceBootProgress awaits renderer IPC.
-    // stdout is already flowing into the tail, and Node streams never replay
-    // consumed chunks to late listeners, so a sentinel printed during that
-    // window was lost forever — the wait then hit its 90s timeout and a
-    // healthy backend was killed (deterministic on Windows, racy on
-    // macOS/Linux). The tail-buffer accessor covers any residual gap.
-    const portAnnouncement = waitForDashboardPortAnnouncement(hermesProcess, {
-      bufferedOutput: () => primaryOutputTail.text(),
-      describeOutputTail: () => primaryOutputTail.describe(),
-      readyFile
-    })
-
-    // Mark handled so an early rejection (child dies during the claim) can't
-    // surface as an unhandled rejection before the Promise.race below attaches.
-    portAnnouncement.catch(() => {})
-
-    const processOwner = await backendConnectionState.claimProcess(
-      connectionAttempt,
-      hermesProcess,
-      (child: ChildProcess): ReturnType<typeof claimBackendChild> =>
-        claimBackendChild(
-          child,
-          `${backend.command} ${backend.args.join(' ')}`,
-          profile,
-          backendNonce,
-          primaryOutputTail
-        )
-    )
-
-    if (!processOwner) {
-      await localBackendLifecycle.stop(hermesProcess)
-      releaseBackendChild(hermesProcess)
+    const connection = await ensureLocalGateway(() => runGatewayEnsure(setup.backend, resolveHermesCwd(), HERMES_HOME))
+    if (!backendConnectionState.isCurrentAttempt(connectionAttempt)) {
       throw new Error('Hermes backend start was superseded by a newer connection attempt.')
     }
-
-    hermesProcess.stdout.on('data', rememberLog)
-    hermesProcess.stderr.on('data', rememberLog)
-    let backendReady = false
-    let rejectBackendStart = null
-
-    const backendStartFailed = new Promise((_resolve, reject) => {
-      rejectBackendStart = reject
-    })
-
-    hermesProcess.once('error', error => {
-      releaseBackendChild(hermesProcess)
-
-      if (!backendConnectionState.clearForCurrentProcess(processOwner)) {
-        rememberLog(`Ignoring stale Hermes backend error: ${error.message}`)
-        scheduleUnexpectedPrimaryRecovery({ error: error.message, ready: backendReady })
-        rejectBackendStart?.(new Error('Hermes backend start was superseded by a newer connection attempt.'))
-
-        return
-      }
-
-      // The CURRENT owner failed to start: its routing identity must not
-      // outlive it. A newer attempt already re-pins on its own decision
-      // (#108417), and the stale branch above never reaches this clear.
-      primaryProfilePin.clear()
-
-      rememberLog(`Hermes backend failed to start: ${error.message}`)
-      updateBootProgress(
-        {
-          error: error.message,
-          message: `Hermes backend failed to start: ${error.message}`,
-          phase: 'backend.error',
-          running: false
-        },
-        { allowDecrease: true }
-      )
-      sendBackendExit({ code: null, signal: null, error: error.message })
-      rejectBackendStart?.(error)
-    })
-    hermesProcess.once('exit', (code, signal) => {
-      releaseBackendChild(hermesProcess)
-
-      if (!backendConnectionState.clearForCurrentProcess(processOwner)) {
-        rememberLog(formatBackendExitLine('Ignoring stale Hermes backend exit', code, signal, primaryOutputTail))
-
-        scheduleUnexpectedPrimaryRecovery({ code, signal, ready: backendReady })
-
-        if (!backendReady) {
-          rejectBackendStart?.(new Error('Hermes backend start was superseded by a newer connection attempt.'))
-        }
-
-        return
-      }
-
-      rememberLog(formatBackendExitLine('Hermes backend exited', code, signal, primaryOutputTail))
-
-      // The current primary child is gone; release its routing pin so the
-      // next startHermes() re-reads active-profile.json instead of re-pinning
-      // the dead child's profile (#108417). Supervisor respawns go through
-      // startHermes, which makes a fresh decision — a respawn cannot inherit
-      // a pin from a process that no longer exists.
-      primaryProfilePin.clear()
-
-      if (!scheduleUnexpectedPrimaryRecovery({ code, signal, ready: backendReady })) {
-        sendBackendExit({ code, signal })
-      }
-
-      if (!backendReady) {
-        const message = `Hermes backend exited before it became ready (${signal || code}).${primaryOutputTail.describe()}`
-        updateBootProgress(
-          {
-            error: message,
-            message,
-            phase: 'backend.error',
-            running: false
-          },
-          { allowDecrease: true }
-        )
-        rejectBackendStart?.(
-          new Error(
-            `Hermes backend exited before it became ready (${signal || code}). Log: ${DESKTOP_LOG_PATH}\n${recentHermesLog()}`
-          )
-        )
-      }
-    })
-
-    await advanceBootProgress('backend.port', 'Waiting for Hermes backend to launch', 86)
-    backendConnectionState.assertCurrentAttempt(connectionAttempt)
-
-    // Discover the ephemeral port the child bound to
-    const port = await Promise.race([portAnnouncement, backendStartFailed])
-    backendConnectionState.assertCurrentAttempt(connectionAttempt)
-
-    if (readyFile) {
-      fs.unlink(readyFile, () => {})
-    }
-
-    const baseUrl = `http://127.0.0.1:${port}`
-    await advanceBootProgress('backend.wait', 'Waiting for Hermes backend to become ready', 90)
-    backendConnectionState.assertCurrentAttempt(connectionAttempt)
-    await Promise.race([waitForHermes(baseUrl, token), backendStartFailed])
-    backendConnectionState.assertCurrentAttempt(connectionAttempt)
-    backendReady = true
-    // The host now has a bound, registered backend: the next launcher will
-    // discover and attach to it, so the spawn gate is done.
-    releaseHostSpawnReservation()
-    primaryExitRecovery.reset()
     backendStartFailure = null
-
-    const childAlive = () => hermesProcess.exitCode === null && !hermesProcess.killed
-
-    const authToken = await adoptServedDashboardToken(baseUrl, token, {
-      childAlive,
-      rememberLog
-    })
-
-    backendConnectionState.assertCurrentAttempt(connectionAttempt)
-
-    // Verify the WebSocket session token before declaring backend ready.
-    const wsUrl = `ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(authToken)}`
-
-    // Same policy as the pool path: our own child may still be cold-starting (#96177).
-    const wsProbe = await probeGatewayWebSocket(wsUrl, {
-      WebSocketImpl: globalThis.WebSocket,
-      ...spawnedBackendProbeOptions(childAlive)
-    })
-
-    backendConnectionState.assertCurrentAttempt(connectionAttempt)
-
-    if (!wsProbe.ok) {
-      throw new Error(
-        `Local Hermes backend is HTTP-reachable but the WebSocket (/api/ws) rejected the session token: ${wsProbe.reason}`
-      )
-    }
-
-    updateBootProgress({
-      phase: 'backend.ready',
-      message: 'Hermes backend is ready. Finalizing desktop startup',
-      progress: 94,
-      running: true,
-      error: null
-    })
-
-    // A successful boot (including a soft restart that the repair-guard
-    // chose over a hard reinstall, see #74874) means any in-flight repair
-    // attempt counter has been honoured — reset it so the next genuine
-    // failure starts fresh from attempt 1 instead of inheriting the
-    // accumulated count of the resolved episode.
+    updateBootProgress({ phase: 'backend.ready', message: 'Hermes gateway is ready', progress: 94, running: true, error: null })
     bootstrapRepairAttempt = 0
-
-    return {
-      baseUrl,
-      mode: 'local',
-      source: 'local',
-      authMode: 'token',
-      token: authToken,
-      profile,
-      wsUrl,
-      logs: hermesLog.slice(-80),
-      ...getWindowState()
-    }
+    return { ...connection, logs: hermesLog.slice(-80), ...getWindowState() }
   })().catch(async error => {
     releaseHostSpawnReservation()
 
@@ -15832,7 +14886,7 @@ ipcMain.handle('hermes:pool-limits:set', async (_event, raw) => {
   return { ok: true, limits: next }
 })
 ipcMain.handle('hermes:gateway:ws-url', async (_event, profile) => {
-  return gatewayWsUrlIpcResult(() => freshGatewayWsUrl(profile))
+  return gatewayWsUrlIpcResult(() => freshGatewayWsUrl(profile, _event.sender.id))
 })
 ipcMain.handle('hermes:window:openSession', async (_event, sessionId, opts) => {
   if (typeof sessionId !== 'string' || !sessionId.trim()) {
@@ -16686,7 +15740,14 @@ const registryGatewayWsUrlHandler = createRegistryGatewayWsUrlHandler({
 })
 
 ipcMain.handle('hermes:gateway:ws-url-for', async (_event, payload) => {
-  return gatewayWsUrlIpcResult(() => registryGatewayWsUrlHandler(payload))
+  return gatewayWsUrlIpcResult(async () => {
+    const connection = await ensureRegistryBackend(payload?.connectionId, payload?.profile)
+    if (connection.gatewayEndpoint) {
+      const ticket = await mintLocalGatewayTicket(connection.gatewayEndpoint)
+      return localGatewayDials.prepare(connection.baseUrl, ticket, _event.sender.id)
+    }
+    return registryGatewayWsUrlHandler(payload)
+  })
 })
 
 // Transactional update for a Desktop-managed SSH install. Unlike the generic

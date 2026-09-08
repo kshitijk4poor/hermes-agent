@@ -1,0 +1,24 @@
+import { test, expect } from 'vitest'
+import { ensureLocalGateway, createLocalGatewayDials } from './local-gateway'
+
+test('ensure consumes structured readiness without acquiring a child owner', async () => {
+  const endpoint = { profile_id: '/private/profile', instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
+  const connection = await ensureLocalGateway(async () => ({ code: 0, stdout: JSON.stringify({ state: 'ready', endpoint }) }))
+  expect(connection.baseUrl).toBe(endpoint.api_origin)
+  expect(connection.gatewayEndpoint).toEqual(endpoint)
+  expect(connection).not.toHaveProperty('process')
+  expect(connection.token).toBe('')
+  await expect(ensureLocalGateway(async () => ({ code: 5, stdout: JSON.stringify({ state: 'starting', reason_code: 'deadline' }) }))).rejects.toThrow('starting')
+})
+
+test('private dial credential is one-use and bound to the requesting native window', () => {
+  const dials = createLocalGatewayDials()
+  const url = dials.prepare('http://127.0.0.1:1234', 'private-ticket', 7)
+  expect(url).not.toContain('private-ticket')
+  const details = { url, webContentsId: 8, resourceType: 'webSocket', requestHeaders: { Origin: 'http://renderer', 'Sec-WebSocket-Protocol': 'hermes-gateway-v1' } }
+  expect(dials.headers(details)).toBeNull()
+  const headers = dials.headers({ ...details, webContentsId: 7 })!
+  expect(headers).not.toHaveProperty('Origin')
+  expect(headers['Sec-WebSocket-Protocol']).toBe('hermes-gateway-v1, hermes-gateway-ticket.private-ticket')
+  expect(dials.headers({ ...details, webContentsId: 7 })).toBeNull()
+})
