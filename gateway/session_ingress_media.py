@@ -50,6 +50,8 @@ def capture_native_media(paths):
             raise RuntimeStoreError('invalid_params') from exc
         with source:
             root = _media_root()
+            if root.resolve() != root:
+                raise RuntimeStoreError('invalid_params')
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             fd, name = tempfile.mkstemp(prefix='.capture-', dir=root)
             temporary = Path(name)
@@ -67,6 +69,8 @@ def capture_native_media(paths):
                     output.flush()
                     os.fsync(output.fileno())
                 target = root / digest.hexdigest() / path.name
+                if target.parent.resolve() != target.parent:
+                    raise RuntimeStoreError('invalid_params')
                 target.parent.mkdir(mode=0o700, exist_ok=True)
                 reference = {'path': str(target), 'sha256': digest.hexdigest(), 'size': size}
                 if target.exists():

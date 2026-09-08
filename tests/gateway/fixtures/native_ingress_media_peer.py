@@ -68,6 +68,26 @@ async def probe(mode, peer):
                              channel_context='ORIGINAL_CHANNEL_CONTEXT', channel_prompt='ORIGINAL_CHANNEL_PROMPT',
                              reply_to_message_id='quoted-1', reply_to_text='ORIGINAL_QUOTE',
                              reply_to_author_id='quoted-user', reply_to_author_name='Quoted User')
+        # A cache alias must never redirect publication outside managed media.
+        import hashlib
+        from gateway.platforms.base import get_document_cache_dir
+        root = get_document_cache_dir() / 'native-inputs'
+        root.mkdir(parents=True, exist_ok=True)
+        escaped = state / 'escaped'
+        escaped.mkdir()
+        digest_dir = root / hashlib.sha256(original.read_bytes()).hexdigest()
+        digest_dir.symlink_to(escaped, target_is_directory=True)
+        try:
+            try:
+                snapshot_native(runner, event)
+            except RuntimeStoreError as exc:
+                assert exc.reason == 'invalid_params', exc.reason
+            else:
+                raise AssertionError('media publication followed a cache-directory symlink')
+            assert not list(escaped.iterdir())
+            assert not event._gateway_accepted
+        finally:
+            digest_dir.unlink()
         receipt = authority.admit_native(event)
         assert event._gateway_accepted
         saved = rows(receipt.ref.session_id)[0]
