@@ -996,6 +996,12 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             recoverStoredSessionId,
             liveId =>
               withSessionBusyRetry(async () => {
+                // Recovery can re-enter this callback within the same submit.
+                // An identityless write cannot be deduplicated after a lost ACK.
+                if (prepared.legacyAttempted) {
+                  throw new Error('Legacy submission acknowledgement is unknown; automatic retry is unsafe')
+                }
+
                 const params: Record<string, unknown> = { ...prepared.params, session_id: liveId }
 
                 try {
