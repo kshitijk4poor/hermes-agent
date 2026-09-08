@@ -56,6 +56,19 @@ def test_restore_refuses_live_authority_without_changing_data(tmp_path):
             after = rows()
             print(json.dumps({'live_restore': restored, 'before': before, 'after': after}), flush=True)
             assert not restored and after == before
+            # The real daemon still holds the source DB. Separate-output salvage
+            # must not require stopping it or installing recovered runtime work.
+            import hashlib
+            from hermes_cli.session_recovery import recover_session_database
+            bundle = [Path(str(home / 'state.db') + suffix) for suffix in ('', '-wal', '-shm')]
+            hashes = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle if p.exists()}
+            report = recover_session_database(home / 'state.db', tmp_path / 'salvaged.db')
+            assert report['verified'] and report['source_unchanged'], report
+            assert report['runtime_state']['excluded_tables']['session_admissions']['rows'] == len(before)
+            assert hashes == {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in bundle if p.exists()}
+            assert rows() == before
+            print(json.dumps({'live_recovery_verified': report['verified'], 'source_bundle_unchanged': True,
+                              'excluded_admissions': len(before)}), flush=True)
             return snapshot
 
     try:
