@@ -22,6 +22,11 @@ def daemon(tmp_path):
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700, exist_ok=True)
     user.mkdir(exist_ok=True)
+    for name in ('other', 'current'):
+        sibling = home / 'profiles' / name
+        sibling.mkdir(parents=True, exist_ok=True)
+        (sibling / 'config.yaml').write_text(json.dumps({
+            'model': {'provider': 'custom', 'default': 'sibling-' + name}}))
     (home / 'config.yaml').write_text(json.dumps({
         'gateway': {'multiplex_profiles': False},
         'model': {'provider': 'custom', 'default': 'native-http-fixture',
@@ -85,6 +90,9 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
         assert client.get('/api/config').status_code == 401
         normal = {'Authorization': 'Bearer normal-http-owner'}
         assert client.get('/api/config', headers=normal).status_code == 200
+        assert 'sibling-other' in client.get('/api/config?profile=other', headers=normal).text
+        sibling_config = home / 'profiles' / 'other' / 'config.yaml'
+        sibling_before = sibling_config.read_bytes()
         first = ticket(home, descriptor)
         response = client.get('/api/config', headers=headers(first))
         assert response.status_code == 200, response.text
@@ -105,7 +113,7 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
             with pytest.raises(AssertionError, match='PermissionError'):
                 ticket(home, descriptor, **overrides)
         for path in ('/api/config?profile=other', '/api/config?profile=current&profile=other',
-                     '/api/profiles/other/soul'):
+                     '/api/profiles/other/soul', '/api/sessions?profile=current'):
             assert client.get(path, headers=headers(ticket(home, descriptor))).status_code == 403
         assert client.put('/api/config', json={'profile': 'other', 'config': {}},
                            headers=headers(ticket(home, descriptor))).status_code == 403
@@ -116,6 +124,11 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
         for path in ('/api/profiles/sessions', '/api/profiles/sessions/sidebar',
                      '/api/profiles/projects/tree', '/api/cron/jobs'):
             assert client.get(path, headers=headers(ticket(home, descriptor))).status_code == 403
+        assert sibling_config.read_bytes() == sibling_before
+        assert client.get('/api/config?profile=default',
+                          headers=headers(ticket(home, descriptor))).status_code == 200
+        assert client.get('/api/profiles/sessions/sidebar?recents_profile=default',
+                          headers=headers(ticket(home, descriptor))).status_code == 200
         assert client.get('/api/config?profile=current',
                           headers=headers(ticket(home, descriptor))).status_code == 200
         assert client.get('/api/profiles', headers=headers(ticket(home, descriptor))).status_code == 200
