@@ -12,6 +12,9 @@ import {
 } from '@/store/composer-queue'
 import { setSessionsLoading } from '@/store/session'
 
+import { $connection } from '@/store/session'
+import type { HermesConnection } from '@/global'
+
 import type { QueueEditState } from '../composer-utils'
 import type { ChatBarProps } from '../types'
 
@@ -68,6 +71,30 @@ describe('useComposerQueue park integration', () => {
     $queuedPromptsBySession.set({})
     $parkedQueueSessions.set({})
     setSessionsLoading(true)
+  })
+
+  it('admits native Queue through submit and retains an uncertain draft without a local replay', async () => {
+    $connection.set({ mode: 'local', wsUrl: 'ws://localhost/api/ws?native_dial=unminted' } as HermesConnection)
+    const draftRef = { current: 'durable queue' }
+    const clearDraft = vi.fn(() => { draftRef.current = '' })
+    const onSubmit = vi.fn<ChatBarProps['onSubmit']>().mockResolvedValue(false)
+    const hook = renderHook(({ busy }) => useComposerQueue({
+      activeQueueSessionKey: SESSION_KEY, attachments: [], busy, clearDraft, draftRef,
+      focusInput: () => undefined, loadIntoComposer: () => undefined, onCancel: vi.fn(), onSteer: undefined,
+      onSubmit, queueEditRef: { current: null }, queueSessionKey: SESSION_KEY, sessionId: 'rt-session-queue-hook'
+    }), { initialProps: { busy: true } })
+    try {
+      await act(async () => { await hook.result.current.queueCurrentDraft() })
+      expect(onSubmit).toHaveBeenCalledWith('durable queue', expect.objectContaining({ fromQueue: true, storedSessionId: SESSION_KEY }))
+      expect(draftRef.current).toBe('durable queue')
+      expect(getQueuedPrompts(SESSION_KEY)).toEqual([])
+      onSubmit.mockResolvedValue(true)
+      await act(async () => { await hook.result.current.queueCurrentDraft() })
+      expect(clearDraft).toHaveBeenCalledTimes(1)
+      hook.rerender({ busy: false })
+      await act(async () => { await Promise.resolve() })
+      expect(onSubmit).toHaveBeenCalledTimes(2)
+    } finally { $connection.set(null) }
   })
 
   it('reschedules rejected foreground drains to a bounded stop and keeps manual recovery', async () => {
