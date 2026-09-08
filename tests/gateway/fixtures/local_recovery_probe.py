@@ -172,6 +172,9 @@ def probe(tmp_path):
             pids.append(proc.pid); epochs.append(desc['authority_epoch'])
             asyncio.run(second(desc))
             assert rows() == {'warm': 'terminal', 'started': 'unknown', 'follower': 'queued', 'foreign': 'queued', 'missing': 'queued', 'corrupt': 'queued', 'safe': 'terminal'}, rows()
+        with daemon(root, home, env, barrier=False) as (proc, desc):
+            pids.append(proc.pid); epochs.append(desc['authority_epoch'])
+            asyncio.run(second(desc))
         texts = [next((m.get('content') for m in reversed(r['messages']) if m['role'] == 'user'), '') for r in peer.requests]
         assert texts.count('BLOCK_STARTED') == 1 and texts.count('RECOVER_QUEUED') == 1, texts
         assert not any(t in texts for t in ('NEVER_REPLAY', 'FOREIGN_QUEUE', 'MISSING_QUEUE', 'CORRUPT_QUEUE')), texts
