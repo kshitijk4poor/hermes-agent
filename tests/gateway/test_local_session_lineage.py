@@ -40,6 +40,17 @@ async def test_local_lineage_transitions_preserve_owner_or_roll_back(tmp_path, m
                                          source='gui', messages=history, compression_lock_holder='fixture')
         finally:
             db.release_compression_lock(parent, 'fixture')
+    publish_row = db._publish_child_session_row
+    def abort_publication(*args, **kwargs):
+        publish_row(*args, **kwargs)
+        raise RuntimeError('publication abort')
+    monkeypatch.setattr(db, '_publish_child_session_row', abort_publication)
+    with pytest.raises(RuntimeError, match='publication abort'):
+        compress(ref.session_id, 'aborted-child')
+    monkeypatch.setattr(db, '_publish_child_session_row', publish_row)
+    assert db.get_session('aborted-child') is None
+    assert local_receipt(db, ref.session_id) == original
+    assert db.get_session(ref.session_id)['end_reason'] is None
     compress(ref.session_id, 'compressed')
     second = runner()
     cold = await initialize_session_authority(second, profile_id='fixture', instance_id='second')
@@ -87,6 +98,12 @@ async def test_local_lineage_transitions_preserve_owner_or_roll_back(tmp_path, m
     with pytest.raises(RuntimeStoreError, match='unknown_execution'):
         claim_session_input(restarted.db, epoch=restarted.epoch, session_id=ref.session_id)
     assert len(list_session_admissions(restarted.db, session_id=ref.session_id)) == 1
+    receipt = local_receipt(db, ref.session_id)
+    db.set_meta('gateway.local_policy.v1:' + ref.session_id, json.dumps(dict(receipt, profile_id='foreign')))
+    with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
+        compress('compressed-again', 'foreign-child')
+    assert db.get_session('foreign-child') is None
+    db.set_meta('gateway.local_policy.v1:' + ref.session_id, json.dumps(receipt))
     foreign = Principal('foreign', 'fixture', actor.capabilities, 'foreign')
     with pytest.raises(RuntimeStoreError, match='permission_denied'):
         await restarted.attach(foreign, ref)

@@ -11,6 +11,9 @@ from hermes_state_runtime import RuntimeStoreError, _epoch, _json
 
 def validate_local_lineage(conn, receipt):
     from hermes_state_compression import _CHAIN_STEP_SQL
+    from gateway.session_local_recovery import local_identity
+    if receipt['session_id'] != local_identity(receipt['profile_id'], receipt['principal_id'], receipt['request_id']):
+        raise RuntimeStoreError('storage_unavailable')
     lineage = receipt.get('lineage', [receipt['session_id']])
     if (not isinstance(lineage, list) or not lineage or len(set(lineage)) != len(lineage)
             or lineage[0] != receipt['session_id'] or lineage[-1] != receipt['entry']['session_id']):

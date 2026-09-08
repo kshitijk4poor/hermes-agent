@@ -29,6 +29,7 @@ def probe(tmp_path):
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url, PYTHONUNBUFFERED='1')
     sessions, params, targets, pids, epochs = {}, {}, {}, [], []
+    route_targets = {}
     def db_rows():
         with sqlite3.connect(f'file:{home / "state.db"}?mode=ro', uri=True) as db:
             return dict(db.execute('SELECT request_id,status FROM session_admissions'))
@@ -70,6 +71,8 @@ def probe(tmp_path):
     async def recovered(desc):
         async with websocket(home, desc) as ws:
             for name in ('safe', 'reset'):
+                snapshot = await rpc(ws, 'session.resume', session_id=sessions[name])
+                assert 'result' in snapshot, snapshot
                 await terminal(name)
                 snapshot = await rpc(ws, 'session.resume', session_id=sessions[name])
                 assert 'result' in snapshot, snapshot
@@ -100,10 +103,9 @@ def probe(tmp_path):
                                     ('gateway.local_policy.v1:' + sid,)).fetchone()[0])
                 targets[name] = receipt['entry']['session_id']
                 if name != 'foreign':
-                    assert targets[name] != sid, receipt
                     route = json.loads(db.execute("SELECT entry_json FROM gateway_routing WHERE scope='' AND session_key=?",
                                                   (receipt['route'],)).fetchone()[0])
-                    assert route['session_id'] == targets[name]
+                    route_targets[name] = route['session_id']
                     row = db.execute('SELECT cwd FROM sessions WHERE id=?', (targets[name],)).fetchone()
                     assert row[0] == params[name]['cwd'], row
                 else:
@@ -126,6 +128,8 @@ def probe(tmp_path):
                 asyncio.run(recovered(desc))
                 assert db_rows() == {'warm-safe': 'terminal', 'warm-reset': 'terminal', 'started': 'unknown',
                                      'follower': 'queued', 'reset': 'terminal', 'foreign': 'queued', 'safe': 'terminal'}
+        assert all(route_targets[name] == targets[name] for name in ('safe', 'reset', 'unknown')), route_targets
+        assert all(targets[name] != sessions[name] for name in ('safe', 'reset', 'unknown')), targets
         texts = [next((m.get('content') for m in reversed(r['messages']) if m['role'] == 'user'), '') for r in peer.requests]
         assert sorted(texts) == sorted(['WARM_HISTORY', 'RESET_OLD', 'BLOCK_STARTED', 'RECOVER_SAFE', 'RECOVER_RESET']), texts
         for name in ('safe', 'reset'):
