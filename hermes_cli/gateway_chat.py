@@ -29,7 +29,7 @@ def validate_options(args):
     if unsupported:
         flags = ", ".join("--" + name.replace("_", "-") for name in unsupported)
         raise GatewayClientError(f"Unsupported gateway CLI options: {flags}. No local fallback or policy changes were made.")
-    if getattr(args, "resume", None) and (getattr(args, "in_dir", None) or
+    if getattr(args, "resume", None) and (getattr(args, "in_dir", None) or getattr(args, "source", None) or
             any(getattr(args, name, None) is not None for name in _POLICY)):
         raise GatewayClientError("Resume retains gateway session policy; creation overrides are unsupported on resume.")
 
@@ -47,6 +47,8 @@ async def run_gateway_chat(args):
                 raise GatewayClientError(f"Gateway does not support source {source!r}")
             parameters = contract.get("parameters", [])
             policy = {key: getattr(args, key) for key in _POLICY if getattr(args, key, None) is not None}
+            if isinstance(policy.get("toolsets"), str):
+                policy["toolsets"] = [name.strip() for name in policy["toolsets"].split(",") if name.strip()]
             cwd = str(Path(getattr(args, "in_dir", None) or os.getcwd()).expanduser().resolve())
             if "cwd" in parameters:
                 policy["cwd"] = cwd

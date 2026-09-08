@@ -13,6 +13,42 @@ def test_unsupported_launch_options_fail_before_connection(monkeypatch, capsys):
         assert gateway_chat.launch_from_args(args) == 2
         assert option.replace("_", "-") in capsys.readouterr().err
     assert calls == []
+    assert gateway_chat.launch_from_args(argparse.Namespace(resume="stored", source="tui", query="x")) == 2
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_creation_preserves_advertised_cwd_model_and_toolsets(monkeypatch, tmp_path):
+    from contextlib import asynccontextmanager
+    from hermes_cli import gateway_chat
+    from hermes_cli.gateway_chat_view import GatewayChatView
+    calls = []
+
+    class Peer:
+        async def rpc(self, method, **params):
+            calls.append((method, params))
+            if method == "runtime.describe":
+                return {"session_create": {"sources": ["cli"], "parameters": ["cwd", "model", "toolsets", "request_id", "source"]}}
+            return {"stored_session_id": "stored"}
+
+    @asynccontextmanager
+    async def connected():
+        yield Peer()
+
+    async def rendered(self, query, *, oneshot):
+        assert query == "literal"
+        return 0
+
+    monkeypatch.setattr(gateway_chat, "connect_gateway", connected)
+    monkeypatch.setattr(GatewayChatView, "run", rendered)
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(query="literal", model="explicit-model", toolsets="terminal, file", quiet=True)
+    assert await gateway_chat.run_gateway_chat(args) == 0
+    create = calls[1][1]
+    assert create["cwd"] == str(tmp_path)
+    assert create["model"] == "explicit-model"
+    assert create["toolsets"] == ["terminal", "file"]
+    assert create["source"] == "cli" and create["request_id"]
 
 
 @pytest.mark.asyncio
