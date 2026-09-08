@@ -92,6 +92,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             self._approval_owner = (authority, ctx.session_id, generation)
 
 
+    def _publish_execution(self, event_type, payload):
+        if self._approval_owner is not None:
+            authority, session_id, generation = self._approval_owner
+            return authority.publish_execution(session_id, generation, event_type, payload)
+        return False
+
     # ── stream consumer / interim commentary wiring ─────────────────────────────────────────
 
     def _setup_stream_consumer(self, platform_key):
@@ -151,9 +157,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             ) if sc is not None
         ]
         stream_delta_cb = None
-        if delta_sinks:
-            def stream_delta_cb(text: Optional[str]) -> None:
+        if delta_sinks or self._approval_owner is not None:
+            def stream_delta_cb(text: str) -> None:
                 if ctx._run_still_current():
+                    self._publish_execution("message.delta", {"text": text})
                     for sink in delta_sinks:
                         sink.on_delta(text)
 
@@ -264,7 +271,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             if (ctx._voice_ack_guild[0] is not None or ctx._native_slack_task_cards) else None
         )
         agent.tool_complete_callback = ctx.native_tool_complete_callback if ctx._native_slack_task_cards else None
-        agent.step_callback = ctx._step_callback_sync if ctx._hooks_ref.loaded_hooks else None
+        if self._approval_owner is not None:
+            agent.tool_start_callback = self.combined_tool_start_callback
+            agent.tool_complete_callback = self.combined_tool_complete_callback
+        agent.step_callback = ctx._step_callback_sync if (ctx._hooks_ref.loaded_hooks or self._approval_owner is not None) else None
         agent.stream_delta_callback = stream_delta_cb
         agent.interim_assistant_callback = interim_assistant_cb if want_interim_messages else None
         agent.status_callback, agent.notice_callback = ctx._status_callback_sync, self._notice_callback_sync

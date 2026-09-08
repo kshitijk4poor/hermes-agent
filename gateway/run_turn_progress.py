@@ -723,16 +723,30 @@ class GatewayTurnProgressMixin:
 
     def combined_tool_start_callback(self, call_id, tool_name, args):
         """Compose the voice ack + native task-card start consumers."""
+        self._publish_execution("tool.start", {
+            "tool_call_id": str(call_id or ""), "tool_name": str(tool_name or "tool")})
         if self._ctx._voice_ack_guild[0] is not None:
             self.voice_ack_callback(call_id, tool_name, args)
         if self._ctx._native_slack_task_cards:
             self.native_tool_start_callback(call_id, tool_name, args)
+
+    def combined_tool_complete_callback(self, call_id, tool_name, args, result):
+        from agent.display import _detect_tool_failure
+        is_error, _ = _detect_tool_failure(tool_name, result)
+        self._publish_execution("tool.complete", {
+            "tool_call_id": str(call_id or ""), "tool_name": str(tool_name or "tool"),
+            "is_error": bool(is_error)})
+        if self._ctx._native_slack_task_cards:
+            self.native_tool_complete_callback(call_id, tool_name, args, result)
 
     # ── hook / status bridges (agent thread → gateway loop) ────────────────────────────────
 
     def _step_callback_sync(self, iteration: int, prev_tools: list) -> None:
         ctx = self._ctx
         if not ctx._run_still_current():
+            return
+        self._publish_execution("agent.step", {"iteration": iteration})
+        if not ctx._hooks_ref.loaded_hooks:
             return
         # prev_tools may be list[str] or list[dict] with "name"/"result" keys. Normalise so
         # "tool_names" stays backward-compatible for user hooks that do ', '.join(tool_names).

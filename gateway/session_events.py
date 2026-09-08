@@ -16,6 +16,7 @@ class SessionEvents:
         self._key = uuid.uuid4().hex
         self.epoch = uuid.uuid4().hex
         self.sequence = 0
+        self.execution = {}
 
     def watermark(self):
         with self.lock:
@@ -30,7 +31,7 @@ class SessionEvents:
         with self.lock:
             self.watermark()
             frame = {'jsonrpc': '2.0', 'method': 'event', 'params': {
-                'type': event_type, 'session_id': self._key,
+                **self.execution, 'type': event_type, 'session_id': self._key,
                 'payload': deepcopy(payload), 'replay_epoch': self.epoch}}
             event_replay._stamp_event(frame)
             if frame['params']['seq'] <= self.sequence:

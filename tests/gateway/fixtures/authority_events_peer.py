@@ -75,8 +75,11 @@ def main():
         row = next(r for r in list_session_admissions(authority.db, session_id=ref.session_id,
                                                      pending_only=False) if r['admission_id'] == receipt.admission_id)
         assert row['outcome'] == 'completed', row
-        frame = await asyncio.to_thread(frames.get, True, 5)
-        frames.put(frame)
+        while True:
+            frame = await asyncio.to_thread(frames.get, True, 5)
+            if frame['params']['type'] == 'message.complete':
+                frames.put(frame)
+                break
         await a.close()
         assert len(authority.sessions[ref.session_id].subscribers) == 1
         await b.close()

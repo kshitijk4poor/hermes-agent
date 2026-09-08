@@ -207,6 +207,17 @@ class SessionAuthority:
         if handle.execution_generation != generation or handle.execution_state != "running":
             raise RuntimeStoreError("stale_generation")
 
+    def publish_execution(self, session_id, generation, event_type, payload):
+        """Worker callbacks never outlive their exact running claim."""
+        live = self.sessions[session_id]
+        with live.event_stream.lock:
+            try:
+                self.check_approval_generation(session_id, generation)
+            except RuntimeStoreError:
+                return False
+            live.event_stream.publish(session_id, payload, event_type=event_type)
+            return True
+
     def register_approval(self, session_id, generation, route, data):
         live = self.sessions[session_id]
         with live.event_stream.lock:
@@ -247,18 +258,24 @@ class SessionAuthority:
             if row is None:
                 return
             admission_id = row['admission_id']
+            with live.event_stream.lock:
+                live.event_stream.execution = {
+                    'authority_epoch': self.epoch, 'execution_generation': row['generation'],
+                    'admission_id': admission_id}
+                live.event_stream.publish(ref.session_id, {}, event_type='message.start')
             try:
                 response = await execute_admission(self, ref, row)
                 outcome = 'completed'
             except Exception:
                 response = 'The admitted turn failed.'
                 outcome = 'failed'
-            settled = settle_session_input(self.db, epoch=self.epoch, admission_id=admission_id,
-                                           generation=row['generation'], outcome=outcome)
-            live.controls.snapshot(ref.session_id, None)
-            live.event_stream.publish(ref.session_id, {
-                'text': response, 'content': response, 'admission_id': admission_id,
-                'outcome': settled['outcome']})
+            with live.event_stream.lock:
+                settled = settle_session_input(self.db, epoch=self.epoch, admission_id=admission_id,
+                                               generation=row['generation'], outcome=outcome)
+                live.controls.snapshot(ref.session_id, None)
+                live.event_stream.publish(ref.session_id, {
+                    'text': response, 'content': response, 'admission_id': admission_id,
+                    'outcome': settled['outcome']})
             waiter = self.waiters.pop(admission_id, None)
             if waiter is not None and not waiter.done():
                 waiter.set_result(response)

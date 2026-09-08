@@ -72,13 +72,18 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
         await b.resume(ref, {})
         assert 'replay_epoch' in initial and 'last_sequence' in initial, 'resume omits replay watermark'
         await turn(1)
-        frames = [await asyncio.to_thread(peer.frames.get, True, 5) for peer in peers]
+        frames = []
+        for peer in peers:
+            observed = []
+            while not observed or observed[-1]['params']['type'] != 'message.complete':
+                observed.append(await asyncio.to_thread(peer.frames.get, True, 5))
+            frames.append(observed)
         assert frames[0] == frames[1]
         replay = (await since(initial['replay_epoch'], initial['last_sequence']))['result']
         assert not replay['snapshot_required']
-        assert replay['events'] == [frames[0]['params']]
+        assert replay['events'] == [frame['params'] for frame in frames[0]]
         current = await b.resume(ref, {})
-        assert current['last_sequence'] == frames[0]['params']['seq']
+        assert current['last_sequence'] == frames[0][-1]['params']['seq']
         assert len(authority.sessions['shared'].subscribers) == 2
         assert (await since('old-owner', 0))['result']['snapshot_required']
         assert (await since(current['replay_epoch'], current['last_sequence'] + 1))['result']['snapshot_required']
@@ -96,8 +101,9 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
         refreshed = await b.resume(ref, {})
         await turn(5)
         after = (await since(refreshed['replay_epoch'], refreshed['last_sequence']))['result']
-        assert not after['snapshot_required'] and len(after['events']) == 1
-        assert after['events'][0]['payload']['text'] == '5'
+        assert not after['snapshot_required']
+        assert after['events'][-1]['type'] == 'message.complete'
+        assert after['events'][-1]['payload']['text'] == '5'
         before_race = await b.resume(ref, {})
         stamp = event_replay._stamp_event
         def evict_then_stamp(frame):
