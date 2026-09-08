@@ -31,6 +31,7 @@ def spawn_unmanaged_gateway(profile_home: Path, *, deadline: float) -> subproces
     # Profile selection is the explicit home, not the invoking client's display
     # name. Runtime policy comes from that profile, never a launcher's --yolo.
     env.pop("HERMES_PROFILE", None)
+    env.pop("HERMES_YOLO_MODE", None)
     remaining(deadline)
     logs = home / "logs"
     logs.mkdir(parents=True, exist_ok=True)

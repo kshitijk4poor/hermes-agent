@@ -167,6 +167,38 @@ def test_unmanaged_child_uses_explicit_home_and_survives_launcher_exit(tmp_path,
 
 
 @pytest.mark.linux_only
+def test_unmanaged_runtime_does_not_inherit_client_yolo(tmp_path, monkeypatch):
+    from hermes_cli import gateway_runtime_start as start
+
+    home = tmp_path / 'policy-home'
+    home.mkdir(mode=0o700)
+    witness = home / 'policy.json'
+    executable = tmp_path / 'owned-interpreter'
+    repo = Path(__file__).resolve().parents[2]
+    executable.write_text(
+        '#!' + sys.executable + '\nimport json, os, sys\nfrom pathlib import Path\n'
+        + f'sys.path.insert(0, {str(repo)!r})\n'
+        + 'from tools import approval\n'
+        + f'Path({str(witness)!r}).write_text(json.dumps('
+        + "{'yolo': approval._YOLO_MODE_FROZEN, 'sentinel': os.environ.get('RUNTIME_TEST_SENTINEL')}))\n",
+        encoding='utf-8',
+    )
+    executable.chmod(0o700)
+    monkeypatch.setattr(sys, 'executable', str(executable))
+    monkeypatch.setenv('HERMES_YOLO_MODE', '1')
+    monkeypatch.setenv('RUNTIME_TEST_SENTINEL', 'retained')
+    child = start.spawn_unmanaged_gateway(home, deadline=time.monotonic() + 5)
+    try:
+        assert child.wait(timeout=10) == 0
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+    assert json.loads(witness.read_text()) == {'yolo': False, 'sentinel': 'retained'}
+    assert os.environ['HERMES_YOLO_MODE'] == '1'
+
+
+@pytest.mark.linux_only
 def test_reserved_profile_without_pid_or_control_is_never_absent(tmp_path):
     from gateway.runtime_ownership import ProfileOwnership
     from hermes_cli.gateway_runtime import discover_gateway_endpoint
