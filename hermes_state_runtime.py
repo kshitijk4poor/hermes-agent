@@ -338,6 +338,9 @@ def adopt_worker_execution(db, *, epoch: int, execution_id: str, session_id: str
         row = _worker_assignment(conn, execution_id, session_id, generation)
         if not hmac.compare_digest(row['adoption_digest'], digest):
             raise RuntimeStoreError('permission_denied')
+        conn.execute("""UPDATE session_admissions SET owner_epoch=?,status='started'
+            WHERE target_session_id=? AND generation=? AND owner_epoch=?
+            AND status IN ('started','unknown')""", (epoch, session_id, generation, row['owner_epoch']))
         conn.execute("UPDATE worker_executions SET owner_epoch=?,status='running' WHERE execution_id=?", (epoch, execution_id))
         return _worker_public(_worker_assignment(conn, execution_id, session_id, generation))
     return db._execute_write(write)
