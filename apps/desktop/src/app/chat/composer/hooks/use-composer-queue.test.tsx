@@ -97,6 +97,25 @@ describe('useComposerQueue park integration', () => {
     } finally { $connection.set(null) }
   })
 
+  it('does not clear the next session draft when a queue ACK arrives after navigation', async () => {
+    $connection.set({ mode: 'local', wsUrl: 'ws://localhost/api/ws?native_dial=unminted' } as HermesConnection)
+    let accept!: (value: boolean) => void
+    const clearDraft = vi.fn()
+    const draftRef = { current: 'same text' }
+    const hook = renderHook(({ key }) => useComposerQueue({
+      activeQueueSessionKey: key, attachments: [], busy: true, clearDraft, draftRef,
+      focusInput: () => undefined, loadIntoComposer: () => undefined, onCancel: vi.fn(), onSteer: undefined,
+      onSubmit: () => new Promise<boolean>(resolve => { accept = resolve }), queueEditRef: { current: null }, queueSessionKey: key, sessionId: key
+    }), { initialProps: { key: 'outgoing' } })
+    try {
+      let pending: boolean | Promise<boolean> = false
+      act(() => { pending = hook.result.current.queueCurrentDraft() })
+      hook.rerender({ key: 'incoming' })
+      await act(async () => { accept(true); await pending })
+      expect(clearDraft).not.toHaveBeenCalled()
+    } finally { $connection.set(null) }
+  })
+
   it('reschedules rejected foreground drains to a bounded stop and keeps manual recovery', async () => {
     vi.useFakeTimers()
 

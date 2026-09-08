@@ -99,6 +99,8 @@ export function useComposerQueue({
 
   const editingQueuedPrompt = queueEdit ? (queuedPrompts.find(entry => entry.id === queueEdit.entryId) ?? null) : null
 
+  const currentQueueKeyRef = useRef(activeQueueSessionKey)
+  currentQueueKeyRef.current = activeQueueSessionKey
   const prevQueueKeyRef = useRef(activeQueueSessionKey)
   const drainingQueueRef = useRef(false)
   const drainFailuresRef = useRef(new Map<string, number>())
@@ -197,7 +199,10 @@ export function useComposerQueue({
         sessionId: sessionId ?? null, storedSessionId: activeQueueSessionKey
       })).then(accepted => {
         if (accepted !== true) { return false }
-        if (draftRef.current === text) { clearDraft(); scope.attachments.clear() }
+        if (currentQueueKeyRef.current === activeQueueSessionKey && draftRef.current === text) {
+          clearDraft()
+          scope.attachments.removeOccurrences(attachments)
+        }
         return true
       }).catch(() => false)
     }
