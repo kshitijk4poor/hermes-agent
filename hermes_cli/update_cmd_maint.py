@@ -394,19 +394,6 @@ def _print_verified_update_completion(message: str) -> bool:
     return False
 
 
-def _clear_stale_sqlite_sidecars(db_path: Path) -> None:
-    """Delete -wal/-shm/-journal next to *db_path*, immediately before overwriting it with a
-    snapshot image.
-
-    Snapshots are checkpointed ``sqlite3.backup()`` images with no WAL; copying replaces only
-    the main file, so a leftover WAL from the OLD database would be replayed over the fresh
-    image on next open (passes integrity_check while serving old contents). Safe because the
-    caller has already declared that database corrupt.
-    """
-    for suffix in ("-wal", "-shm", "-journal"):
-        db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
-
-
 def _print_update_summary(*, node_failures: list, desktop_build_ok: bool, pre_update_version: str | None) -> bool:
     """Historical updater hook; old soft-build results cannot establish completion."""
     from hermes_cli._old_updater import stop_for_relaunch
