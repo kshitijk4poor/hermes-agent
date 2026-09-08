@@ -28,6 +28,23 @@ def control(home, verb, params=None):
     return reply['result']
 
 
+@pytest.fixture
+def model_peer():
+    from http.server import ThreadingHTTPServer
+    import threading
+    from tests.gateway.fixtures.shared_authority_peer import ModelPeer
+    server = ThreadingHTTPServer(('127.0.0.1', 0), ModelPeer)
+    server.requests, server.metadata_requests = [], []
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield server
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 async def handshake(home, descriptor):
     url = descriptor['api_origin'].replace('http:', 'ws:') + '/api/ws'
     with pytest.raises(InvalidStatus):
@@ -46,22 +63,54 @@ async def handshake(home, descriptor):
                 break
         assert reply['error']['message'] == 'not_found', reply
         assert ws.subprotocol == 'hermes-gateway-v1'
+        async def rpc(socket, method, **params):
+            await socket.send(json.dumps({'jsonrpc': '2.0', 'id': method, 'method': method, 'params': params}))
+            async with asyncio.timeout(15):
+                while True:
+                    result = json.loads(await socket.recv())
+                    if result.get('id') == method:
+                        assert 'result' in result, result
+                        return result['result']
+
+        created = await rpc(ws, 'session.create', request_id='ordinary-launch', source='cli')
+        sid = created['session_id']
+        assert sid == created['stored_session_id']
+        admitted = await rpc(ws, 'prompt.submit', session_id=sid, input_id='ordinary-input', text='WS_SHARED')
+        assert admitted['status'] == 'queued', admitted
+    # A fresh control ticket and socket must see the same committed execution.
+    fresh = control(home, 'session-ticket', binding)
+    async with connect(url, subprotocols=['hermes-gateway-v1',
+                                        'hermes-gateway-ticket.' + fresh['ticket']]) as viewer:
+        async with asyncio.timeout(25):
+            while True:
+                snapshot = await rpc(viewer, 'session.resume', session_id=sid)
+                if 'LOCAL_ACK_WS_SHARED' in json.dumps(snapshot.get('messages', [])):
+                    break
+                await asyncio.sleep(.05)
+        assert snapshot['stored_session_id'] == sid
+        print(json.dumps({'ordinary_created_session': sid, 'reply_persisted': True}))
     with pytest.raises(InvalidStatus):
         async with connect(url, subprotocols=protocols):
             pass
 
 
 @pytest.mark.linux_only
-def test_normal_entrypoint_earns_authenticated_authority_readiness(tmp_path):
+def test_normal_entrypoint_earns_authenticated_authority_readiness(tmp_path, model_peer):
     home = tmp_path / 'state'
     home.mkdir(mode=0o700)
     user = tmp_path / 'user'
     user.mkdir()
-    (home / 'config.yaml').write_text('gateway:\n  multiplex_profiles: false\nauxiliary:\n  title_generation:\n    enabled: false\n')
+    model_url = f'http://127.0.0.1:{model_peer.server_port}/v1'
+    (home / 'config.yaml').write_text(json.dumps({
+        'gateway': {'multiplex_profiles': False},
+        'model': {'provider': 'custom', 'default': 'local-wire-stub', 'base_url': model_url},
+        'auxiliary': {'title_generation': {'enabled': False}},
+    }))
     root = Path(__file__).resolve().parents[2]
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
-               PYTHONPATH=str(root), PYTHONUNBUFFERED='1')
+               PYTHONPATH=str(root), PYTHONUNBUFFERED='1',
+               OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=model_url)
     with (tmp_path / 'gateway.log').open('w+') as log:
         process = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
@@ -87,6 +136,7 @@ def test_normal_entrypoint_earns_authenticated_authority_readiness(tmp_path):
             assert descriptor['served_profiles'] == [{'profile_id': str(home), 'home': str(home)}]
             assert 'session-authority-v1' in descriptor['capabilities']
             asyncio.run(handshake(home, descriptor))
+            assert len(model_peer.requests) == 1, model_peer.requests
             process.send_signal(signal.SIGINT)
             assert process.wait(timeout=20) == 0
             assert not (home / 'gateway.pid').exists()
