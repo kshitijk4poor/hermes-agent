@@ -10,10 +10,23 @@ their existing authentication paths; failure never creates a local replacement.
 
 `gateway ensure --json` returns a credential-free endpoint. Native main requests
 private `session-ticket` grants with exactly `profile_id`, `instance_id` and
-`purpose`. WebSocket grants use `interactive`; JSON HTTP requests use
+`purpose`. WebSocket grants use `interactive`; JSON and file HTTP requests use
 `native-http`. Each HTTP retry mints a fresh grant and sends it only in
 `X-Hermes-Gateway-Ticket`, scoped to the endpoint's exact origin. HTTP credentials
 are not stored in the renderer or attached to URLs/public connection descriptors.
+
+Streaming `/api/fs/download` and its 404-only `/api/fs/read-data-url` fallback
+use the same captured backend descriptor and session/profile selectors. Each
+connection retry and fallback request obtains a new grant. Downloads do not
+follow redirects or repeat the save dialog/body write after a stream failure.
+The native grant remains primary-profile-only; rejected profile selectors do
+not fall back to a remote credential.
+
+Local previews and seekable `hermes-media://stream` playback read the native
+filesystem, not gateway HTTP. Remote media remains on its existing token/OAuth
+transport (`/api/files/stream`); remote data-URL previews use the JSON IPC API.
+Native HTTP grants are never attached to arbitrary image URLs, web previews,
+provider voice endpoints, or remote media requests.
 
 ## Session and input identities
 
@@ -48,7 +61,7 @@ RPC adapter and do not yet provide universal revision fencing.
 
 The canonical authority currently exposes a narrower RPC set than the full
 Desktop application. Unsupported model/tool/slash/session-management RPCs,
-cross-window pending-input text projection, non-JSON download authentication,
+cross-window pending-input text projection,
 Windows validated named-pipe bootstrap, and WSL topology require further
 integration. Successful authenticated transport is not proof of a usable mounted
 chat or native journal retirement. End-to-end acceptance must compose the HTTP

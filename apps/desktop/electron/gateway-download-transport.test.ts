@@ -7,6 +7,34 @@ import http from 'node:http'
 import { downloadViaTokenToFile } from './gateway-download-transport'
 import { destroyKeepaliveAgents } from './api-transport'
 
+test('download transport never follows redirects or retries after the save phase begins', async () => {
+  let requests = 0
+  let finalized = 0
+  const server = http.createServer((req, res) => {
+    requests++
+    if (req.url === '/redirect') { res.writeHead(302, { Location: '/leak' }); res.end(); return }
+    res.end('bytes')
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`
+  const finish = async (res: http.IncomingMessage) => {
+    finalized++
+    res.resume()
+    throw Object.assign(new Error('write ECONNRESET'), { code: 'ECONNRESET' })
+  }
+  try {
+    await expect(downloadViaTokenToFile(url + '/redirect', 'remote-static', {}, finish)).rejects.toThrow('redirect')
+    expect(finalized).toBe(0)
+    expect(requests).toBe(1)
+    await expect(downloadViaTokenToFile(url + '/file', 'remote-static', {}, finish)).rejects.toThrow('write ECONNRESET')
+    expect(finalized).toBe(1)
+    expect(requests).toBe(2)
+  } finally {
+    destroyKeepaliveAgents()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
+
 test.skipIf(process.platform === 'win32')('download retries mint a new private grant for every wire attempt and preserve remote auth', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'download-auth-'))
   const grants: string[] = []
