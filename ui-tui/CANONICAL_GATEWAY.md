@@ -65,8 +65,10 @@ Optional mode argument after the receipt directory:
 - `startup`: absent owner → native Ink ensure → one fresh TUI-policy session and reply.
 - `launcher`: the same fresh path through `python -m hermes_cli.main --tui chat -q ...`,
   using the supported prebuilt `HERMES_TUI_DIR` path (no dependency install).
-- `stop` / `stop-control`: hold the loopback inference stream before a harmless
-  fixture-owned tool effect. Native Ctrl+C must receive the real generation-bearing
+- `stop` / `stop-control` / `stop-launcher`: hold the loopback inference stream before a harmless
+  fixture-owned tool effect. `stop-launcher` starts the viewer through the Python
+  launcher and discovers its one fresh TUI-policy session, without seeding one.
+  Native Ctrl+C must receive the real generation-bearing
   acknowledgement and suppress that effect; the no-Stop control must execute it.
   Both then type a fresh prompt and require rendered and persisted completion.
   These modes run the ordinary daemon entry via `native_stop_probe.py`, whose

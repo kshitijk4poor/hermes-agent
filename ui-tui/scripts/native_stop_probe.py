@@ -59,6 +59,21 @@ class StopPeer(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+async def created_session_id(grant, rpc, connect):
+    g = grant()
+    async with connect(g['url'], subprotocols=g['protocols']) as ws:
+        async with asyncio.timeout(15):
+            while True:
+                inventory = await rpc(ws, 'session.list')
+                if inventory['sessions']:
+                    assert len(inventory['sessions']) == 1, inventory
+                    sid = inventory['sessions'][0]['session_id']
+                    info = await rpc(ws, 'session.info', session_id=sid)
+                    assert info['source'] == 'tui', info
+                    return sid
+                await asyncio.sleep(.05)
+
+
 def exercise(kind, model, first, sid, grant, rpc, connect, home, receipts, destination):
     def wait(predicate, seconds=15):
         deadline = time.monotonic() + seconds
@@ -71,7 +86,7 @@ def exercise(kind, model, first, sid, grant, rpc, connect, home, receipts, desti
 
     wait(lambda: model.blocked.is_set() and b'STOP_RUNNING' in first[2])
     control = home / 'native-control-receipts.jsonl'
-    if kind == 'stop':
+    if kind in ('stop', 'stop-launcher'):
         os.write(first[1], b'\x03')
         wait(lambda: control.exists())
         wire = [json.loads(line) for line in control.read_text().splitlines()]

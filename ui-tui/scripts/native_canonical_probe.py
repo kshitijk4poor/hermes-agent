@@ -37,7 +37,7 @@ def run():
         user = base / 'user'
         user.mkdir()
         peer_class = ModelPeer
-        stopping = kind in ('stop', 'stop-control')
+        stopping = kind in ('stop', 'stop-control', 'stop-launcher')
         if stopping:
             from native_stop_probe import StopPeer
             peer_class = StopPeer
@@ -109,7 +109,7 @@ def run():
             if query:
                 launch_env['HERMES_TUI_QUERY'] = query
             argv = ['node', str(ROOT / 'ui-tui/dist/entry.js')]
-            if kind == 'launcher':
+            if kind in ('launcher', 'stop-launcher'):
                 # Exercise the actual parser and Python launcher, using the
                 # supported prebuilt path so shared dependencies stay read-only.
                 launch_env.update(HERMES_TUI_DIR=str(ROOT / 'ui-tui'), TMPDIR=str(base))
@@ -178,8 +178,12 @@ def run():
             else:
                 raise AssertionError('daemon bootstrap readiness timeout')
             receipts['instance_id'] = g['instance_id']
-            sid = asyncio.run(seed())
+            sid = None if kind == 'stop-launcher' else asyncio.run(seed())
             first = launch('first', sid, 'WS_SHARED')
+            if kind == 'stop-launcher':
+                from native_stop_probe import created_session_id
+                sid = asyncio.run(created_session_id(grant, rpc, connect))
+                receipts.update(session_id=sid, python_launcher=True)
             if stopping:
                 from native_stop_probe import exercise
                 exercise(kind, model, first, sid, grant, rpc, connect, home, receipts, Path(sys.argv[1]))
