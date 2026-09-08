@@ -128,6 +128,20 @@ def test_safe_restore_refuses_unreadable_canonical_epoch(tmp_path, caplog):
     assert (dst.read_bytes(), src.read_bytes()) == before
     assert "separate output" in caplog.text
 
+    # Public whole-profile restore must not report success from an unrelated
+    # config copy while refusing the canonical database.
+    dst.unlink()
+    _make_db(dst, "snapshot-good")
+    config = tmp_path / "config.yaml"
+    config.write_text("model: snapshot-model\n")
+    snapshot = backup_mod.create_quick_snapshot(hermes_home=tmp_path)
+    assert snapshot is not None
+    config.write_text("model: current-model\n")
+    dst.write_bytes(b"unreadable canonical epoch")
+    before = config.read_bytes(), dst.read_bytes()
+    assert backup_mod.restore_quick_snapshot(snapshot, hermes_home=tmp_path) is False
+    assert (config.read_bytes(), dst.read_bytes()) == before
+
 
 def test_update_autorestore_still_works_without_holder(tmp_path):
     dst = tmp_path / "state.db"

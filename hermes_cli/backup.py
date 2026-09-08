@@ -515,6 +515,17 @@ def _restore_epoch(path: Path) -> int:
         return int(row[0]) if row else 0
 
 
+def _restore_destination_epoch(dst: Path) -> int:
+    try:
+        return _restore_epoch(dst)
+    except (OSError, sqlite3.Error, ValueError) as exc:
+        raise OSError(
+            f"Cannot read the canonical runtime epoch at {dst}; refusing in-place restore. "
+            "Use `hermes sessions recover --source <snapshot> --output <separate-path>` "
+            "to salvage transcripts into a separate output."
+        ) from exc
+
+
 @contextmanager
 def _restore_epoch_source(src: Path, dst: Path):
     """Stage an epoch floor into the image BEFORE publishing it atomically.
@@ -529,14 +540,7 @@ def _restore_epoch_source(src: Path, dst: Path):
     if dst.name != 'state.db' and dst.resolve().name != 'state.db':
         yield src
         return
-    try:
-        floor = _restore_epoch(dst)
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        raise OSError(
-            f"Cannot read the canonical runtime epoch at {dst}; refusing in-place restore. "
-            "Use `hermes sessions recover --source <snapshot> --output <separate-path>` "
-            "to salvage transcripts into a separate output."
-        ) from exc
+    floor = _restore_destination_epoch(dst)
     if floor <= _restore_epoch(src):
         yield src
         return
@@ -1780,6 +1784,17 @@ def _restore_quick_snapshot_exclusive(snapshot_id: str, home: Path) -> bool:
         if dst.suffix == '.db' and _is_within(dst, home_res):
             homes.update([dst.absolute().parent, dst.resolve().parent])
     with exclusive_maintenance(homes):
+        # Epoch safety is a whole-profile preflight: copying config first would
+        # both partially roll back the profile and report a refused DB as success.
+        for rel in meta.get("files", {}):
+            src, dst = snap_dir / rel, home / rel
+            if (src.exists() and _is_within(src, snap_res) and _is_within(dst, home_res)
+                    and (dst.name == "state.db" or dst.resolve().name == "state.db")):
+                try:
+                    _restore_destination_epoch(dst)
+                except OSError as exc:
+                    logger.error("%s", exc)
+                    return False
         restored = 0
         for rel in meta.get("files", {}):
             src = snap_dir / rel
