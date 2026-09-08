@@ -347,8 +347,7 @@ def _worker_assignment(conn, execution_id, session_id, generation):
     if row['session_id'] != session_id:
         raise RuntimeStoreError('permission_denied')
     if (type(generation) is not int or row['generation'] != generation
-            or _session(conn, session_id)['runtime_generation'] != generation
-            or row['status'] == 'terminal'):
+            or _session(conn, session_id)['runtime_generation'] != generation):
         raise RuntimeStoreError('stale_generation')
     return row
 
@@ -394,6 +393,8 @@ def adopt_worker_execution(db, *, epoch: int, execution_id: str, session_id: str
     def write(conn):
         _epoch(conn, epoch)
         row = _worker_assignment(conn, execution_id, session_id, generation)
+        if row['status'] == 'terminal':
+            raise RuntimeStoreError('stale_generation')
         if not hmac.compare_digest(row['adoption_digest'], digest):
             raise RuntimeStoreError('permission_denied')
         conn.execute("""UPDATE session_admissions SET owner_epoch=?,status='started'
@@ -425,6 +426,8 @@ def persist_worker_message(db, *, epoch: int, execution_id: str, session_id: str
             if old['payload_digest'] != digest:
                 raise RuntimeStoreError('admission_conflict')
             return json.loads(old['result_json'])
+        if row['status'] == 'terminal':
+            raise RuntimeStoreError('stale_generation')
         if sequence != row['last_sequence'] + 1:
             raise RuntimeStoreError('invalid_params')
         db._check_transcript_write_guards(conn, session_id, None)
@@ -445,6 +448,8 @@ def finish_worker_execution(db, *, epoch: int, execution_id: str, session_id: st
         row = _worker_assignment(conn, execution_id, session_id, generation)
         if row['owner_epoch'] != epoch:
             raise RuntimeStoreError('stale_epoch')
+        if row['status'] == 'terminal':
+            return _worker_public(row)
         conn.execute("UPDATE worker_executions SET status='terminal' WHERE execution_id=?", (execution_id,))
         result = _worker_public(row)
         result['status'] = 'terminal'

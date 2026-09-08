@@ -38,10 +38,27 @@ def test_worker_receipts_require_exact_sequence_assignment_and_adoption(tmp_path
         assert adopted['owner_epoch'] == new_epoch and 'adoption_digest' not in adopted
         assert rt.persist_worker_message(db, **(args | {'epoch': new_epoch})) == result
         rt.persist_worker_message(db, **(args | {'epoch': new_epoch, 'sequence': 2, 'content': 'next'}))
-        rt.finish_worker_execution(db, epoch=new_epoch, **assignment)
+        finished = rt.finish_worker_execution(db, epoch=new_epoch, **assignment)
+        db.close()
+        db = SessionDB(db_path=tmp_path / 'state.db')
+        before = db._conn.total_changes
+        assert rt.finish_worker_execution(db, epoch=new_epoch, **assignment) == finished
+        assert rt.persist_worker_message(db, **(args | {'epoch': new_epoch})) == result
+        assert db._conn.total_changes == before
+        assert 'adoption_digest' not in finished
+        with pytest.raises(rt.RuntimeStoreError, match='admission_conflict'):
+            rt.persist_worker_message(db, **(args | {'epoch': new_epoch, 'content': 'changed'}))
+        with pytest.raises(rt.RuntimeStoreError, match='stale_generation'):
+            rt.adopt_worker_execution(db, epoch=new_epoch, **assignment, adoption_secret='private-fixture')
         with pytest.raises(rt.RuntimeStoreError, match='stale_generation'):
             rt.persist_worker_message(db, **(args | {'epoch': new_epoch, 'sequence': 3}))
         assert [r['content'] for r in db.get_messages('s')] == ['kept output', 'next']
+        rt.admit_session_input(db, epoch=new_epoch, principal_id='human', session_id='s', request_id='next', payload={})
+        assert rt.claim_session_input(db, epoch=new_epoch, session_id='s')['generation'] > assignment['generation']
+        with pytest.raises(rt.RuntimeStoreError, match='stale_generation'):
+            rt.persist_worker_message(db, **(args | {'epoch': new_epoch}))
+        with pytest.raises(rt.RuntimeStoreError, match='stale_generation'):
+            rt.finish_worker_execution(db, epoch=new_epoch, **assignment)
     finally:
         db.close()
 
