@@ -1827,11 +1827,8 @@ _CHAT_PASSTHROUGH = (
 def cmd_chat(args):
     """Run interactive chat CLI."""
     if not _resolve_use_tui(args):
-        # Consent is a frontend admission guard, not a property of the executor.
-        # Run it before discovery or session creation, including --yolo launches.
-        _confirm_startup_expensive_model_override(args)
-        from hermes_cli.gateway_chat import launch_from_args
-        sys.exit(launch_from_args(args))
+        from hermes_cli.gateway_chat_startup import launch_gateway_chat
+        sys.exit(launch_gateway_chat(args))
     _apply_safe_mode(args)
     _apply_user_config_bypass(args)
     _guard_noninteractive_user_config(args)
@@ -3164,9 +3161,8 @@ def _run_oneshot_from_args(args) -> None:
 
     Bypasses cli.py entirely; the transport launcher never returns.
     """
-    _confirm_startup_expensive_model_override(args)
-    from hermes_cli.gateway_chat import launch_from_args
-    sys.exit(launch_from_args(args))
+    from hermes_cli.gateway_chat_startup import launch_gateway_chat
+    sys.exit(launch_gateway_chat(args))
 
 
 def _light_chat_parser():
