@@ -41,8 +41,26 @@ bootstrap, cold-owner resume and native Windows/macOS QA remain outstanding.
 The client preserves an explicit remote URL's existing authentication mechanism;
 it does not acquire or mint remote credentials.
 
-`tests/hermes_cli/test_gateway_chat_native.py` exercises native tmux/PTTY classic
+`tests/hermes_cli/test_gateway_chat_native.py` exercises native tmux/PTY classic
 fresh input, detach, persisted-ID resume and one-shot through the ordinary daemon
 with a loopback model, isolated HOME/HERMES_HOME and caller cwd. Constructor
-instrumentation records no client AIAgent, SessionDB or GatewayRunner. This is not
-yet evidence of caller-cwd execution parity on an older gateway.
+instrumentation records no client AIAgent, SessionDB or GatewayRunner. The test
+also denies an invalid approval choice, then reconnects and consents before a real
+terminal effect on an owned fixture. Stale-control/active-Stop native coverage and
+native clarify interaction remain separate acceptance work.
+
+For two-checkout compatibility testing, load the narrowly scoped pytest option
+plugin and specify the disposable gateway peer's checkout (the normal runner's
+hermetic environment deliberately removes arbitrary environment overrides):
+
+```sh
+scripts/run_tests.sh -j 1 --file-retries 0 tests/hermes_cli/test_gateway_chat_native.py \
+  -p tests.hermes_cli.gateway_client_options --client-test-runtime-root=/path/to/runtime-checkout
+```
+
+The receipt explicitly reports `caller_cwd_effect_verified`. On a cwd-capable
+runtime the native client submits model/toolsets/cwd and the real terminal writes
+its actual execution directory into an owned temporary receipt. On an older
+runtime, explicit `--in` must reject without that effect. Do not count the latter
+as cwd parity. Both client and daemon use isolated test homes; this option does
+not install a service or alter the selected checkout.
