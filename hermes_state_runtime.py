@@ -441,6 +441,107 @@ def persist_worker_message(db, *, epoch: int, execution_id: str, session_id: str
     return db._execute_write(write)
 
 
+
+
+_MESSAGE_FIELDS = frozenset({
+    'role', 'content', 'tool_name', 'tool_calls', 'tool_call_id', 'token_count',
+    'finish_reason', 'reasoning', 'reasoning_content', 'reasoning_details',
+    'codex_reasoning_items', 'codex_message_items', 'platform_message_id', 'message_id',
+    'observed', 'effect_disposition', '_compressed_summary', 'timestamp', 'api_content',
+    'display_kind', 'display_metadata', '_row_id', '_canonical_content',
+})
+
+
+def _worker_append(db, conn, session_id, payload):
+    if set(payload) - {'messages', 'turn_lease_holder'} or 'messages' not in payload:
+        raise RuntimeStoreError('invalid_params')
+    messages = payload['messages']
+    if not isinstance(messages, list) or len(messages) > 1000:
+        raise RuntimeStoreError('invalid_params')
+    for msg in messages:
+        if (not isinstance(msg, dict) or set(msg) - _MESSAGE_FIELDS
+                or msg.get('role') not in ('user', 'assistant', 'system', 'tool')):
+            raise RuntimeStoreError('invalid_params')
+        # Existing row annotations can adopt only rows in THIS transcript.
+        if '_row_id' in msg and not conn.execute(
+                'SELECT 1 FROM messages WHERE id=? AND session_id=?',
+                (msg['_row_id'], session_id)).fetchone():
+            raise RuntimeStoreError('permission_denied')
+    holder = payload.get('turn_lease_holder')
+    if holder is not None:
+        _text(holder)
+    count = db._append_messages_in_transaction(conn, session_id, messages, turn_lease_holder=holder)
+    return {'count': count, 'annotations': [
+        {key: msg[key] for key in ('_row_id', '_canonical_content') if key in msg} for msg in messages]}
+
+
+def _worker_turn(db, conn, session_id, payload, operation):
+    import time
+    from hermes_state_compression import _claim_lease_row
+    from hermes_state import _compression_lock_holder_process_is_dead
+    allowed = {'holder'} if operation == 'turn.release' else {'holder', 'ttl_seconds'}
+    if set(payload) != allowed:
+        raise RuntimeStoreError('invalid_params')
+    holder = _text(payload['holder'])
+    ttl = payload.get('ttl_seconds', 300)
+    if type(ttl) not in (float, int) or not 0.1 <= ttl <= 3600:
+        raise RuntimeStoreError('invalid_params')
+    key = db._session_turn_lease_key_on_conn(conn, session_id)
+    now = time.time()
+    if operation == 'turn.acquire':
+        value = _claim_lease_row(conn, 'session_turn_leases', 'conversation_id', key,
+            holder, now, now + ttl,
+            lambda h, e: float(e) <= now or _compression_lock_holder_process_is_dead(h))[0]
+    elif operation == 'turn.renew':
+        value = conn.execute('UPDATE session_turn_leases SET expires_at=? WHERE conversation_id=? AND holder=?',
+                             (now + ttl, key, holder)).rowcount > 0
+    else:
+        conn.execute('DELETE FROM session_turn_leases WHERE conversation_id=? AND holder=?', (key, holder))
+        value = None
+    return {'value': value}
+
+
+def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
+                            sequence, operation, payload):
+    """One closed durable mutation and receipt; never call a self-committing API here."""
+    handlers = {
+        'transcript.append': _worker_append,
+        **{name: (lambda db, conn, sid, p, op=name: _worker_turn(db, conn, sid, p, op))
+           for name in ('turn.acquire', 'turn.renew', 'turn.release')},
+    }
+    if type(sequence) is not int or sequence < 1 or not isinstance(operation, str) or operation not in handlers:
+        raise RuntimeStoreError('invalid_params')
+    encoded = _json(payload)
+    if len(encoded.encode('utf-8')) > 4 * 1024 * 1024:
+        raise RuntimeStoreError('invalid_params')
+    digest = admission_fingerprint(canonical_target=session_id,
+                                  payload={'operation': operation, 'payload': json.loads(encoded)})
+    def write(conn):
+        _epoch(conn, epoch)
+        row = _worker_assignment(conn, execution_id, session_id, generation)
+        if row['owner_epoch'] != epoch:
+            raise RuntimeStoreError('stale_epoch')
+        old = conn.execute('SELECT * FROM worker_receipts WHERE execution_id=? AND sequence=?',
+                           (execution_id, sequence)).fetchone()
+        if old is not None:
+            if old['payload_digest'] != digest:
+                raise RuntimeStoreError('admission_conflict')
+            return json.loads(old['result_json'])
+        if row['status'] not in ('registered', 'running'):
+            raise RuntimeStoreError('stale_generation')
+        if sequence != row['last_sequence'] + 1:
+            raise RuntimeStoreError('invalid_params')
+        # Each SQLite retry gets fresh rows; rolled-back annotations must not escape.
+        result = handlers[operation](db, conn, session_id, json.loads(encoded))
+        conn.execute('INSERT INTO worker_receipts(execution_id,sequence,payload_digest,result_json) VALUES(?,?,?,?)',
+                     (execution_id, sequence, digest, _json(result)))
+        conn.execute("UPDATE worker_executions SET last_sequence=?,status='running' WHERE execution_id=?",
+                     (sequence, execution_id))
+        conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (session_id,))
+        return result
+    return db._execute_write(write, patience_s=db._TRANSCRIPT_WRITE_PATIENCE_S)
+
+
 def finish_worker_execution(db, *, epoch: int, execution_id: str, session_id: str,
                             generation: int) -> dict:
     def write(conn):
