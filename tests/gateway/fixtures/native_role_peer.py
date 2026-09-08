@@ -109,8 +109,37 @@ async def probe(peer):
     await send(event('wrong-guild', scope='999'))
     assert len(list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False)) == 1
     assert len(peer.requests) == 1
+    if sys.argv[1] == 'positive':
+        # Independent user/pairing grants survive membership revocation.
+        calls = guild.calls
+        os.environ['DISCORD_ALLOWED_USERS'] = '200'
+        await send(event('direct-user'))
+        assert len(peer.requests) == 2 and guild.calls == calls
+        os.environ.pop('DISCORD_ALLOWED_USERS')
+        code = runner.pairing_store.generate_code('discord', '200')
+        assert runner.pairing_store.approve_code('discord', code)['user_id'] == '200'
+        await send(event('paired-user'))
+        assert len(peer.requests) == 3 and guild.calls == calls
+        assert runner.pairing_store.revoke('discord', '200')
+        guild.roles = [SimpleNamespace(id=700)]
+
+        def dm(identity):
+            return MessageEvent(text='ROLE_DM_' + identity, message_id=identity,
+                                source=adapter.build_source(chat_id='400', chat_type='dm',
+                                                            user_id='200', role_authorized=True))
+        await send(dm('default-deny'))
+        assert len(peer.requests) == 3 and guild.calls == calls
+        config = Path(os.environ['HERMES_HOME'], 'config.yaml')
+        original = config.read_text()
+        config.write_text(original + '\ndiscord:\n  dm_role_auth_guild: 100\n')
+        await send(dm('opted-in'))
+        assert len(peer.requests) == 4 and guild.calls > calls
+        config.write_text(original + '\ndiscord:\n  dm_role_auth_guild: 999\n')
+        await send(dm('wrong-guild'))
+        assert len(peer.requests) == 4
+        config.write_text(original)
     print(json.dumps({'model_calls': len(peer.requests), 'fresh_fetches': guild.calls,
-                      'outcome': rows[0]['outcome'], 'negative': ['revoked', 'wrong-guild']}))
+                      'outcome': rows[0]['outcome'], 'negative': ['revoked', 'wrong-guild']}), flush=True)
 
 
 if __name__ == '__main__':
