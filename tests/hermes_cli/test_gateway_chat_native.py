@@ -26,6 +26,7 @@ def test_native_classic_fresh_resume_and_oneshot(tmp_path, model_peer):
     model_url = f"http://127.0.0.1:{model_peer.server_port}/v1"
     (home / "config.yaml").write_text(json.dumps({
         "gateway": {"multiplex_profiles": False},
+        "approvals": {"mode": "manual", "timeout": 60},
         "model": {"provider": "custom", "default": "local-wire-stub", "base_url": model_url},
         "auxiliary": {"title_generation": {"enabled": False}},
     }))
@@ -118,7 +119,36 @@ finally:
             assert json.loads(witness.read_text()) == []
             assert control(home, "identify")["instance_id"] == descriptor["instance_id"]
             assert len(model_peer.requests) == 3
-            receipt = {"session_id": sid, "daemon_pid": daemon.pid,
+            tmux("kill-session", "-t", "chat")
+
+            from tests.gateway.fixtures.authority_controls_peer import ModelPeer as ApprovalPeer
+            target = tmp_path / "owned-removal"
+            target.mkdir()
+            (target / "owned.txt").write_text("disposable")
+            model_peer.command = "rm -r -- " + shlex.quote(str(target))
+            model_peer.RequestHandlerClass = ApprovalPeer
+            launch("--cli", "chat", "-q", "Remove the owned fixture")
+            approval = until("/approve ")
+            approval_sid = next(line.split("Session: ", 1)[1].strip() for line in approval.splitlines() if "Session: " in line)
+            prompt_id = next(line.split("/approve ", 1)[1].split()[0] for line in approval.splitlines() if "/approve " in line)
+            assert target.exists()
+            tmux("send-keys", "-t", "chat", f"/approve {prompt_id} forged", "Enter")
+            until("invalid_params")
+            assert target.exists(), "Invalid choice must not resolve the real approval"
+            tmux("send-keys", "-t", "chat", "/quit", "Enter")
+            until("CLI_RC=0")
+            assert target.exists()
+            tmux("kill-session", "-t", "chat")
+            launch("--cli", "chat", "--resume", approval_sid)
+            until("/approve ")
+            tmux("send-keys", "-t", "chat", f"/approve {prompt_id} once", "Enter")
+            approved = until("APPROVAL_FINISHED")
+            assert not target.exists(), "Real terminal effect must follow native consent"
+            tmux("send-keys", "-t", "chat", "/quit", "Enter")
+            until("CLI_RC=0")
+            assert json.loads(witness.read_text()) == []
+            receipt = {"approval_detach_reconnect": approval_sid, "approval": approved,
+                       "invalid_choice_no_effect": True, "real_terminal_effect": True,"session_id": sid, "daemon_pid": daemon.pid,
                        "same_instance": descriptor["instance_id"], "client_agent_db_owners": [],
                        "fresh": fresh, "detach": detached, "resume": resumed, "oneshot": oneshot}
             print("CLI_PTY_RECEIPT=" + json.dumps(receipt))
