@@ -60,6 +60,22 @@ async def fences(runner, authority, adapter, guild, event, peer, mode):
         finally:
             guild.hook = None
             runner.adapters[Platform.DISCORD] = adapter
+        before_drain = rows(second.ref.session_id)
+        guild.hook = lambda: setattr(runner, '_draining', True)
+        try:
+            try:
+                await accept(event('shutdown-during-auth'))
+            except RuntimeStoreError as exc:
+                assert exc.reason == 'runtime_draining', exc.reason
+            else:
+                failures.append('new input accepted after shutdown began during lookup')
+            runner._draining = False
+            await authority._drain(second.ref)
+            if rows(second.ref.session_id) != before_drain:
+                failures.append('shutdown consumed queued input after authorization await')
+        finally:
+            guild.hook = None
+            runner._draining = False
         assert not failures, failures
         assert len(rows(second.ref.session_id)) == 2
         print(json.dumps({'mode': mode, 'rows': rows(second.ref.session_id), 'model_calls': 0}), flush=True)

@@ -55,6 +55,10 @@ class SessionAuthority:
         if ref.session_id not in self.sessions:
             raise RuntimeStoreError('not_found')
 
+    def _require_admission_open(self):
+        if self.runner._draining:
+            raise RuntimeStoreError('runtime_draining')
+
     def register(self, source):
         entry = self.runner.session_store.get_or_create_session(source)
         sid = entry.session_id
@@ -124,7 +128,9 @@ class SessionAuthority:
         """Await current connector policy, then commit before ACK or scheduling execution."""
         import json
         from gateway.session_envelope import prepare_native, restore_native
+        self._require_admission_open()
         payload = await prepare_native(self.runner, event)
+        self._require_admission_open()
         source = restore_native(payload).source
         ref = self.register(source)
         identity = json.dumps([source.profile, source.platform.value, source.chat_id,
@@ -159,6 +165,7 @@ class SessionAuthority:
                         if 'native_text_v1' not in row['payload']:
                             raise RuntimeStoreError('invalid_params')
                         await check_native_route(self.runner, row['payload'], sid, available_source, adapter)
+                self._require_admission_open()
                 self.sessions.setdefault(sid, LiveSession(source, route))
                 if any(row['status'] == 'unknown' for row in rows):
                     raise RuntimeStoreError('unknown_execution')
@@ -170,6 +177,7 @@ class SessionAuthority:
 
     async def submit(self, actor: Principal, request: Submission):
         self.authorize(actor, request.ref, 'session:submit')
+        self._require_admission_open()
         if request.intent != 'queue' or set(request.payload) != {'text'} or not isinstance(request.payload['text'], str):
             raise RuntimeStoreError('invalid_params')
         row = admit_session_input(self.db, epoch=self.epoch, principal_id=actor.subject,
@@ -265,6 +273,7 @@ class SessionAuthority:
                     current = get_session_admission(self.db, admission_id=first['admission_id'])
                     if current is None or current['status'] != 'queued':
                         continue
+                self._require_admission_open()
                 row = claim_session_input(self.db, epoch=self.epoch, session_id=ref.session_id)
             except RuntimeStoreError as exc:
                 import logging

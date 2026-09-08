@@ -71,6 +71,7 @@ async def drain_gateway_runtime(runner):
     descriptor = getattr(runner, 'session_runtime_descriptor', None)
     if descriptor is None:
         return
+    runner._draining = True
     descriptor.update(state='draining', capabilities=[])
     # Withdraw the public ingress callback without disconnecting egress needed
     # by already admitted work. Base adapters refuse before stamping acceptance.
