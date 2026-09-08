@@ -119,6 +119,12 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
         assert client.get('/api/config?profile=current',
                           headers=headers(ticket(home, descriptor))).status_code == 200
         assert client.get('/api/profiles', headers=headers(ticket(home, descriptor))).status_code == 200
+        updated = client.put('/api/config', json={'profile': 'current', 'config': {
+            'display': {'skin': 'ares'}}}, headers=headers(ticket(home, descriptor)))
+        assert updated.status_code == 200, updated.text
+        assert client.get('/api/config', headers=headers(ticket(home, descriptor))).json()['display']['skin'] == 'ares'
+        import yaml
+        assert yaml.safe_load((home / 'config.yaml').read_text())['display']['skin'] == 'ares'
         query_ticket = ticket(home, descriptor)
         assert client.get('/api/config', params={'ticket': query_ticket}).status_code == 401
         assert client.get('/api/config', headers={'Cookie': 'X-Hermes-Gateway-Ticket=' + query_ticket}).status_code == 401

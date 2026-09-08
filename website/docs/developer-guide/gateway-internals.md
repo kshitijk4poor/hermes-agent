@@ -45,6 +45,49 @@ session registration before routing or transcript creation. These edits
 do not interrupt a running turn. This RPC does not yet migrate legacy direct
 writers, expose arbitrary SQL, or implement reset, delete, or rewind.
 
+## Private native HTTP authentication
+
+The authoritative daemon accepts a **fresh, one-use HTTP grant per request** from
+its same-user private control socket. Send `session-ticket` with exactly
+`profile_id` (the canonical served primary home), `instance_id` (the ready daemon's
+boot ID), and `purpose: "native-http"`. The returned ticket expires after 30 seconds
+and carries only `http:owner`; send it in `X-Hermes-Gateway-Ticket` from the native
+main process. Never place it in a URL, cookie, public descriptor, renderer config,
+or log, and never obtain a dashboard token by scraping the public page.
+
+The existing HTTP authentication seam redeems the grant only for the matching
+ready daemon and primary profile. It requires an actual loopback socket peer,
+captured before trusted-proxy rewriting, and **no Origin header at all** (even an
+empty Origin is refused). An invalid, duplicate, expired, replayed, or wrong-purpose
+header returns 401 without falling back to a supplied static token or OAuth cookie.
+Draining/unready listeners refuse admission; restart and shutdown revoke grants.
+HTTP grants do not authenticate WebSockets, and interactive/exposure/worker grants
+do not authenticate HTTP. Requests without this header keep the existing static
+session-token, OAuth bearer/cookie, Host, and route-specific token-provider gates.
+
+This local bootstrap is an explicit same-OS-user administrative boundary, not an
+OAuth bypass for remote clients. An exposure proxy must not replace remote callers'
+credentials with its own native grant. It is not a filesystem sandbox against code
+already running as the same OS user.
+
+A native grant does not retarget the daemon through a URL or JSON `profile` selector:
+each supplied selector must resolve to the served primary home. The existing
+config `current`/empty/default-name contracts are preserved rather than treating
+`default` as an alias for any arbitrary launch home. Cross-profile targets return
+403 `profile_scope_mismatch`, including conflicting duplicate query selectors.
+`GET /api/profiles` and `GET /api/profiles/active` retain their discovery metadata
+contracts; discovery does not confer another profile's data authority. Aggregate
+session/sidebar routes require an explicit own-profile selector, and cron job routes
+require an explicit own-profile query. All-profile project/transcript aggregation,
+profile creation/import/activation, and profile rename/delete are not granted by
+this primary-profile credential. Native clients must not rewrite `all` to `current`
+or borrow the primary grant to hide a cross-profile failure.
+
+The native HTTP integration is covered by real ordinary-daemon/control-socket/TCP
+probes in `tests/gateway/test_native_http_auth.py`, alongside gated OAuth/cookie and
+actual non-loopback-peer controls. This does not establish native Desktop UI parity
+or platform-specific Windows/macOS bootstrap validation.
+
 ## Key Files
 
 | File | Purpose |
