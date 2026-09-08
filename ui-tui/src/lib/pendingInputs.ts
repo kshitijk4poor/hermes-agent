@@ -53,7 +53,9 @@ export function migratePendingInputs(previous: SubmissionDestination, successorS
 
   const successor = Object.freeze({ ...previous, sid: successorSid, storedSid: successorStoredSid ?? null })
 
-  for (const item of loadPendingInputs(previous)) {
+  for (const item of loadPendingInputs(previous, true)) {
+    // Cold resume knows the stored ID, not the prior process's runtime handle.
+    successors.set(pendingDestinationKey(item.ownerDestination ?? item.destination!), successor)
     item.ownerDestination = successor
 
     if (!item.failed) {
@@ -129,7 +131,7 @@ export function removePendingInput(item: QueueItem): void {
   syncDirectory(dir)
 }
 
-export function loadPendingInputs(destination: SubmissionDestination): QueueItem[] {
+export function loadPendingInputs(destination: SubmissionDestination, durableResume = false): QueueItem[] {
   const dir = directory(destination.profileHome)
 
   if (!existsSync(dir)) {
@@ -164,7 +166,12 @@ export function loadPendingInputs(destination: SubmissionDestination): QueueItem
 
       const owner = record.ownerDestination ?? record.destination
 
-      if (owner?.sid !== destination.sid || owner?.profile !== destination.profile) {
+      if (
+        (durableResume
+          ? (owner?.storedSid || owner?.sid) !== (destination.storedSid || destination.sid)
+          : owner?.sid !== destination.sid) ||
+        owner?.profileHome !== destination.profileHome || owner?.profile !== destination.profile
+      ) {
         return []
       }
 

@@ -1,7 +1,7 @@
 import type { GatewayClient } from '../gatewayClient.js'
 import type { InputDetectDropResponse, PromptSubmitResponse, SessionActivateResponse } from '../gatewayTypes.js'
 import type { QueueItem } from '../hooks/useQueue.js'
-import { savePendingInput } from '../lib/pendingInputs.js'
+import { pendingInputOwner, savePendingInput } from '../lib/pendingInputs.js'
 import type { Msg } from '../types.js'
 
 import { captureDestination, isCurrentDestination, type SubmissionDestination } from './submissionDestination.js'
@@ -56,8 +56,9 @@ export function submitPrompt(
   opts: { skipDetectDrop?: boolean; destination?: SubmissionDestination; queueItem?: QueueItem } = {}
 ): void {
   const destination = opts.destination ?? captureDestination()
-  const { sid } = destination
-  const focused = () => isCurrentDestination(destination)
+  const owner = pendingInputOwner(opts.queueItem?.ownerDestination ?? destination)
+  const { sid } = owner
+  const focused = () => isCurrentDestination(owner)
 
   if (!sid) {
     return deps.sys('session not ready yet')
@@ -131,7 +132,7 @@ export function submitPrompt(
                 // Push lifecycle events (including same-generation completion)
                 // win over an in-flight snapshot; attachment changes win too.
                 if (!focused() || current !== observed || snapshot.session_id !== sid ||
-                    (snapshot.session_key || info?.stored_session_id) !== destination.storedSid ||
+                    (snapshot.session_key || info?.stored_session_id) !== owner.storedSid ||
                     typeof snapshot.running !== 'boolean' ||
                     (current?.execution_generation !== undefined &&
                       (info?.execution_epoch !== current.execution_epoch ||
