@@ -295,6 +295,41 @@ function Harness({
 }
 
 describe('durable submit acknowledgement', () => {
+  it('retires the native private-file journal only after a matching canonical receipt', async () => {
+    const fs = await import('node:fs')
+    const os = await import('node:os')
+    const path = await import('node:path')
+    vi.doMock('electron', () => ({ app: {}, ipcMain: {} }))
+    const { preparedJournal } = await import('../../../../../electron/prepared-submissions')
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-retire-'))
+    const journal = preparedJournal(home, 'http://native-fixture')
+    const previous = window.hermesDesktop
+    window.hermesDesktop = { ...previous, preparedSubmissions: {
+      read: async () => JSON.stringify(journal.read()),
+      update: async (key, entry) => { journal.update(key, entry === null ? null : JSON.parse(entry)) }
+    } }
+    let accepted = false
+    const requestGateway = vi.fn(async (_method: string, params?: Record<string, unknown>) => {
+      expect(Object.values(journal.read())).toHaveLength(1)
+      return { admission_id: 'server-admission', submission_id: params?.submission_id, session_id: params?.session_id, status: accepted ? 'queued' : 'unknown' } as never
+    })
+    try {
+      let handle: HarnessHandle | null = null
+      await actRender(<Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+      const options = { fromQueue: true, submission_id: 'private-file-input' }
+      expect(await handle!.submitText('native journal receipt', options)).toBe(false)
+      expect(Object.values(preparedJournal(home, 'http://native-fixture').read())).toHaveLength(1)
+      accepted = true
+      expect(await handle!.submitText('native journal receipt', options)).toBe(true)
+      expect(preparedJournal(home, 'http://native-fixture').read()).toEqual({})
+      expect(fs.readdirSync(home)).toHaveLength(1)
+    } finally {
+      window.hermesDesktop = previous
+      fs.rmSync(home, { recursive: true, force: true })
+      vi.doUnmock('electron')
+    }
+  })
+
   it('retains a failed slash kickoff and forwards queued admission intent on retry', async () => {
     $sessions.set([])
     $connection.set(null)
