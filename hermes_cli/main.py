@@ -1152,7 +1152,8 @@ def _has_any_provider_configured(*, strict_profile_scope: bool = False) -> bool:
     if not strict_profile_scope:
         try:
             if any(
-                get_auth_status(pid).get("logged_in")
+                (status := get_auth_status(pid)).get("logged_in")
+                and status.get("key_source") != "keyless"
                 for pid, pconfig in PROVIDER_REGISTRY.items()
                 if pconfig.auth_type == "api_key"
             ):
