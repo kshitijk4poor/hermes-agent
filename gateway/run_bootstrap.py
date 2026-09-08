@@ -231,6 +231,8 @@ async def _start_gateway_start_control_socket(runner):
             payload.update({key: descriptor[key] for key in (
                 "instance_id", "runtime_protocol", "authority_epoch", "state", "api_origin",
                 "served_profiles", "capabilities") if key in descriptor})
+            if getattr(runner, '_draining', False):
+                payload.update(state='draining', capabilities=[])
             payload["supervisor"] = {"manual": "none", "desktop": "none"}.get(
                 payload.get("supervisor"), payload.get("supervisor", "none"))
             return payload
@@ -596,15 +598,17 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
 
     finally:
-        if runner is not None:
-            from gateway.run_runtime import drain_gateway_runtime
-            await drain_gateway_runtime(runner)
-            # Startup may have opened adapters before an exception. The same
-            # stop path owns their writers and DB handles on every exit.
-            await runner.stop()
-        if _planned_stop_watcher_stop is not None:
-            _planned_stop_watcher_stop.set()
-        if _control_server is not None:
-            await _control_server.stop()
-        remove_pid_file()
-        release_gateway_runtime_lock()
+        try:
+            if runner is not None:
+                from gateway.run_runtime import drain_gateway_runtime
+                await drain_gateway_runtime(runner)
+                # Startup may have opened adapters before an exception. The same
+                # stop path owns their writers and DB handles on every exit.
+                await runner.stop()
+        finally:
+            if _planned_stop_watcher_stop is not None:
+                _planned_stop_watcher_stop.set()
+            if _control_server is not None:
+                await _control_server.stop()
+            remove_pid_file()
+            release_gateway_runtime_lock()

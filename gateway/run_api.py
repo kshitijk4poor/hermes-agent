@@ -37,14 +37,14 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
     try:
         listener.bind(address)
         listener.setblocking(False)
+        # Loading the ASGI graph may fail too; it owns the same bound socket.
+        if not config.loaded:
+            config.load()
+        config.loaded_app = GatewayRuntimeAPI(config.loaded_app, runner, web.app)
     except BaseException:
         listener.close()
         raise
 
-    # Wrap this server's ASGI graph, never the module-global app/router.
-    if not config.loaded:
-        config.load()
-    config.loaded_app = GatewayRuntimeAPI(config.loaded_app, runner, web.app)
     web.app.state.gateway_runner = runner
     web.app.state.session_authority = getattr(runner, "session_authority", None)
     web.app.state.bound_host = host
@@ -112,6 +112,15 @@ class GatewayRuntimeAPI:
             return
         if scope['type'] != 'websocket' or scope['path'] != '/api/ws':
             return await self.app(scope, receive, send)
+        original_receive = receive
+
+        async def receive_admitted():
+            message = await original_receive()
+            if descriptor['state'] != 'ready' or self.runner._draining:
+                return {'type': 'websocket.disconnect', 'code': 1013}
+            return message
+
+        receive = receive_admitted
         from starlette.websockets import WebSocket
         from hermes_cli.web_server_chat import (
             _gateway_ws_ticket_from_subprotocol, _ws_request_is_allowed,
