@@ -1838,6 +1838,11 @@ def _open_cron_session_db(job: dict):
     # no timeout of its own against a wedged sqlite3.connect (e.g. a stale flock left by a crashed sibling
     # process). An unbounded hang here would wedge the job's worker thread, so the init is bounded and a
     # timeout proceeds without a session store instead of blocking the run forever.
+    from agent.runtime_session_store import WorkerPersistenceError, is_worker_process
+    if is_worker_process():
+        # Do not turn an unsupported worker assignment into the legacy None
+        # fallback: that would run billed inference without durable persistence.
+        raise WorkerPersistenceError('worker_cron_registration_required')
     _session_db_timeout = _get_session_db_timeout()
     try:
         from hermes_state_registry import acquire

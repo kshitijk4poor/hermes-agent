@@ -42,7 +42,8 @@ class Model(BaseHTTPRequestHandler):
 
 
 @pytest.mark.linux_only
-def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path):
+@pytest.mark.parametrize('probe_constructors', [False, True])
+def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path, probe_constructors):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
@@ -70,12 +71,19 @@ def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path):
             receipt = tmp_path / 'receipt.json'
             result = subprocess.run([sys.executable, str(root / 'tests/gateway/fixtures/agent_persistence_worker.py')],
                 cwd=root, env=env, input=json.dumps({'home': str(home), 'url': url, 'session_id': sid,
-                                                   'receipt': str(receipt)}) + '\n',
+                                                   'receipt': str(receipt), 'probe_constructors': probe_constructors}) + '\n',
                 text=True, capture_output=True, timeout=60)
             assert result.returncode == 0, result.stdout + result.stderr
             proof = json.loads(receipt.read_text())
             assert not proof['failed'], proof
             assert 'RECOVERY_ACK_WORKER_INFERENCE' in proof['result'], proof
+            if probe_constructors:
+                assert proof['refusals']['child'] == 'worker_child_registration_required', proof['refusals']
+                assert proof['refusals']['cron'] == 'worker_cron_registration_required', proof['refusals']
+                assert proof['refusals']['ledger'] == 'worker_delegation_ledger_unavailable', proof['refusals']
+                success, doc, final_response, error = proof['refusals']['script_result']
+                assert success and error is None and 'SCRIPT_ONLY_RESULT' in doc
+                assert final_response.strip() == 'SCRIPT_ONLY_RESULT'
             assert proof['opens'] == [] and proof['fds'] == [], json.dumps(proof['opens'], indent=2)
             assert proof['context']['system_prompt'], proof
             assert proof['context']['input_tokens'] == 10, proof

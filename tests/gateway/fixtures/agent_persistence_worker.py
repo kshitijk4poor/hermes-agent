@@ -45,12 +45,38 @@ def main():
                     session_db=store, session_id=command['session_id'], enabled_toolsets=[],
                     skip_context_files=True, skip_memory=True, skip_background_review=True, quiet_mode=True)
     try:
+        refusals = {}
+        if command.get('probe_constructors'):
+            from concurrent.futures import ThreadPoolExecutor
+            from hermes_state_registry import release_or_close
+            from tools.delegate_tool import _open_child_session_db
+            from tools.async_delegation import _connect
+            from cron.scheduler import _open_cron_session_db, run_job
+            operations = {'child': lambda: _open_child_session_db(agent),
+                          'cron': lambda: _open_cron_session_db({'id': 'worker-probe'}),
+                          'ledger': _connect}
+            def attempt(name, fn):
+                try:
+                    opened = fn()
+                    if opened is not None:
+                        release_or_close(opened)
+                    return name, 'unexpected_success'
+                except Exception as exc:
+                    return name, str(exc)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                refusals = dict(pool.submit(attempt, name, fn).result() for name, fn in operations.items())
+            scripts = home / 'scripts'
+            scripts.mkdir(exist_ok=True)
+            (scripts / 'worker-probe.py').write_text("print('SCRIPT_ONLY_RESULT')\n")
+            script_result = run_job({'id': 'script-probe', 'name': 'script-probe', 'no_agent': True,
+                                     'script': 'worker-probe.py', 'prompt': '', 'deliver': 'local'})
+            refusals['script_result'] = script_result
         result = agent.run_conversation('WORKER_INFERENCE')
         context = store.get_session(command['session_id'])
         store.flush_token_counts()
         finished = store.finish()
         receipt = {'result': result['final_response'], 'failed': result.get('failed'),
-                   'context': context, 'finished': finished, 'opens': opens, 'fds': writable_fds()}
+                   'context': context, 'finished': finished, 'opens': opens, 'fds': writable_fds(), 'refusals': refusals}
         Path(command['receipt']).write_text(json.dumps(receipt, default=str))
     finally:
         agent._end_session_on_close = False  # session lifecycle belongs to the authority
