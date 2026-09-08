@@ -100,3 +100,18 @@ def test_explicit_key_is_private_and_missing_after_restart_fails_closed(tmp_path
     assert dict(os.environ) == before
 
 
+def test_ordinary_daemon_cli_launch_policy(tmp_path):
+    import subprocess
+    import sys
+    import json
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    result = subprocess.run([sys.executable, '-c',
+        'import json,sys; from pathlib import Path; '
+        'from tests.gateway.fixtures.cli_launch_policy_probe import probe; '
+        'print(json.dumps(probe(Path(sys.argv[1]))))', str(tmp_path)], cwd=root,
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(json.dumps(json.loads(result.stdout.splitlines()[-1])))
+
+
