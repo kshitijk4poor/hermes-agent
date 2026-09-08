@@ -165,6 +165,17 @@ async def probe(peer):
                         pass
                     else:
                         raise AssertionError('forged source accepted: ' + mutate)
+                from gateway.session import SessionSource
+                from gateway.session_ingress_context import restore_provenance
+                untrusted = SessionSource.from_dict(payload['native_text_v1']['source'])
+                forged_proof = dict(payload['native_text_v1']['provenance'], relay='forged')
+                try:
+                    restore_provenance(runner, untrusted, forged_proof)
+                except RuntimeStoreError:
+                    pass
+                else:
+                    raise AssertionError('forged seal accepted')
+                assert not untrusted.delivered_via_upstream_relay, 'rejected seal installed trust'
                 for internal in (False, True):
                     event = _event_from_wire(raw)
                     event.internal = internal
