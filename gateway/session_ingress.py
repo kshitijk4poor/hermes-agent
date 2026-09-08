@@ -1,6 +1,7 @@
 """Trusted messaging admission and the existing TurnRunner invocation boundary."""
 import asyncio
 from contextvars import ContextVar
+from contextlib import nullcontext
 from dataclasses import replace
 
 from gateway.platforms.event import MessageEvent
@@ -28,14 +29,22 @@ async def execute_admission(authority, ref, row):
     else:
         event = MessageEvent(text=row['payload']['text'], source=live.source,
                              message_id=row['admission_id'])
+    provenance = row['payload'].get('native_text_v1', {}).get('provenance')
+    scope = nullcontext()
+    if provenance is not None:
+        from gateway.run import _profile_runtime_scope
+        from gateway.session_ingress_context import restore_provenance
+        home = restore_provenance(authority.runner, event.source, provenance)
+        scope = _profile_runtime_scope(home)
     token = executing_admission.set(True)
     try:
-        response = await authority.runner._handle_message(event)
-        if not native and response:
-            adapter = authority.runner._adapter_for_source(event.source)
-            if adapter is not None:
-                await deliver_response(adapter, event, live.route, response)
-        return response
+        with scope:
+            response = await authority.runner._handle_message(event)
+            if not native and response:
+                adapter = authority.runner._adapter_for_source(event.source)
+                if adapter is not None:
+                    await deliver_response(adapter, event, live.route, response)
+            return response
     finally:
         executing_admission.reset(token)
 

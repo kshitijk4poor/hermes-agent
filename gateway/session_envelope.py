@@ -28,7 +28,7 @@ def _validate_native(runner, event, provenance=None):
             or source.role_authorized or source.delivered_via_upstream_relay
             or source.profile_route_rejected
             or (getattr(source, '_authorization_profile_home', None) is not None and provenance is None)
-            or getattr(runner.config, 'multiplex_profiles', False)):
+            or (getattr(runner.config, 'multiplex_profiles', False) and provenance is None)):
         raise RuntimeStoreError('invalid_params')
     if provenance is not None:
         from gateway.session_ingress_context import restore_provenance
@@ -53,6 +53,8 @@ def _validate_native(runner, event, provenance=None):
     encoded_source['is_bot'] = source.is_bot
     restored_source = SessionSource.from_dict(encoded_source)
     restored_source.is_bot = source.is_bot
+    if provenance is not None:
+        restore_provenance(runner, restored_source, provenance)
     adapter = runner._adapter_for_source(source)
     if adapter is None or runner._adapter_for_source(restored_source) is not adapter:
         raise RuntimeStoreError('not_found')

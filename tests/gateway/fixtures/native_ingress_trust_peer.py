@@ -52,6 +52,10 @@ async def probe(mode, peer):
     runner.adapters[Platform.TELEGRAM] = adapter
     # Exercise the real callback which stamps the authorization home, not a synthetic runner call.
     adapter.set_message_handler(runner._make_default_profile_message_handler())
+    if mode in {'multiplex', 'capture', 'recover', 'recover-again'}:
+        from native_ingress_trust_multiplex import multiplex_probe
+        await multiplex_probe(runner, authority, adapter, state, mode, peer)
+        return
     source = adapter.build_source(chat_id='trust-chat', chat_type='dm', user_id='fixture-user')
     if mode == 'guards':
         rejected = []
@@ -84,8 +88,13 @@ async def probe(mode, peer):
 
 
 if __name__ == '__main__':
-    peer = ThreadingHTTPServer(('127.0.0.1', 0), ModelPeer)
-    peer.requests, peer.metadata_requests = [], []
+    class SecretPeer(ModelPeer):
+        def do_POST(self):
+            self.server.auth_headers.append(self.headers.get('Authorization'))
+            super().do_POST()
+
+    peer = ThreadingHTTPServer(('127.0.0.1', 0), SecretPeer)
+    peer.requests, peer.metadata_requests, peer.auth_headers = [], [], []
     peer.blocked, peer.release = threading.Event(), threading.Event()
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     base_url = f'http://127.0.0.1:{peer.server_port}/v1'
