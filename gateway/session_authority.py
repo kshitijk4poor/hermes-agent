@@ -60,6 +60,7 @@ class SessionAuthority:
             raise RuntimeStoreError('runtime_draining')
 
     def register(self, source):
+        self._require_admission_open()
         entry = self.runner.session_store.get_or_create_session(source)
         sid = entry.session_id
         self.sessions.setdefault(sid, LiveSession(source, entry.session_key))

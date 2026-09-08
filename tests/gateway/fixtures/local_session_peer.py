@@ -51,6 +51,14 @@ async def probe(peer, target, kind):
                         {'profile': 'foreign'}, {'cwd': str(target)}, {'yolo': True}):
             denied = await rpc(a, 'session.create', **payload)
             assert 'error' in denied, denied
+        before_sessions = set(authority.sessions)
+        runner._draining = True
+        try:
+            draining = await rpc(a, 'session.create', request_id='during-drain', source='cli')
+            assert draining.get('error', {}).get('message') == 'runtime_draining', draining
+            assert set(authority.sessions) == before_sessions
+        finally:
+            runner._draining = False
         created = await rpc(a, 'session.create', request_id='fresh', source='cli')
         assert 'result' in created, created
         sid = created['result']['session_id']

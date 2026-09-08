@@ -40,7 +40,8 @@ The session handle in `session.resume` supplies the current revision.
 The edit and its retry receipt commit together. Repeating the same request returns
 the original result without incrementing the revision again; reusing its ID with
 different contents returns `admission_conflict`. A competing edit with a stale
-revision returns `revision_conflict`. Draining rejects new mutations. These edits
+revision returns `revision_conflict`. Draining rejects new mutations and fresh
+session registration before routing or transcript creation. These edits
 do not interrupt a running turn. This RPC does not yet migrate legacy direct
 writers, expose arbitrary SQL, or implement reset, delete, or rewind.
 
