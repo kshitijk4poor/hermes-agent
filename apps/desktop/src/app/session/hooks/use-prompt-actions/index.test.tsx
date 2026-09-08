@@ -323,6 +323,8 @@ describe('durable submit acknowledgement', () => {
     [{ admission_id: 'entry-id', status: 'queued' }, true],
     [{ admission_id: 'entry-id', status: 'started' }, true],
     [{ admission_id: 'entry-id', status: 'terminal' }, true],
+    [{ admission_id: 'canonical-admission', submission_id: 'entry-id', session_id: RUNTIME_SESSION_ID, status: 'queued' }, true],
+    [{ admission_id: 'canonical-admission', submission_id: 'entry-id', session_id: 'wrong-destination', status: 'queued' }, false],
     [{ admission_id: 'entry-id', status: 'unknown' }, false]
   ])('requires the matching authoritative receipt: %j', async (receipt, accepted) => {
     const requestGateway = vi.fn(async () => receipt as never)
