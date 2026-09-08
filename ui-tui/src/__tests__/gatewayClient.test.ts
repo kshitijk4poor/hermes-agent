@@ -140,6 +140,32 @@ describe('GatewayClient websocket attach mode', () => {
     }
   })
 
+  it('publishes canonical readiness once, only after the creation contract arrives', async () => {
+    delete process.env.HERMES_TUI_GATEWAY_URL
+    delete process.env.HERMES_TUI_SIDECAR_URL
+    const gw = new GatewayClient(async () => ({ url: 'ws://gateway.test/api/ws', protocols: [], instance_id: 'owner', profile_id: 'fixture' }))
+    const events: any[] = []
+    gw.on('event', event => events.push(event))
+    try {
+      gw.start()
+      gw.drain()
+      await vi.waitFor(() => expect(FakeWebSocket.instances).toHaveLength(1))
+      const socket = FakeWebSocket.instances[0]!
+      socket.open()
+      socket.message(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: {} } }))
+      await vi.waitFor(() => expect(socket.sent).toHaveLength(1))
+      expect(events.filter(event => event.type === 'gateway.ready')).toHaveLength(0)
+      const request = JSON.parse(socket.sent[0]!)
+      expect(request.method).toBe('runtime.describe')
+      socket.message(JSON.stringify({ jsonrpc: '2.0', id: request.id, result: {
+        session_create: { sources: ['tui'], parameters: ['source', 'request_id'] }
+      } }))
+      await vi.waitFor(() => expect(events.filter(event => event.type === 'gateway.ready')).toHaveLength(1))
+    } finally {
+      gw.kill()
+    }
+  })
+
   it('waits for websocket open and resolves RPC requests', async () => {
     process.env.HERMES_TUI_GATEWAY_URL = 'ws://gateway.test/api/ws?token=abc'
     const gw = new GatewayClient()
