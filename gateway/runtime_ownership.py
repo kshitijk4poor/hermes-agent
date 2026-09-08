@@ -38,7 +38,7 @@ class ProfileOwnership:
                 for home in sorted({canonical_home(p) for p in homes}):
                     if home in self._handles:
                         continue
-                    home.mkdir(parents=True, exist_ok=True)
+                    home.mkdir(mode=0o700, parents=True, exist_ok=True)
                     path = home / 'gateway.lock'
                     flags = os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0)
                     fd = os.open(path, flags, 0o600)

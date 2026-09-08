@@ -22,8 +22,7 @@ def _private_node(path: Path, *, kind: str) -> os.stat_result:
     predicates = {"socket": stat.S_ISSOCK, "file": stat.S_ISREG, "directory": stat.S_ISDIR}
     if not predicates[kind](node.st_mode) or node.st_uid != os.getuid():  # windows-footgun: ok — POSIX socket path only
         raise DiscoveryError("unsafe_control_path")
-    forbidden = 0o022 if kind == "directory" else 0o077
-    if stat.S_IMODE(node.st_mode) & forbidden:
+    if stat.S_IMODE(node.st_mode) & 0o077:
         raise DiscoveryError("unsafe_control_permissions")
     return node
 

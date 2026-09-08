@@ -382,6 +382,12 @@ requested only when no service is found. This command never installs or rewrites
 service definitions, enables linger, elevates privileges, or clears update fences.
 Ambiguous or inaccessible ownership fails closed.
 
+On POSIX, local bootstrap requires an owner-only profile directory. Newly reserved
+homes are created with mode `0700`; existing permissions are never changed by
+`ensure`. An existing home readable by other users returns
+`inaccessible / unsafe_control_permissions`. Review the directory's intended
+sharing policy and explicitly make it private before retrying local attachment.
+
 | Exit code | Meaning |
 |-----------|---------|
 | `0` | Compatible session runtime ready. |
