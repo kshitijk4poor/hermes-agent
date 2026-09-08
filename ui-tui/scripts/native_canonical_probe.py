@@ -28,6 +28,7 @@ from websockets.asyncio.client import connect
 def run():
     receipts = {}
     kind = sys.argv[2] if len(sys.argv) > 2 else 'text'
+    startup = kind in ('startup', 'launcher')
     expected = b'LOCAL_ACK' if kind == 'text' else (kind.upper() + '_FINISHED').encode()
     with tempfile.TemporaryDirectory(prefix='ink-native-authority-') as temp:
         base = Path(temp)
@@ -100,7 +101,13 @@ def run():
                 launch_env['HERMES_TUI_RESUME'] = sid
             if query:
                 launch_env['HERMES_TUI_QUERY'] = query
-            proc = subprocess.Popen(['node', str(ROOT / 'ui-tui/dist/entry.js')], cwd=ROOT,
+            argv = ['node', str(ROOT / 'ui-tui/dist/entry.js')]
+            if kind == 'launcher':
+                # Exercise the actual parser and Python launcher, using the
+                # supported prebuilt path so shared dependencies stay read-only.
+                launch_env.update(HERMES_TUI_DIR=str(ROOT / 'ui-tui'), TMPDIR=str(base))
+                argv = [sys.executable, '-m', 'hermes_cli.main', '--tui', 'chat', '-q', 'WS_SHARED']
+            proc = subprocess.Popen(argv, cwd=ROOT,
                                     env=launch_env, stdin=slave, stdout=slave, stderr=slave,
                                     start_new_session=True)
             os.close(slave)
@@ -117,23 +124,35 @@ def run():
             return proc, master, output
 
         try:
-            if kind == 'startup':
-                first = launch('normal-local')
+            if startup:
+                first = launch('normal-local', query='WS_SHARED')
                 deadline = time.monotonic() + 40
                 while time.monotonic() < deadline:
-                    if b'tui session policy' in first[2] or (base / 'normal-local.json').exists():
+                    if b'LOCAL_ACK' in first[2]:
                         break
                     assert first[0].poll() is None, bytes(first[2]).decode(errors='replace')
                     time.sleep(.1)
+                (Path(sys.argv[1]) / 'startup.pty').write_bytes(first[2])
                 from gateway.status import get_running_pid_identity_strict
                 identity = get_running_pid_identity_strict(home / 'gateway.pid')
                 assert identity is not None, bytes(first[2]).decode(errors='replace')[-8000:]
                 ensured_pid = identity[0]
+                async def created_session():
+                    g = grant()
+                    async with connect(g['url'], subprotocols=g['protocols']) as ws:
+                        inventory = await rpc(ws, 'session.list')
+                        for row in inventory['sessions']:
+                            row['policy'] = await rpc(ws, 'session.info', session_id=row['session_id'])
+                        return inventory
+                inventory = asyncio.run(created_session())
+                (Path(sys.argv[1]) / 'created-sessions.json').write_text(json.dumps(inventory, indent=2))
                 receipts['canonical_owner_started_by_ink'] = True
-                receipts['policy_rejected_visibly'] = b'tui session policy' in first[2]
-                receipts['fresh_tui_created'] = (base / 'normal-local.json').exists()
-                (Path(sys.argv[1]) / 'startup.pty').write_bytes(first[2])
-                assert receipts['policy_rejected_visibly'] or receipts['fresh_tui_created']
+                receipts['python_launcher'] = kind == 'launcher'
+                receipts['fresh_tui_created'] = len(inventory['sessions']) == 1 and inventory['sessions'][0]['policy']['source'] == 'tui'
+                receipts['fresh_reply_rendered'] = b'LOCAL_ACK' in first[2]
+                receipts['prepared_journal_cleared'] = not list((home / 'tui-pending-inputs').glob('*.json'))
+                assert receipts['fresh_tui_created'] and receipts['fresh_reply_rendered']
+                assert receipts['prepared_journal_cleared']
                 return
             log = (base / 'daemon.log').open('w+')
             daemon = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=ROOT, env=env,
@@ -231,11 +250,11 @@ def run():
         finally:
             for proc, master in children:
                 if proc.poll() is None:
-                    proc.terminate()
+                    os.killpg(proc.pid, signal.SIGTERM)
                     try:
                         proc.wait(timeout=5)
                     except subprocess.TimeoutExpired:
-                        proc.kill()
+                        os.killpg(proc.pid, signal.SIGKILL)
                         proc.wait(timeout=5)
                 os.close(master)
             if daemon and daemon.poll() is None:
@@ -245,7 +264,7 @@ def run():
                 except subprocess.TimeoutExpired:
                     daemon.kill()
                     daemon.wait(timeout=5)
-            if kind == 'startup' and not ensured_pid:
+            if startup and not ensured_pid:
                 from gateway.status import get_running_pid_identity_strict
                 identity = get_running_pid_identity_strict(home / 'gateway.pid')
                 ensured_pid = identity[0] if identity else None
