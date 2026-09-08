@@ -141,6 +141,7 @@ def settle_session_input(db, *, epoch: int, admission_id: str, generation: int, 
                 or type(generation) is not int or row['generation'] != generation
                 or session['runtime_generation'] != generation):
             raise RuntimeStoreError('stale_generation')
+        conn.execute("UPDATE worker_executions SET status='terminal' WHERE session_id=? AND generation=? AND owner_epoch=?", (row['target_session_id'], generation, epoch))
         conn.execute("UPDATE session_admissions SET status='terminal',outcome=? WHERE admission_id=?", (outcome, admission_id))
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
         return _row(_admission(conn, admission_id))

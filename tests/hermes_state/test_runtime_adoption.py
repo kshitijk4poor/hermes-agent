@@ -23,8 +23,9 @@ def test_explicit_worker_adoption_preserves_claim_without_reexecution(tmp_path, 
         assert restored['status'] == 'started' and restored['owner_epoch'] == new_epoch
         assert restored['generation'] == claim['generation']
         assert rt.claim_session_input(db, epoch=new_epoch, session_id='s') is None
-        rt.finish_worker_execution(db, epoch=new_epoch, **assignment)
         result = rt.settle_session_input(db, epoch=new_epoch, admission_id=accepted['admission_id'], generation=claim['generation'], outcome='completed')
         assert result['status'] == 'terminal'
+        with pytest.raises(rt.RuntimeStoreError, match='stale_generation'):
+            rt.persist_worker_message(db, epoch=new_epoch, **assignment, sequence=1, role='assistant', content='late')
     finally:
         db.close()
