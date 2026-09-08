@@ -69,6 +69,11 @@ def test_restore_refuses_live_authority_without_changing_data(tmp_path):
             assert restarted['instance_id'] != desc['instance_id']
             assert restarted['authority_epoch'] > old_epoch
             assert rows() == [('warm', 'terminal')]
+            later_epoch = restarted['authority_epoch']
+        # Restoring the same older snapshot must not reuse a previous owner's epoch.
+        assert restore_quick_snapshot(snapshot, hermes_home=home)
+        with daemon(root, home, env, barrier=False) as (_, restored_again):
+            assert restored_again['authority_epoch'] > later_epoch
     finally:
         peer.release.set()
         peer.shutdown()
@@ -131,6 +136,15 @@ def test_import_and_startup_exclude_each_other_before_publication(tmp_path, monk
         restore()
         assert results[-1][0] == 0 and 'maintenance refused' in results[-1][2][0]
         assert before == ((home / 'config.yaml').read_bytes(), (home / 'state.db').read_bytes())
+        import pytest
+        from argparse import Namespace
+        monkeypatch.setenv('HERMES_HOME', str(home))
+        def forbidden_revival(*args):
+            raise AssertionError('refused import must not revive a service')
+        monkeypatch.setattr(backup, '_revive_gateway_after_import', forbidden_revival)
+        with pytest.raises(SystemExit) as refused:
+            backup.run_import(Namespace(zipfile=str(archive), force=True))
+        assert refused.value.code == 1
     finally:
         owner.close()
 
