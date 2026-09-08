@@ -15,29 +15,22 @@ import time
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _new_background_notifications(messages, seen_counts):
-    """Count new history occurrences, not positions shifted by request assembly."""
-    counts = Counter(
-        m["content"] for m in messages
-        if m["role"] == "user"
-        and isinstance(m.get("content"), str)
-        and m["content"].startswith("[IMPORTANT: Background process ")
-    )
-    new = []
-    for content, count in counts.items():
-        new.extend([content] * max(0, count - seen_counts[content]))
-        seen_counts[content] = max(seen_counts[content], count)
-    return new
+def test_retained_result_lookup_does_not_initialize_session_store(tmp_path, monkeypatch):
+    import hermes_state
+    from gateway.session_context import scoped_current_session_id
+    from tools import process_registry_results as receipts
 
-
-def test_background_notification_history_replay_is_not_new_delivery():
-    notice = "[IMPORTANT: Background process proc_a exited (exit code 7).]"
-    seen_counts = Counter()
-    first = [{"role": "system", "content": "first"}, {"role": "user", "content": notice}]
-    shifted = [{"role": "system", "content": "second"}, {"role": "user", "content": "query"}, *first[1:]]
-    assert _new_background_notifications(first, seen_counts) == [notice]
-    assert _new_background_notifications(shifted, seen_counts) == []
-    assert _new_background_notifications([*shifted, first[1]], seen_counts) == [notice]
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(hermes_state, "DEFAULT_DB_PATH", db_path)
+    monkeypatch.setattr(receipts, "get_hermes_home", lambda: tmp_path)
+    directory = tmp_path / "logs" / "process-results"
+    directory.mkdir(parents=True)
+    (directory / "proc_owned.json").write_text(json.dumps({
+        "id": "proc_owned", "parent_session_id": "departed-owner",
+    }), encoding="utf-8")
+    with scoped_current_session_id("unrelated-reader"):
+        assert receipts.load_completed_results() == {}
+    assert not db_path.exists(), "Reading retained results initialized canonical storage"
 
 
 def test_headless_terminal_result_survives_cli_exit(tmp_path):
