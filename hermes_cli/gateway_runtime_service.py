@@ -56,6 +56,16 @@ def _run(argv: list[str] | tuple[str, ...], deadline: float):
                           creationflags=windows_hide_flags(), timeout=remaining(deadline))
 
 
+def _verify_binding(verify, *args) -> None:
+    try:
+        verify(*args)
+    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        reason = str(exc)
+        raise RuntimeStartError(reason if reason in {
+            "profile_mismatch", "service_account_mismatch", "service_disabled"
+        } else "service_identity_unverified") from None
+
+
 def _exists(path: Path) -> bool:
     try:
         path.lstat()
@@ -121,20 +131,15 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
     label = f"ai.hermes.gateway{'-' + suffix if suffix else ''}"
     account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)  # windows-footgun: ok — native launchd only
     plist = account_home / "Library/LaunchAgents" / f"{label}.plist"
+    from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded, verify_launchd_plist
     installed = _exists(plist)
-    if installed:
-        with plist.open("rb") as stream:
-            definition = plistlib.load(stream)
-        configured = definition.get("EnvironmentVariables", {}).get("HERMES_HOME")
-        if not configured or Path(configured).resolve() != home or definition.get("Label") != label:
-            raise RuntimeStartError("profile_mismatch")
-        if definition.get("Disabled"):
-            raise RuntimeStartError("service_disabled")
     domains = [f"gui/{os.getuid()}", f"user/{os.getuid()}"]  # windows-footgun: ok — native launchd only
     found = []
+    loaded = []
     for domain in domains:
         result = _run(["launchctl", "print", f"{domain}/{label}"], deadline)
         if result.returncode == 0:
+            loaded.append(result.stdout)
             found.append(ExistingService("launchd", ("launchctl", "kickstart", f"{domain}/{label}"),
                                          "state = running" in result.stdout))
             continue
@@ -144,8 +149,12 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
     if len(found) > 1:
         raise RuntimeStartError("service_scope_conflict", "conflict")
     if found:
+        _verify_binding(verify_launchd_loaded, loaded[0], home)
         return found[0]
     if installed:
+        with plist.open("rb") as stream:
+            definition = plistlib.load(stream)
+        _verify_binding(verify_launchd_plist, definition, label, home)
         # Load ONLY the existing file, never bootout/rewrite or kickstart -k.
         return ExistingService("launchd", ("launchctl", "bootstrap", domains[0], str(plist)))
     return None
@@ -162,6 +171,15 @@ def _windows(home: Path, deadline: float) -> ExistingService | None:
     if any(len(row) != 3 for row in rows if row):
         raise RuntimeStartError("service_state_unknown")
     if any(row and row[0].lstrip("\\") == name for row in rows):
+        from hermes_cli.gateway_runtime_service_identity import verify_windows_task
+        definition = _run(["schtasks.exe", "/Query", "/TN", name, "/XML"], deadline)
+        identity = _run(["whoami.exe", "/USER", "/FO", "CSV", "/NH"], deadline)
+        if definition.returncode or identity.returncode:
+            raise RuntimeStartError("service_identity_unverified")
+        accounts = list(csv.reader(io.StringIO(identity.stdout)))
+        if len(accounts) != 1 or len(accounts[0]) != 2:
+            raise RuntimeStartError("service_identity_unverified")
+        _verify_binding(verify_windows_task, definition.stdout, home, *accounts[0])
         return ExistingService("windows", ("schtasks.exe", "/Run", "/TN", name))
     # Startup-folder entries are installed persistence too, but have no independent
     # start supervisor. Do not bypass them with a job-bound unmanaged child.

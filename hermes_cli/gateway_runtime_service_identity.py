@@ -140,3 +140,122 @@ def verify_systemd(props: dict[str, str], manager_env: str, home: Path, *, syste
     if not argv or match[1] != argv[0]:
         _unverified()
     verify_gateway_argv(argv, home)
+
+
+def verify_launchd_loaded(output: str, home: Path) -> None:
+    # Only the job's own blocks, never inherited/default environments or a
+    # different job embedded in launchctl diagnostic text.
+    def block(name):
+        found = re.findall(r"^\t" + name + r" = \{\n(.*?)^\t\}", output, re.M | re.S)
+        if len(found) != 1:
+            _unverified()
+        return found[0].splitlines()
+
+    env = {}
+    for line in block("environment"):
+        if not line.strip():
+            continue
+        key, sep, value = line.strip().partition(" => ")
+        if not sep or key in env:
+            _unverified()
+        env[key] = value
+    verify_home(home, env.get("HERMES_HOME", ""))
+    argv = [line.strip() for line in block("arguments")]
+    programs = re.findall(r"^\tprogram = (.+)$", output, re.M)
+    if len(programs) != 1 or not argv or programs[0] != argv[0]:
+        _unverified()
+    verify_gateway_argv(argv, home)
+
+
+def verify_launchd_plist(definition: dict, label: str, home: Path) -> None:
+    if definition.get("Label") != label:
+        _unverified()
+    if definition.get("Disabled"):
+        raise ValueError("service_disabled")
+    if definition.get("UserName") or definition.get("GroupName") or definition.get("RootDirectory"):
+        _unverified()
+    env = definition.get("EnvironmentVariables", {})
+    if not isinstance(env, dict):
+        _unverified()
+    verify_home(home, env.get("HERMES_HOME", ""))
+    argv = definition.get("ProgramArguments")
+    if not isinstance(argv, list) or not all(isinstance(arg, str) for arg in argv):
+        _unverified()
+    if definition.get("Program", argv[0] if argv else None) != (argv[0] if argv else None):
+        _unverified()
+    verify_gateway_argv(argv, home)
+    if home.parent.name != "profiles" and not env.get("HERMES_SUPERVISED_CHILD"):
+        _unverified()
+
+
+def _vbs_identity(script: str) -> tuple[str, list[str]]:
+    # Recognize the vendor's complete template, not a HERMES_HOME substring
+    # inside an arbitrary executable script. Doubled quotes are VB literals.
+    literal = r'"(?:[^"\r\n]|"")*"'
+    lines = script.splitlines()
+    if len(lines) < 16 or not lines[0].startswith("' "):
+        _unverified()
+    fixed = ["Option Explicit", "Dim sh, env, existing_pp",
+             'Set sh = CreateObject("WScript.Shell")', 'Set env = sh.Environment("PROCESS")']
+    if lines[1:5] != fixed:
+        _unverified()
+    env = {}
+    index = 5
+    while index < len(lines):
+        match = re.fullmatch(r'env.Item\("([A-Z_]+)"\) = (' + literal + ')', lines[index])
+        if not match:
+            break
+        if match[1] not in {"HERMES_HOME", "HERMES_SUPERVISED_CHILD", "HERMES_GATEWAY_DETACHED", "PYTHONIOENCODING", "VIRTUAL_ENV"} or match[1] in env:
+            _unverified()
+        env[match[1]] = match[2][1:-1].replace('""', '"')
+        index += 1
+    tail = lines[index:]
+    if len(tail) != 8 or tail[:2] != ['existing_pp = env.Item("PYTHONPATH")', 'If Len(existing_pp) > 0 Then'] or tail[3] != 'Else' or tail[5] != 'End If':
+        _unverified()
+    if not re.fullmatch(r'  env.Item\("PYTHONPATH"\) = ' + literal + r' & existing_pp', tail[2]) or not re.fullmatch(r'  env.Item\("PYTHONPATH"\) = ' + literal, tail[4]):
+        _unverified()
+    if not re.fullmatch(r'sh.CurrentDirectory = ' + literal, tail[6]):
+        _unverified()
+    run = re.fullmatch(r'sh.Run (' + literal + r'), 0, False', tail[7])
+    if not run or not env.get("HERMES_SUPERVISED_CHILD"):
+        _unverified()
+    command = run[1][1:-1].replace('""', '"')
+    if "%" in command or "%" in env.get("HERMES_HOME", ""):
+        _unverified()
+    # The template uses list2cmdline, with no embedded executable quote escapes.
+    argv = [part.strip('"') for part in shlex.split(command, posix=False)]
+    return env.get("HERMES_HOME", ""), argv
+
+
+def verify_windows_task(xml: str, home: Path, account: str, sid: str) -> None:
+    import xml.etree.ElementTree as ET
+
+    task = ET.fromstring(xml)
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    principals = task.findall("t:Principals/t:Principal", ns)
+    actions = task.find("t:Actions", ns)
+    if len(principals) != 1 or actions is None or len(actions) != 1:
+        _unverified()
+    principal = principals[0]
+    user = principal.findtext("t:UserId", "", ns)
+    if not user or not account or not sid or principal.find("t:GroupId", ns) is not None:
+        _unverified()
+    if user.casefold() not in {account.casefold(), sid.casefold()}:
+        raise ValueError("service_account_mismatch")
+    if principal.findtext("t:RunLevel", "", ns) != "LeastPrivilege" or actions.get("Context") != principal.get("id"):
+        _unverified()
+    if task.findtext("t:Settings/t:Enabled", "", ns) != "true":
+        raise ValueError("service_disabled")
+    action = actions[0]
+    if action.tag != '{' + ns['t'] + '}Exec' or action.findtext('t:Command', '', ns).lower() not in {"wscript.exe", r"c:\windows\system32\wscript.exe"}:
+        _unverified()
+    args = action.findtext("t:Arguments", "", ns)
+    match = re.fullmatch(r'//B //Nologo "([^"\r\n]+)"', args)
+    if not match:
+        _unverified()
+    script = _absolute(match[1])
+    if script.suffix.lower() != '.vbs':
+        _unverified()
+    configured, argv = _vbs_identity(script.read_text(encoding="utf-8"))
+    verify_home(home, configured)
+    verify_gateway_argv(argv, home)

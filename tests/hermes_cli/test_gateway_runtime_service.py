@@ -99,3 +99,68 @@ def test_ensure_checks_effective_service_binding_before_start(tmp_path, monkeypa
     if case != 'system':
         assert unit.read_bytes() == original
     assert not (home / 'logs').exists()
+
+
+@pytest.mark.parametrize("configured,command,reason", [
+    ("requested", "gateway", None), ("other", "gateway", "profile_mismatch"),
+    ("requested", "echo", "service_identity_unverified"),
+    (None, "gateway", "service_identity_unverified"),
+])
+def test_loaded_launchd_identity_is_independent_of_disk(configured, command, reason, tmp_path):
+    from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded
+    home = tmp_path / "requested"
+    argv = [sys.executable, "-m", "hermes_cli.main", "gateway", "run"]
+    if command == "echo":
+        argv = ["/bin/echo", "hermes_cli.main", "gateway", "run"]
+    environment = f"HERMES_HOME => {tmp_path / configured}" if configured else ""
+    output = "gui/123/ai.hermes.gateway = {\n\tstate = not running\n\tprogram = " + argv[0] + "\n\targuments = {\n" + "\n".join("\t\t" + a for a in argv) + "\n\t}\n\tenvironment = {\n\t\t" + environment + "\n\t}\n}"
+    if reason:
+        with pytest.raises(ValueError, match=reason):
+            verify_launchd_loaded(output, home)
+    else:
+        verify_launchd_loaded(output, home)
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("bound", None), ("wrong_home", "profile_mismatch"),
+    ("wrong_user", "service_account_mismatch"), ("missing_user", "service_identity_unverified"),
+    ("extra_action", "service_identity_unverified"), ("disabled", "service_disabled"),
+    ("unknown_script", "service_identity_unverified"),
+])
+def test_task_xml_binds_actual_action_and_principal(case, reason, tmp_path):
+    from hermes_cli.gateway_runtime_service_identity import verify_windows_task
+    from hermes_cli.gateway_windows import _build_scheduled_task_xml
+    home = tmp_path / 'requested'
+    home.mkdir()
+    script = home / 'gateway.vbs'
+    configured = str(home if case != 'wrong_home' else tmp_path / 'other')
+    # The current installed launcher grammar; no script is executed.
+    script.write_text("\n".join([
+        "' Hermes Agent Gateway", "Option Explicit", "Dim sh, env, existing_pp",
+        'Set sh = CreateObject("WScript.Shell")', 'Set env = sh.Environment("PROCESS")',
+        f'env.Item("HERMES_HOME") = "{configured}"',
+        'env.Item("HERMES_SUPERVISED_CHILD") = "1"',
+        'env.Item("VIRTUAL_ENV") = "C:\\Hermes"',
+        'existing_pp = env.Item("PYTHONPATH")', 'If Len(existing_pp) > 0 Then',
+        '  env.Item("PYTHONPATH") = "C:\\Hermes;" & existing_pp', 'Else',
+        '  env.Item("PYTHONPATH") = "C:\\Hermes"', 'End If',
+        f'sh.CurrentDirectory = "{home}"',
+        f'sh.Run "{sys.executable} -m hermes_cli.main gateway run", 0, False',
+    ]) + "\n", encoding='utf-8')
+    user = 'DOMAIN\\owner'
+    xml = _build_scheduled_task_xml('Hermes_Gateway', script, user)
+    if case == 'wrong_user':
+        xml = xml.replace(user, 'DOMAIN\\other')
+    if case == 'missing_user':
+        xml = xml.replace(f'<UserId>{user}</UserId>', '')
+    if case == 'extra_action':
+        xml = xml.replace('</Actions>', '<Exec><Command>other.exe</Command></Exec></Actions>')
+    if case == 'disabled':
+        xml = xml.replace('<Enabled>true</Enabled>', '<Enabled>false</Enabled>')
+    if case == 'unknown_script':
+        script.write_text('MsgBox "not a gateway"', encoding='utf-8')
+    if reason:
+        with pytest.raises(ValueError, match=reason):
+            verify_windows_task(xml, home, user, 'S-1-5-21-123')
+    else:
+        verify_windows_task(xml, home, user, 'S-1-5-21-123')
