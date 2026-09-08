@@ -197,6 +197,16 @@ async def probe(peer, target):
         if not peer.blocked:
             assert a.events == b.events, 'observers saw competing event ordering/stamps'
         events = b.events
+        if peer.blocked:
+            async with asyncio.timeout(5):
+                while not a.events:
+                    await asyncio.sleep(.01)
+            assert a.events == events[:len(a.events)], 'slow observer prefix has competing stamps'
+            with fanout._lock:
+                assert len(fanout._peers) <= 2
+                assert all(p.pending_bytes <= fanout._MAX_PENDING_BYTES and
+                           len(p.pending) <= fanout._MAX_PENDING_FRAMES for p in fanout._peers)
+        verified_prefix_count = len(a.events)
         assert [e['seq'] for e in events] == list(range(snapshot['last_sequence'] + 1, events[-1]['seq'] + 1))
         for event in events:
             assert event['session_id'] == ref.session_id
@@ -232,7 +242,8 @@ async def probe(peer, target):
             'stale_callback_inert': True, 'reconnect_replay': True, 'model_calls': len(peer.requests),
             'os_buffer_blocked_bytes': blocked_bytes, 'kernel_send_queued_bytes': kernel_queued,
             'producer_and_healthy_completed_before_release': peer.blocked,
-            'event_types': [e['type'] for e in events], 'event_count': len(events)}))
+            'slow_prefix_events_verified': verified_prefix_count,
+            'event_types': sorted({e['type'] for e in events}), 'event_count': len(events)}))
     finally:
         for observer in observers:
             observer.ws.transport.resume_reading()
