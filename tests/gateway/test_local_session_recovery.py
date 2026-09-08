@@ -57,6 +57,13 @@ async def test_local_create_receipt_survives_cold_authority_atomically(tmp_path,
         policies = conn.execute("SELECT value FROM state_meta WHERE key LIKE 'gateway.local_policy.v1:%'").fetchall()
     assert len(policies) == 1
     assert json.loads(policies[0][0])['principal_id'] == actor.subject
+    from hermes_state_runtime import admit_session_input, list_session_admissions
+    admit_session_input(db, epoch=cold.epoch, principal_id=actor.subject,
+                        session_id=ref.session_id, request_id='preclaim', payload={'text': 'never run'})
+    db._write_sql('UPDATE state_meta SET value=? WHERE key=?',
+                  ('{}', 'gateway.local_policy.v1:' + ref.session_id))
+    await cold._drain(ref)
+    assert list_session_admissions(db, session_id=ref.session_id, pending_only=False)[0]['status'] == 'queued'
 
 
 @pytest.mark.linux_only

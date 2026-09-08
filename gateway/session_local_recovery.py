@@ -65,6 +65,10 @@ def restore_local_session(authority, sid):
         adapter.policies[chat_id] = policy
         authority.sessions[sid] = LiveSession(source, route)
         adapter.register_source(source)
+    elif (not adapter.authorize_source(live.source)
+          or live.source.to_dict() != source.to_dict()
+          or adapter.policies.get(chat_id) != policy):
+        raise RuntimeStoreError('storage_unavailable')
     return SessionRef(authority.profile_id, sid)
 
 

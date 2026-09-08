@@ -271,6 +271,12 @@ class SessionAuthority:
                 if any(row['status'] == 'unknown' for row in pending):
                     return
                 first = next((row for row in pending if row['status'] == 'queued'), None)
+                from gateway.config import Platform
+                if first is not None and live.source.platform == Platform.LOCAL:
+                    from gateway.session_local_recovery import restore_local_session
+                    restore_local_session(self, ref.session_id)
+                    if first['principal_id'] != live.source.user_id or set(first['payload']) != {'text'}:
+                        raise RuntimeStoreError('permission_denied')
                 if first is not None and 'native_text_v1' in first['payload']:
                     from gateway.session_envelope import check_native_route
                     await check_native_route(self.runner, first['payload'], ref.session_id, live.source,
