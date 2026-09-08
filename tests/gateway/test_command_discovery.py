@@ -3,6 +3,8 @@ import asyncio
 import json
 import os
 from pathlib import Path
+import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -14,6 +16,56 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 from tests.gateway.test_normal_runtime_boot import control
+
+
+async def _legacy_ws_snapshot(root, home, env, requests):
+    legacy_home = home.parent / 'legacy-state'
+    legacy_home.mkdir(mode=0o700)
+    shutil.copy2(home / 'config.yaml', legacy_home / 'config.yaml')
+    for directory in ('skills', 'plugins'):
+        shutil.copytree(home / directory, legacy_home / directory)
+    legacy_env = {**env, 'HERMES_HOME': str(legacy_home),
+                  'HERMES_DASHBOARD_SESSION_TOKEN': 'disposable-discovery-token'}
+    with (home.parent / 'legacy-serve.log').open('w+') as log:
+        process = subprocess.Popen([sys.executable, '-m', 'hermes_cli.main', 'serve',
+                                    '--host', '127.0.0.1', '--port', '0', '--skip-build', '--isolated'],
+                                   cwd=root, env=legacy_env, stdin=subprocess.DEVNULL,
+                                   stdout=log, stderr=subprocess.STDOUT)
+        try:
+            deadline = time.monotonic() + 40
+            port = None
+            output = ''
+            while process.poll() is None and time.monotonic() < deadline:
+                log.seek(0)
+                output = log.read()
+                if match := re.search(r'HERMES_BACKEND_READY port=(\d+)', output):
+                    port = int(match.group(1))
+                    break
+                await asyncio.sleep(.1)
+            assert port, output
+            results = []
+            async with connect(f'ws://127.0.0.1:{port}/api/ws?token=disposable-discovery-token') as ws:
+                for rid, (method, params) in enumerate(requests):
+                    await ws.send(json.dumps({'jsonrpc': '2.0', 'id': rid, 'method': method, 'params': params}))
+                    async with asyncio.timeout(20):
+                        while True:
+                            reply = json.loads(await ws.recv())
+                            if reply.get('id') == rid:
+                                assert 'result' in reply, reply
+                                results.append(reply['result'])
+                                break
+            process.send_signal(signal.SIGINT)
+            assert process.wait(timeout=20) == 0
+            return results, {'legacy_ws_pid': process.pid, 'legacy_ws_port': port,
+                             'legacy_ws_exit': process.returncode}
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
 
 
 @pytest.mark.linux_only
@@ -52,6 +104,8 @@ sys.__stdout__.write(json.dumps(results) + '\\n')
 '''
 
     async def probe(descriptor):
+        ws_baseline, legacy_receipt = await _legacy_ws_snapshot(root, home, env, requests)
+        assert ws_baseline == expected
         url = descriptor['api_origin'].replace('http:', 'ws:') + '/api/ws'
         with pytest.raises(InvalidStatus):
             async with connect(url):
@@ -73,7 +127,7 @@ sys.__stdout__.write(json.dumps(results) + '\\n')
             for method in ('commands.catalog', 'complete.slash'):
                 reply = await rpc(method, {'profile': 'foreign-profile', **({'text': '/probe'} if method == 'complete.slash' else {})})
                 assert reply['error']['message'] == 'profile_mismatch', reply
-        return {'legacy_pid_exit': legacy.returncode, 'catalog_pairs': len(pairs),
+        return {**legacy_receipt, 'legacy_pid_exit': legacy.returncode, 'catalog_pairs': len(pairs),
                 'skill_count': expected[0]['skill_count'], 'compared_requests': len(requests),
                 'unauthenticated_ws': 'rejected', 'foreign_profile': 'rejected'}
 
