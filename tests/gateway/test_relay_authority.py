@@ -39,6 +39,7 @@ async def probe(peer):
     sockets, outgoing, frames = [], [], []
     secret = 'owned-relay-fixture-secret'
     ready = asyncio.Queue()
+    revoke = False
     descriptor = CapabilityDescriptor(1, 'telegram', 'Fixture', 4096, False, True,
                                       False, 'plain', 'chars')
 
@@ -52,6 +53,9 @@ async def probe(peer):
         hello = json.loads(await ws.recv())
         assert hello['platform'] == 'telegram'
         await ws.send(json.dumps({'type': 'descriptor', 'descriptor': json.loads(descriptor.to_json())}) + '\n')
+        if revoke:
+            await ws.close(code=4401, reason='revoked')
+            return
         sockets.append(ws)
         await ready.put(ws)
         async for line in ws:
@@ -185,21 +189,46 @@ async def probe(peer):
                         pass
                     else:
                         raise AssertionError('unproven relay accepted')
-                transport._upgrade_secret = 'replacement-credential'
+                secret = 'replacement-credential'
+                replacement_transport = WebSocketRelayTransport(transport._url, 'telegram', 'fixture-bot',
+                    gateway_id='fixture-gateway', upgrade_secret=secret)
+                replacement = RelayAdapter(PlatformConfig(enabled=True), descriptor, replacement_transport)
+                runner.adapters[Platform.RELAY] = replacement
+                runner._wire_adapter_handlers(replacement)
+                try:
+                    assert await replacement.connect()
+                    await asyncio.wait_for(ready.get(), 5)
+                    try:
+                        restore_native(payload, runner)
+                    except RuntimeStoreError:
+                        pass
+                    else:
+                        raise AssertionError('stale connector replay accepted')
+                finally:
+                    await replacement.disconnect()
+                    runner.adapters[Platform.RELAY] = adapter
+                    secret = 'owned-relay-fixture-secret'
+                # A real post-handshake 4401 plus the freshly authenticated retry's
+                # 4401 must revoke queued provenance, not grant on a cached descriptor.
+                revoke = True
+                await connector_ws.close(code=4401, reason='revoked')
+                async with asyncio.timeout(5):
+                    while not transport.auth_revoked:
+                        await asyncio.sleep(.01)
                 try:
                     restore_native(payload, runner)
                 except RuntimeStoreError:
                     pass
                 else:
-                    raise AssertionError('stale connector replay accepted')
-                transport._upgrade_secret = secret
+                    raise AssertionError('revoked connector replay accepted')
                 finals = [f for f in outgoing if f.get('type') == 'outbound'
                           and f.get('action', {}).get('op') in ('send', 'edit')
                           and 'LOCAL_ACK_' in f.get('action', {}).get('content', '')]
                 assert len(finals) == 4, outgoing
                 receipt = {'same_agent': True, 'negative_controls': True,
                     'admissions': [r['admission_id'] for r in rows], 'model_requests': len(peer.requests),
-                    'finals': finals, 'observer_complete': True, 'reconnect_dedupe': True}
+                    'finals': finals, 'observer_complete': True, 'reconnect_dedupe': True,
+                    'busy_fifo': True, 'replacement_rejected': True, 'ws_revocation_rejected': True}
                 Path(os.environ['HERMES_HOME'], 'relay-receipt.json').write_text(json.dumps(receipt))
         finally:
             await adapter.disconnect()
