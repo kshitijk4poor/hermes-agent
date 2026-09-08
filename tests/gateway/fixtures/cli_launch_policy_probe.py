@@ -91,6 +91,17 @@ def probe(tmp_path):
             sessions[side] = re.search(r'Session: (\S+)', result.stderr).group(1)
         return result.stdout
 
+    async def unauthorized(desc):
+        from websockets.asyncio.client import connect
+        from websockets.exceptions import InvalidStatus
+        try:
+            async with connect(desc['api_origin'].replace('http:', 'ws:') + '/api/ws') as ws:
+                denied = await rpc(ws, 'session.create', request_id='unauthorized',
+                    api_key='must-not-be-stored', provider='custom', base_url=origin + '/denied/v1')
+                assert denied['error']['message'] == 'permission_denied', denied
+        except InvalidStatus as exc:
+            assert exc.response.status_code in (401, 403)
+
     async def after_restart(desc):
         async with websocket(home, desc) as ws:
             for side, sid in sessions.items():
@@ -113,6 +124,7 @@ def probe(tmp_path):
     try:
         with daemon(root, home, env, barrier=False) as (proc, desc):
             pids.append(proc.pid)
+            asyncio.run(unauthorized(desc))
             with ThreadPoolExecutor(2) as pool:
                 assert all('LAUNCH_POLICY_OK' in x for x in pool.map(cli, keys))
             assert config.read_bytes() == before
@@ -148,7 +160,7 @@ def probe(tmp_path):
                 leaks.append(str(path.relative_to(home)))
         assert not leaks, leaks
         return {'pids': pids, 'requests': count, 'concurrent_policies': True, 'auth_endpoint_model_reasoning': True,
-                'frozen_prefix': True, 'ignore_rules': True, 'restart_fail_closed': True, 'no_durable_keys': True}
+                'frozen_prefix': True, 'max_turns': [1, 3], 'unauthorized_refused': True, 'ignore_rules': True, 'restart_fail_closed': True, 'no_durable_keys': True}
     finally:
         peer.shutdown()
         peer.server_close()
