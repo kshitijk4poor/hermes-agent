@@ -37,7 +37,7 @@ async def multiplex_probe(runner, authority, primary, state, mode, peer):
     adapter.config.token = 'secondary-connector-fixture'
     adapter.gateway_runner = runner
     runner._profile_adapters = {'transport': {Platform.TELEGRAM: adapter}}
-    adapter.set_message_handler(runner._make_profile_message_handler('transport'))
+    runner._configure_profile_adapter(adapter, 'transport', Platform.TELEGRAM)
     source = adapter.build_source(chat_id='mux-chat', chat_type='dm', user_id='fixture-user')
 
     def rows(sid):
@@ -108,6 +108,24 @@ async def multiplex_probe(runner, authority, primary, state, mode, peer):
         while adapter._active_sessions:
             await asyncio.sleep(0.01)
     assert rows(entry.session_id) == committed
+    if mode == 'multiplex':
+        await adapter.handle_message(MessageEvent(text='BLOCK_FIFO', source=source, message_id='busy-1'))
+        assert await asyncio.to_thread(peer.blocked.wait, 5), 'model gate not reached'
+        queued = MessageEvent(text='MULTIPLEX_QUEUED', source=source, message_id='busy-2')
+        task = asyncio.create_task(adapter.handle_message(queued))
+        try:
+            async with asyncio.timeout(3):
+                while not any(row['request_id'] == 'busy-2' for row in rows(entry.session_id)):
+                    await asyncio.sleep(0.01)
+            assert not adapter._pending_messages, 'callback wrapper restored adapter-local queue'
+        finally:
+            peer.release.set()
+            await task
+            async with asyncio.timeout(10):
+                while adapter._active_sessions:
+                    await asyncio.sleep(0.01)
+        assert all(row['outcome'] == 'completed' for row in rows(entry.session_id))
+        assert worker_scopes == [(str(state), 'runtime-fixture-key')] * 3, worker_scopes
     if mode == 'capture':
         # A queued storage fixture derived from the actual committed callback envelope.
         # This is restart reauthorization evidence, not a native post-ACK kill claim.

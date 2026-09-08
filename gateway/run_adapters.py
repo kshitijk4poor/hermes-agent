@@ -1638,7 +1638,7 @@ class GatewayAdapterLifecycleMixin:
         from gateway.session_ingress_context import native_callback, register_transport_home
         register_transport_home(self, profile_name, profile_home)
 
-        async def _handler(event):
+        async def _handler(_runner, event):
             self._stamp_event_profile(event, profile_name)
             if profile_home is not None:
                 event.source._authorization_profile_home = profile_home
@@ -1646,7 +1646,7 @@ class GatewayAdapterLifecycleMixin:
                 async with self._scope_or_null(_async_profile_runtime_scope, profile_home):
                     return await self._handle_message(event)
 
-        return _handler
+        return _handler.__get__(self)
 
     def _make_profile_busy_session_handler(self, profile_name: str):
         """Busy-path twin: canonicalize FIRST, then resolve busy policy under the profile scope
@@ -1669,7 +1669,7 @@ class GatewayAdapterLifecycleMixin:
         from gateway.session_ingress_context import register_transport_home
         register_transport_home(self, None, default_home)
 
-        async def _handler(event):
+        async def _handler(_runner, event):
             source = event.source
             # In-process only (serialization ignores dynamic attrs); route ≠ admitting bot.
             source._authorization_profile_home = default_home
@@ -1689,7 +1689,7 @@ class GatewayAdapterLifecycleMixin:
                 async with _async_profile_runtime_scope(profile_home):
                     return await self._handle_message(event)
 
-        return _handler
+        return _handler.__get__(self)
 
     def _make_default_profile_busy_session_handler(self):
         """Busy-path twin of ``_make_default_profile_message_handler``: busy callbacks bypass the message
@@ -1721,26 +1721,8 @@ class GatewayAdapterLifecycleMixin:
 
     def _primary_message_handler(self):
         """Return the correctly scoped handler for a primary adapter."""
-        if self._multiplex_on():
-            return self._make_default_profile_message_handler()
-        return self._standalone_scoped(self._handle_message)
-
-    def _primary_busy_session_handler(self):
-        """Return the correctly scoped busy-session handler for a primary adapter."""
-        if self._multiplex_on():
-            return self._make_default_profile_busy_session_handler()
-        return self._standalone_scoped(self._handle_active_session_busy_message)
-
-    def _standalone_scoped(self, handler):
-        """Standalone twin of the ``_make_default_profile_*`` wrappers: run ``handler`` under
-        ``_standalone_launch_scope`` so slash commands and turns keep resolving the launch profile's
-        credentials after a hosted room flipped the process-wide guard (#112878). Decided per event:
-        activation happens after the adapters were wired."""
-        async def _handler(*args):
-            with self._standalone_launch_scope():
-                return await handler(*args)
-
-        return _handler
+        shared = getattr(self, 'session_authority', None) is not None
+        return self._make_default_profile_message_handler() if self._multiplex_on() or shared else self._handle_message
 
     def _multiplex_on(self) -> bool:
         return bool(getattr(self.config, "multiplex_profiles", False))

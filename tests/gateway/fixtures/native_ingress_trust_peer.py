@@ -51,7 +51,7 @@ async def probe(mode, peer):
     adapter.gateway_runner = runner
     runner.adapters[Platform.TELEGRAM] = adapter
     # Exercise the real callback which stamps the authorization home, not a synthetic runner call.
-    adapter.set_message_handler(runner._make_default_profile_message_handler())
+    runner._wire_adapter_handlers(adapter)
     if mode in {'multiplex', 'capture', 'recover', 'recover-again'}:
         from native_ingress_trust_multiplex import multiplex_probe
         await multiplex_probe(runner, authority, adapter, state, mode, peer)
@@ -82,6 +82,7 @@ async def probe(mode, peer):
     entry = runner.session_store.get_or_create_session(source)
     rows = list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False)
     assert rows and rows[0]['status'] == 'terminal' and rows[0]['outcome'] == 'completed', (rows, adapter.deliveries)
+    assert 'provenance' in rows[0]['payload']['native_text_v1'], rows
     assert len(peer.requests) == 1, peer.requests
     assert any('LOCAL_ACK_MESSAGING_WARM' in d['content'] for d in adapter.deliveries), adapter.deliveries
     print(json.dumps({'rows': rows, 'deliveries': adapter.deliveries, 'model_calls': len(peer.requests)}))
