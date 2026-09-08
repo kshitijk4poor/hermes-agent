@@ -1,5 +1,4 @@
-import { JsonRpcGatewayClient } from '@hermes/shared'
-import { map, type MapStore } from 'nanostores'
+import { type GatewayEvent, type GatewayEventName, JsonRpcGatewayClient } from '@hermes/shared'
 
 import type { HermesApiRequest } from '@/global'
 
@@ -33,6 +32,15 @@ export const GATEWAY_NOT_CONNECTED_MESSAGE = 'Hermes gateway is not connected'
 export class HermesGateway extends JsonRpcGatewayClient {
   private canonical = false
   private readonly protocol = new CanonicalDesktopProtocol()
+
+  override on<P = unknown>(type: GatewayEventName, handler: (event: GatewayEvent<P>) => void): () => void {
+    return super.on<P>(type, event => {
+      // Named listeners run before wildcard listeners in the shared client.
+      // Normalize before either kind sees the prompt, including replay delivery.
+      if (this.canonical) { this.protocol.event(event) }
+      handler(event)
+    })
+  }
 
   override async connect(wsUrl: string): Promise<void> {
     this.canonical = new URL(wsUrl).searchParams.has('native_dial')
