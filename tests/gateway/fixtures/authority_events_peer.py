@@ -116,9 +116,13 @@ def main():
     assert not errors, errors
     assert before_release, 'OS-full observer blocked real authority producer before reader release'
     assert healthy_completed, 'healthy observer did not complete before stalled reader release'
-    print(json.dumps({'os_buffer_full_bytes': filled, 'producer_returned_before_release': before_release,
-                      'healthy_completed_before_release': healthy_completed,
-                      'model_calls': len(peer.requests)}))
+    # TUI imports may replace stdout with their protocol-safe logger.
+    import sys
+    sys.__stdout__.write(json.dumps({'os_buffer_full_bytes': filled,
+                                    'producer_returned_before_release': before_release,
+                                    'healthy_completed_before_release': healthy_completed,
+                                    'model_calls': len(peer.requests)}) + '\n')
+    sys.__stdout__.flush()
 
 
 if __name__ == '__main__':
