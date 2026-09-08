@@ -4,7 +4,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
-import socket
 import threading
 import traceback
 
@@ -48,7 +47,6 @@ class ModelPeer(BaseHTTPRequestHandler):
 
 
 async def probe(peer, target):
-    import uvicorn
     import websockets
     from gateway.config import Platform, PlatformConfig
     from gateway.platforms.base import BasePlatformAdapter, SendResult
@@ -56,7 +54,7 @@ async def probe(peer, target):
     from gateway.session import SessionSource
     from gateway.session_authority import initialize_session_authority
     from hermes_cli import web_server
-    from hermes_cli.dashboard_auth.ws_tickets import mint_ticket
+    from gateway.run_api import start_gateway_api, stop_gateway_api
     from tools.approval import list_gateway_approvals, resolve_gateway_approval
     from hermes_state_runtime import list_session_admissions
     from run_agent import AIAgent
@@ -87,19 +85,8 @@ async def probe(peer, target):
     runner.adapters[Platform.TELEGRAM] = adapter
     ref = authority.register(SessionSource(platform=Platform.TELEGRAM, chat_id='controls-chat',
                                            chat_type='dm', user_id='fixture-user'))
-    app = web_server.app
-    app.state.auth_required = True
-    app.state.session_authority = authority
-    listener = socket.socket()
-    listener.bind(('127.0.0.1', 0))
-    listener.listen()
-    listener.setblocking(False)
-    port = listener.getsockname()[1]
-    http = uvicorn.Server(uvicorn.Config(app, log_level='warning', lifespan='off', ws='websockets'))
-    server_task = asyncio.create_task(http.serve(sockets=[listener]))
-    async with asyncio.timeout(10):
-        while not http.started:
-            await asyncio.sleep(.01)
+    api = await start_gateway_api(runner)
+    port = api.socket.getsockname()[1]
     frames = []
 
     async def rpc(ws, rid, method, **params):
@@ -113,8 +100,7 @@ async def probe(peer, target):
                     return frame
 
     async def connect():
-        ticket = mint_ticket(user_id='fixture-user', provider='fixture')
-        return await websockets.connect(f'ws://127.0.0.1:{port}/api/ws?ticket={ticket}')
+        return await websockets.connect(f'ws://127.0.0.1:{port}/api/ws?token={web_server._SESSION_TOKEN}')
 
     a = b = None
     try:
@@ -178,9 +164,7 @@ async def probe(peer, target):
         for ws in (a, b):
             if ws is not None:
                 await ws.close()
-        http.should_exit = True
-        await asyncio.wait_for(server_task, 10)
-        listener.close()
+        await stop_gateway_api(api)
 
 
 def main():
