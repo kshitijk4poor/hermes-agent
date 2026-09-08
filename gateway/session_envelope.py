@@ -15,8 +15,8 @@ _EVENT_FIELDS = (
     'user_id', 'user_name', 'message_id', 'platform_update_id',
     'reply_to_message_id', 'reply_to_text', 'reply_to_author_id',
     'reply_to_author_name', 'reply_to_is_own_message', 'allow_gateway_control',
-    'auto_skill', 'channel_prompt', 'channel_context', 'media_types', 'media_text_inlined',
 )
+_CONTEXT_FIELDS = ('auto_skill', 'channel_prompt', 'channel_context')
 
 
 def _validate_native(runner, event):
@@ -61,9 +61,17 @@ def snapshot_native(runner, event):
     envelope = {'source': encoded_source,
                 'route': runner.session_store._generate_session_key(event.source),
                 'event': deepcopy({name: getattr(event, name) for name in _EVENT_FIELDS}),
-                'timestamp': event.timestamp.isoformat(),
-                'message_type': event.message_type.value,
-                'media': capture_native_media(event.media_urls)}
+                'timestamp': event.timestamp.isoformat()}
+    # Omit new defaults so an identical retry of an older text admission retains
+    # its fingerprint. Explicit context (including an empty skill list) is exact.
+    envelope['event'].update({name: deepcopy(getattr(event, name)) for name in _CONTEXT_FIELDS
+                              if getattr(event, name) is not None})
+    if event.message_type != MessageType.TEXT:
+        envelope['message_type'] = event.message_type.value
+    if event.media_urls:
+        envelope['media'] = capture_native_media(event.media_urls)
+        envelope['event'].update(media_types=list(event.media_types),
+                                 media_text_inlined=list(event.media_text_inlined))
     # Keep the private dispatch key so previously committed text-only rows recover
     # under the same authority; optional media/context fields extend that envelope.
     return {'text': event.text, 'native_text_v1': envelope}

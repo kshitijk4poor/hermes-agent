@@ -142,6 +142,28 @@ async def probe(mode, peer):
             deliveries=adapter.deliveries, recovery=result, retained=before['retained'], rows=after)))
         return
 
+    # A committed text row from before media support must keep its retry identity.
+    from hermes_state_runtime import admit_session_input, cancel_session_input
+    old_event = MessageEvent(text='legacy native input', source=source, message_id='legacy-text')
+    ref = authority.register(source)
+    encoded_source = source.to_dict()
+    encoded_source['is_bot'] = source.is_bot
+    legacy = {'text': old_event.text, 'native_text_v1': {
+        'source': encoded_source, 'route': runner.session_store._generate_session_key(source),
+        'timestamp': old_event.timestamp.isoformat(), 'event': {
+            key: getattr(old_event, key) for key in (
+                'user_id', 'user_name', 'message_id', 'platform_update_id',
+                'reply_to_message_id', 'reply_to_text', 'reply_to_author_id',
+                'reply_to_author_name', 'reply_to_is_own_message', 'allow_gateway_control')}}}
+    principal = 'messaging:' + json.dumps([source.profile, source.platform.value, source.chat_id,
+                                          source.thread_id, source.user_id], separators=(',', ':'))
+    old_row = admit_session_input(authority.db, epoch=authority.epoch, principal_id=principal,
+                                 session_id=ref.session_id, request_id=old_event.message_id, payload=legacy)
+    cancel_session_input(authority.db, epoch=authority.epoch, admission_id=old_row['admission_id'])
+    retried = authority.admit_native(old_event)
+    assert retried.admission_id == old_row['admission_id'] and retried.status == 'terminal'
+    assert rows(ref.session_id)[0]['payload'] == legacy
+
     # Closed owner context: lists are copied, public source codec never carries trust.
     event = MessageEvent(text='context', source=source, auto_skill=['first', 'second'],
                          channel_prompt='channel policy', channel_context='backfilled history')
