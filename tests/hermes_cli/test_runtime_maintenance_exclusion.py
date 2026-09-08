@@ -74,3 +74,101 @@ def test_restore_refuses_live_authority_without_changing_data(tmp_path):
         peer.shutdown()
         peer.server_close()
         thread.join(timeout=5)
+
+
+def test_import_and_startup_exclude_each_other_before_publication(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    import zipfile
+    from gateway.runtime_ownership import ProfileOwnership
+    from hermes_cli import backup
+
+    home = tmp_path / 'state'
+    home.mkdir(mode=0o700)
+    archive = tmp_path / 'restore.zip'
+    with sqlite3.connect(tmp_path / 'donor.db') as db:
+        db.execute('CREATE TABLE marker(value TEXT)')
+        db.execute("INSERT INTO marker VALUES('restored')")
+    with zipfile.ZipFile(archive, 'w') as zf:
+        zf.writestr('config.yaml', 'gateway: {multiplex_profiles: false}\n')
+        zf.write(tmp_path / 'donor.db', 'state.db')
+    arrived, release = threading.Event(), threading.Event()
+    publish = backup._extract_member_atomically
+
+    def barrier(*args, **kwargs):
+        arrived.set()
+        assert release.wait(30)
+        return publish(*args, **kwargs)
+
+    monkeypatch.setattr(backup, '_extract_member_atomically', barrier)
+    results = []
+
+    def restore():
+        with zipfile.ZipFile(archive) as zf:
+            results.append(backup._import_members(zf, zf.namelist(), '', home, 2))
+
+    thread = threading.Thread(target=restore)
+    thread.start()
+    try:
+        assert arrived.wait(20)
+        root = Path(__file__).resolve().parents[2]
+        env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
+        env.update(HOME=str(tmp_path / 'user'), HERMES_HOME=str(home), PYTHONPATH=str(root))
+        contender = subprocess.run([sys.executable, '-c',
+            "import logging, runpy; logging.basicConfig(level=logging.INFO); runpy.run_module('gateway.run', run_name='__main__')"], cwd=root, env=env,
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=25)
+        assert 'already owns profile' in contender.stdout + contender.stderr, contender
+        assert not (home / 'state.db').exists()
+    finally:
+        release.set()
+        thread.join(timeout=30)
+    assert not thread.is_alive() and results[0][0] == 2 and not results[0][2], results
+    # Startup has reserved but not published a PID or opened the database.
+    owner = ProfileOwnership()
+    owner.reserve([home])
+    try:
+        before = (home / 'config.yaml').read_bytes(), (home / 'state.db').read_bytes()
+        restore()
+        assert results[-1][0] == 0 and 'maintenance refused' in results[-1][2][0]
+        assert before == ((home / 'config.yaml').read_bytes(), (home / 'state.db').read_bytes())
+    finally:
+        owner.close()
+
+
+def test_recovery_output_exemption_excludes_canonical_activation(tmp_path):
+    import hashlib
+    import pytest
+    from gateway.runtime_ownership import ProfileOwnership
+    from hermes_cli.session_recovery import recover_session_database, SessionRecoverySafetyError
+    from hermes_state import SessionDB
+    from hermes_state_runtime import begin_runtime_epoch, admit_session_input
+
+    source_home, target_home = tmp_path / 'source', tmp_path / 'target'
+    source_home.mkdir()
+    target_home.mkdir()
+    source = source_home / 'state.db'
+    owner = ProfileOwnership()
+    owner.reserve([source_home, target_home])
+    try:
+        with SessionDB(db_path=source) as db:
+            db.create_session('retained', 'cli')
+            db.append_message('retained', 'user', 'retained content')
+            epoch = begin_runtime_epoch(db, instance_id='source-owner')
+            admit_session_input(db, epoch=epoch, principal_id='fixture', session_id='retained',
+                                request_id='pending', payload={'text': 'must not execute in salvage'})
+        before = hashlib.sha256(source.read_bytes()).hexdigest()
+        with pytest.raises(SessionRecoverySafetyError, match='maintenance refused'):
+            recover_session_database(source, target_home / 'state.db')
+        assert not (target_home / 'state.db').exists()
+        report = recover_session_database(source, target_home / 'recovered.db')
+        assert report['verified'] and report['source_unchanged'], report
+        assert report['runtime_state']['excluded_tables']['session_admissions']['rows'] == 1
+        with sqlite3.connect(target_home / 'recovered.db') as db:
+            assert db.execute('SELECT content FROM messages').fetchall() == [('retained content',)]
+            assert db.execute('SELECT COUNT(*) FROM session_admissions').fetchone()[0] == 0
+            assert db.execute('SELECT COUNT(*) FROM runtime_epoch').fetchone()[0] == 0
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == before
+    finally:
+        owner.close()
+    report = recover_session_database(source, target_home / 'state.db')
+    assert report['verified'] and not report['installed']
