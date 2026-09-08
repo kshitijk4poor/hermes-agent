@@ -65,7 +65,11 @@ class LocalSessionAdapter(BasePlatformAdapter):
 
 def authorize_local_source(runner, source):
     """None for legacy/nonlocal routes; registered local adapters fail closed."""
-    adapter = runner._adapter_for_source(source)
+    if source.platform != Platform.LOCAL:
+        return None
+    # A forged profile must not miss this adapter and fall into a messaging
+    # allow-all policy. Local source identity is owned by this authority alone.
+    adapter = runner._primary_adapters().get(Platform.LOCAL)
     if not isinstance(adapter, LocalSessionAdapter):
         return None
     if adapter.authority is not getattr(runner, 'session_authority', None):

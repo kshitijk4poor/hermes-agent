@@ -60,6 +60,30 @@ async def probe(peer, target):
         assert info['result']['source'] == 'cli', info
         assert info['result']['lazy'] is True, info
         assert authority.db.get_session(sid) is not None
+        # Private route identity cannot be reconstructed from its serialized source,
+        # even under an unrelated messaging allow-all policy.
+        from dataclasses import replace
+        source = authority.sessions[sid].source
+        assert runner._is_user_authorized_for_source(source)
+        os.environ['GATEWAY_ALLOW_ALL_USERS'] = 'true'
+        try:
+            assert not runner._is_user_authorized_for_source(replace(source, role_authorized=True))
+            assert not runner._is_user_authorized_for_source(replace(source, profile='foreign'))
+        finally:
+            os.environ.pop('GATEWAY_ALLOW_ALL_USERS')
+        from gateway.session_local import create_local_session
+        from gateway.session_contract import Principal
+        from hermes_state_runtime import RuntimeStoreError
+        for actor, reason in ((Principal('read-only', 'fixture', frozenset({'session:read'}), 'readonly'),
+                               'permission_denied'),
+                              (Principal('creator', 'foreign', frozenset({'session:create'}), 'foreign'),
+                               'profile_mismatch')):
+            try:
+                create_local_session(authority, actor, {})
+            except RuntimeStoreError as exc:
+                assert exc.reason == reason
+            else:
+                raise AssertionError('restricted principal created a local route')
         repeated = await rpc(a, 'session.create', request_id='fresh', source='cli')
         assert repeated['result']['session_id'] == sid, repeated
         b = await connect()
