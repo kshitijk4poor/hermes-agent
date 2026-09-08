@@ -34,6 +34,37 @@ def test_sessions_export_md_writes_single_session(monkeypatch, tmp_path, capsys)
     assert str(files[0]) in output
 
 
+def test_sessions_export_verified_delete_keeps_file(monkeypatch, tmp_path, capsys):
+    import hermes_cli.main as main_mod
+    from hermes_cli.session_export_md import verify_export_file
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    path = tmp_path / "state.db"
+    db = SessionDB(db_path=path)
+    db.create_session("delete-me", "cli")
+    db.append_message("delete-me", "user", "retain this exported payload")
+    original = db.export_session("delete-me")
+    assert original is not None
+    db.close()
+    monkeypatch.setattr(sys, "argv", [
+        "hermes", "sessions", "export", "--format", "md",
+        "--session-id", "delete-me", "--delete-after-verified", "--yes",
+        str(tmp_path / "exports"),
+    ])
+
+    main_mod.main()
+
+    files = list((tmp_path / "exports").glob("*.md"))
+    assert len(files) == 1
+    assert verify_export_file(files[0], original)[0]
+    db = SessionDB(db_path=path, read_only=True)
+    try:
+        assert db.get_session("delete-me") is None
+    finally:
+        db.close()
+    assert "Deleted exported session" in capsys.readouterr().out
+
+
 def test_sessions_export_redact_scrubs_secrets(monkeypatch, tmp_path):
     """Redaction affects the exported file, never the stored transcript."""
     import hermes_cli.main as main_mod
