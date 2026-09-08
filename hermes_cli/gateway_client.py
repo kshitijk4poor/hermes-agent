@@ -71,10 +71,10 @@ class GatewayClient:
             self.pending.pop(rid, None)
 
 
-def _session_ticket(home: Path, endpoint) -> str:
+def _session_ticket(home: Path, endpoint, *, purpose="interactive") -> str:
     from hermes_cli.gateway_runtime_discovery import _socket_path, _identify_response
     request = json.dumps({"protocol": 1, "id": 1, "verb": "session-ticket", "params": {
-        "profile_id": endpoint.profile_id, "instance_id": endpoint.instance_id, "purpose": "interactive",
+        "profile_id": endpoint.profile_id, "instance_id": endpoint.instance_id, "purpose": purpose,
     }}).encode() + b"\n"
     if os.name == "nt":
         from gateway.runtime_bootstrap_windows import query_runtime_control

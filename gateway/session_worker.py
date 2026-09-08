@@ -71,6 +71,8 @@ async def worker_request(connection, ref, params, *, operation):
             raise RuntimeStoreError('unsupported_producer')
         return await asyncio.to_thread(register_worker_execution, authority.db, epoch=authority.epoch,
             **scope, kind='compute', adoption_secret=claim, require_idle=True)
+    if 'worker:adopt' not in connection.actor.capabilities:
+        raise RuntimeStoreError('permission_denied')
     _verify(connection, ref, params, claim)
     if operation == 'adopt':
         return await asyncio.to_thread(adopt_worker_execution, authority.db, epoch=authority.epoch,

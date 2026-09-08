@@ -46,7 +46,8 @@ class WorkerRPC:
             if discovery.state != 'ready' or discovery.endpoint is None:
                 raise WorkerPersistenceError('owner_unavailable')
             endpoint = discovery.endpoint
-            ticket = _session_ticket(self.home, endpoint)
+            ticket = _session_ticket(self.home, endpoint,
+                purpose='interactive' if method == 'worker.register' else 'worker-adoption')
             url = endpoint.api_origin.replace('https:', 'wss:').replace('http:', 'ws:') + '/api/ws'
             with connect(url, subprotocols=['hermes-gateway-v1', 'hermes-gateway-ticket.' + ticket],
                          open_timeout=5, close_timeout=1, max_size=8 * 1024 * 1024) as ws:
@@ -84,7 +85,7 @@ class RuntimeSessionStore:
             raise WorkerPersistenceError('unsafe_outbox')
         os.chmod(self.path.parent, 0o700)
         if self.path.exists():
-            self.journal = json.loads(self.path.read_text())
+            self.journal = json.loads(self.path.read_text(encoding="utf-8"))
             if self.journal['scope'] != self.scope:
                 raise WorkerPersistenceError('outbox_scope_mismatch')
         else:

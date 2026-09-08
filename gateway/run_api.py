@@ -146,9 +146,13 @@ class GatewayRuntimeAPI:
                 ticket, profile_id=self.runner.session_authority.profile_id,
                 purpose='interactive')
         except PermissionError:
-            # Browser/OAuth tickets use the same protocol but a different
-            # issuer. Let the existing gate validate them, never mint a grant.
-            return await self.app(scope, receive, send)
+            try:
+                grant = self.runner.session_ticket_store.redeem(
+                    ticket, profile_id=self.runner.session_authority.profile_id,
+                    purpose='worker-adoption')
+            except PermissionError:
+                # Browser/OAuth tickets have a separate issuer.
+                return await self.app(scope, receive, send)
         from tui_gateway.ws import handle_ws
         await handle_ws(ws, auth_identity={'user_id': grant['subject'], 'provider': 'local',
                                           'profile_id': grant['profile_id'],

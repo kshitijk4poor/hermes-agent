@@ -41,6 +41,7 @@ for line in sys.stdin:
                      'execution_id': 'owned-worker', 'generation': 0,
                      'pid': os.getpid(), 'birth': psutil.Process().create_time(), 'secret': 'private-worker-secret'}
             registration = transport('worker.register', **scope, kind='compute')
+            assert reason(lambda: transport('session.create', request_id='forbidden-worker-create', source='cli')) == 'permission_denied'
             scope['epoch'] = registration['owner_epoch']
             store = module.RuntimeSessionStore(transport, scope, home / 'worker-outboxes' / 'owned-worker', max_bytes=20000)
             sid = scope['session_id']
