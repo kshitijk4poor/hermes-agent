@@ -24,7 +24,7 @@ async def execute_admission(authority, ref, row):
     native = row['admission_id'] in authority.native_waiters
     authority.native_waiters.discard(row['admission_id'])
     if 'native_text_v1' in row['payload']:
-        event = restore_native(row['payload'])
+        event = restore_native(row['payload'], authority.runner)
     else:
         event = MessageEvent(text=row['payload']['text'], source=live.source,
                              message_id=row['admission_id'])

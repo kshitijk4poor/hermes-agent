@@ -1663,10 +1663,24 @@ class GatewayAdapterLifecycleMixin:
         default_home = Path(get_hermes_home())
 
         async def _handler(event):
-            # A rejected route still enters ``_handle_message``, whose ingress gate drops it fail-closed.
-            profile_home = self._admit_primary_source(event.source, default_home) or default_home
-            async with _async_profile_runtime_scope(profile_home):
-                return await self._handle_message(event)
+            source = event.source
+            # In-process only (serialization ignores dynamic attrs); route ≠ admitting bot.
+            source._authorization_profile_home = default_home
+            if (
+                not getattr(source, "profile", None)
+                and getattr(source, "profile_route_rejected", False) is not True
+                and not self._stamp_routed_profile(source)
+            ):
+                # Read by the ``_handle_message`` ingress gate, which drops fail-closed.
+                source.profile_route_rejected = True
+            profile_home = (
+                self._resolve_profile_home_for_source(source)
+                if getattr(source, "profile", None) else default_home
+            )
+            from gateway.session_ingress_context import native_callback
+            with native_callback(self, event, default_home):
+                async with _async_profile_runtime_scope(profile_home):
+                    return await self._handle_message(event)
 
         return _handler
 

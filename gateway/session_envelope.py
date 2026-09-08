@@ -19,7 +19,7 @@ _EVENT_FIELDS = (
 _CONTEXT_FIELDS = ('auto_skill', 'channel_prompt', 'channel_context')
 
 
-def _validate_native(runner, event):
+def _validate_native(runner, event, provenance=None):
     source = event.source
     if (source is None or not isinstance(event.text, str)
             or not isinstance(event.message_type, MessageType)
@@ -27,9 +27,12 @@ def _validate_native(runner, event):
             or event.internal or event.metadata or event.prompt_response
             or source.role_authorized or source.delivered_via_upstream_relay
             or source.profile_route_rejected
-            or getattr(source, '_authorization_profile_home', None) is not None
+            or (getattr(source, '_authorization_profile_home', None) is not None and provenance is None)
             or getattr(runner.config, 'multiplex_profiles', False)):
         raise RuntimeStoreError('invalid_params')
+    if provenance is not None:
+        from gateway.session_ingress_context import restore_provenance
+        restore_provenance(runner, source, provenance)
     if not runner._is_user_authorized_for_source(source, allow_adapter_delegation=False):
         raise RuntimeStoreError('permission_denied')
     if any(value is not None and not isinstance(value, str)
@@ -57,11 +60,15 @@ def _validate_native(runner, event):
 
 
 def snapshot_native(runner, event):
-    encoded_source = _validate_native(runner, event)
+    from gateway.session_ingress_context import capture_provenance
+    provenance = capture_provenance(runner, event)
+    encoded_source = _validate_native(runner, event, provenance)
     envelope = {'source': encoded_source,
                 'route': runner.session_store._generate_session_key(event.source),
                 'event': deepcopy({name: getattr(event, name) for name in _EVENT_FIELDS}),
                 'timestamp': event.timestamp.isoformat()}
+    if provenance is not None:
+        envelope['provenance'] = provenance
     # Omit new defaults so an identical retry of an older text admission retains
     # its fingerprint. Explicit context (including an empty skill list) is exact.
     envelope['event'].update({name: deepcopy(getattr(event, name)) for name in _CONTEXT_FIELDS
@@ -77,10 +84,15 @@ def snapshot_native(runner, event):
     return {'text': event.text, 'native_text_v1': envelope}
 
 
-def restore_native(payload):
+def restore_native(payload, runner=None):
     envelope = payload['native_text_v1']
     source = SessionSource.from_dict(envelope['source'])
     source.is_bot = envelope['source']['is_bot']
+    if 'provenance' in envelope:
+        from gateway.session_ingress_context import callback_runner, restore_provenance
+        runner = runner or callback_runner()
+        if runner is not None:
+            restore_provenance(runner, source, envelope['provenance'])
     return MessageEvent(text=payload['text'], source=source,
                         timestamp=datetime.fromisoformat(envelope['timestamp']),
                         message_type=MessageType(envelope.get('message_type', 'text')),
@@ -90,9 +102,9 @@ def restore_native(payload):
 
 def check_native_route(runner, payload, session_id, available_source, adapter):
     """Read-only preflight: route/auth rejection must never consume a queued row."""
-    event = restore_native(payload)
+    event = restore_native(payload, runner)
     # Validate the stored sender without recapturing files or trusting the binding caller.
-    _validate_native(runner, event)
+    _validate_native(runner, event, payload['native_text_v1'].get('provenance'))
     route = payload['native_text_v1']['route']
     store = runner.session_store
     if (store._generate_session_key(event.source) != route
