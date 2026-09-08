@@ -18,11 +18,15 @@ def policy_identity(policy):
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 
+def _fingerprint(value):
+    return fingerprint_secret_value(value if isinstance(value, str) else json.dumps(value, sort_keys=True))
+
+
 def config_reference(authority, session_id, policy, secrets):
     home = Path(authority.db.db_path).resolve().parent
     return PREFIX + json.dumps({'home': str(home), 'profile': authority.profile_id,
         'session': session_id, 'policy': policy_identity(policy),
-        'entries': [[list(path), fingerprint_secret_value(value)] for path, value in secrets.items()]},
+        'entries': [[list(path), _fingerprint(value)] for path, value in secrets.items()]},
         sort_keys=True)
 
 
@@ -47,9 +51,14 @@ def recover_config_secrets(authority, policy):
         values = {}
         for path, fingerprint in source['entries']:
             value = config
-            for key in path:
+            lookup = path
+            if path[0] is None:
+                from tools.terminal_scope import build_profile_terminal_scope
+                value = build_profile_terminal_scope(home)
+                lookup = path[1:]
+            for key in lookup:
                 value = value[key]
-            actual = fingerprint_secret_value(value)
+            actual = _fingerprint(value)
             if actual is None or not hmac.compare_digest(actual, fingerprint):
                 raise ValueError('credential changed')
             values[tuple(path)] = value

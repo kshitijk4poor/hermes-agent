@@ -872,7 +872,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
 
     def run_sync(self):
         from gateway.session_policy import policy_for_source, policy_scope
-        with policy_scope(policy_for_source(self._runner, self._ctx.source)):
+        with policy_scope(policy_for_source(self._runner, self._ctx.source),
+                          authority=getattr(self._runner, "session_authority", None)):
             return self._run_sync_scoped()
 
     def _run_sync_scoped(self):

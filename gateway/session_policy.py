@@ -30,6 +30,8 @@ class LocalSessionPolicy:
             from gateway.session_policy_credentials import recover_config_secrets
             secrets = recover_config_secrets(authority, self)
             for path, value in secrets.items():
+                if path[0] is None:  # private terminal projection, not config
+                    continue
                 target = config
                 for key in path[:-1]:
                     target = target[key]
@@ -128,6 +130,7 @@ def build_policy(params, config, *, private_secrets=None):
     request = {k: v for k, v in params.items() if k not in {'request_id', 'api_key'}}
     request.setdefault('source', 'cli')
     _extract_config_secrets(config, private_secrets)
+    _extract_config_secrets(terminal, private_secrets, (None,))
     return LocalSessionPolicy(source, SURFACES[source], cwd, model, tuple(sorted(enabled)),
                               json.dumps(config), json.dumps(request, sort_keys=True), json.dumps(terminal))
 
@@ -136,10 +139,15 @@ def _extract_config_secrets(value, private, path=()):
     # Reuse the configuration owner's structural classification; opaque keys need
     # not match a vendor prefix. Only the authority keeps their original values.
     from hermes_cli.config import _SECRET_CONFIG_KEYS
+    from agent.credential_persistence import _is_secret_payload_key
+    containers = {'env', 'headers', 'extra_headers', 'docker_env', 'docker_extra_args',
+                  'terminal_docker_env', 'terminal_docker_extra_args'}
     items = value.items() if isinstance(value, dict) else enumerate(value) if isinstance(value, list) else ()
     for key, child in items:
         child_path = path + (key,)
-        if isinstance(key, str) and key.lower() in _SECRET_CONFIG_KEYS and isinstance(child, str) and child:
+        sensitive = isinstance(key, str) and (key.lower() in _SECRET_CONFIG_KEYS
+                    or key.lower() in containers or _is_secret_payload_key(key))
+        if sensitive and child and child not in ('{}', '[]'):
             if private is None:
                 raise RuntimeStoreError('launch_credentials_unavailable')
             private[child_path] = child
@@ -230,14 +238,20 @@ def policy_for_source(runner, source):
 
 
 @contextmanager
-def policy_scope(policy):
+def policy_scope(policy, *, authority=None):
     if policy is None:
         yield
         return
     from agent.runtime_cwd import set_session_cwd
     from tools.terminal_scope import set_terminal_scope, reset_terminal_scope
+    terminal = json.loads(policy.terminal_json)
+    if policy.config_secret_ref is not None:
+        from gateway.session_policy_credentials import recover_config_secrets
+        for path, value in recover_config_secrets(authority, policy).items():
+            if path[0] is None:
+                terminal[path[1]] = value
     cwd_token = set_session_cwd(policy.cwd)
-    terminal_token = set_terminal_scope(json.loads(policy.terminal_json))
+    terminal_token = set_terminal_scope(terminal)
     try:
         yield
     finally:
