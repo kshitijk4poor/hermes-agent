@@ -30,12 +30,11 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
     import queue
     from types import SimpleNamespace
 
-    from gateway.config import Platform
-    from gateway.session import SessionSource
+    from gateway.config import GatewayConfig, Platform
+    from gateway.session import SessionSource, SessionStore
     from gateway.session_authority import LiveSession, initialize_session_authority
     from gateway.session_contract import SessionRef, Submission
     from gateway.session_controls import AuthorityConnection
-    from hermes_state import SessionDB
     from tui_gateway import event_replay
 
     # Small real rings exercise truncation and cross-session eviction without
@@ -43,10 +42,12 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
     # the runner's answer boundary is deliberately deterministic here.
     monkeypatch.setattr(event_replay, '_REPLAY_BUFFER_MAX', 5)
     monkeypatch.setattr(event_replay, '_REPLAY_SESSIONS_MAX', 1)
-    db = SessionDB(tmp_path / 'replay.db')
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    store = SessionStore(tmp_path / 'sessions', GatewayConfig())
+    db = store._db
     async def answer(event):
         return event.text
-    runner = SimpleNamespace(_session_db=db, _draining=False,
+    runner = SimpleNamespace(_session_db=db, session_store=store, _draining=False,
                              _handle_message=answer, _adapter_for_source=lambda source: None)
     authority = await initialize_session_authority(runner, profile_id='replay', instance_id='owner')
     ref = SessionRef('replay', 'shared')

@@ -191,9 +191,12 @@ async def test_start_gateway_does_not_start_cron_after_aborted_startup(tmp_path,
 
     class AbortedStartupRunner:
         def __init__(self, config):
+            from gateway.session import SessionStore
             from hermes_state import SessionDB
             from hermes_constants import get_hermes_home
+            self.session_store = SessionStore(get_hermes_home() / 'sessions', config)
             self._session_db = SessionDB(get_hermes_home() / 'state.db')
+            self.session_store._db = self._session_db
             self._draining = False
             self.config = config
             self.adapters = {}
@@ -239,9 +242,12 @@ async def test_start_gateway_preserves_service_restart_fallback_after_aborted_st
 
     class AbortedStartupRunner:
         def __init__(self, config):
+            from gateway.session import SessionStore
             from hermes_state import SessionDB
             from hermes_constants import get_hermes_home
+            self.session_store = SessionStore(get_hermes_home() / 'sessions', config)
             self._session_db = SessionDB(get_hermes_home() / 'state.db')
+            self.session_store._db = self._session_db
             self._draining = False
             self.config = config
             self.adapters = {}
@@ -295,9 +301,12 @@ async def test_start_gateway_classifies_startup_signal_exit(
 
     class AbortedStartupRunner:
         def __init__(self, config):
+            from gateway.session import SessionStore
             from hermes_state import SessionDB
             from hermes_constants import get_hermes_home
+            self.session_store = SessionStore(get_hermes_home() / 'sessions', config)
             self._session_db = SessionDB(get_hermes_home() / 'state.db')
+            self.session_store._db = self._session_db
             self._draining = False
             self.config = config
             self.adapters = {}
