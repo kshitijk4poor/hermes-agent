@@ -1,0 +1,73 @@
+"""Session-runtime lifecycle owned by the ordinary gateway bootstrap."""
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+import uuid
+
+
+async def initialize_gateway_runtime(runner):
+    from gateway.runtime_bootstrap import TicketStore
+    from gateway.runtime_ownership import process_ownership
+    from gateway.session_authority import initialize_session_authority
+    from hermes_constants import get_hermes_home
+
+    home = get_hermes_home().resolve()
+    # One SessionAuthority currently binds exactly one DB. Never give a
+    # secondary home's principal access to the launch home's authority.
+    if getattr(runner.config, 'multiplex_profiles', False):
+        raise RuntimeError('shared gateway bootstrap does not yet support multiplex profile authorities')
+    if not process_ownership.owns(home):
+        raise RuntimeError('session authority requires reserved profile ownership')
+    db = getattr(runner._session_db, '_db', runner._session_db)
+    if db is None or Path(db.db_path).resolve().parent != home:
+        raise RuntimeError('session authority database does not belong to the reserved profile')
+    descriptor = {
+        'instance_id': uuid.uuid4().hex, 'runtime_protocol': 1,
+        'state': 'starting', 'capabilities': [],
+        'served_profiles': [{'profile_id': str(home), 'home': str(home)}],
+    }
+    runner.session_runtime_descriptor = descriptor
+    authority = await initialize_session_authority(
+        runner, profile_id=str(home), instance_id=descriptor['instance_id'])
+    descriptor['authority_epoch'] = authority.epoch
+    runner.session_ticket_store = TicketStore(descriptor['instance_id'], frozenset({str(home)}))
+
+
+async def start_gateway_runtime_api(runner):
+    from gateway.run_api import start_gateway_api
+    runner.session_api = await start_gateway_api(runner)
+    runner.session_runtime_descriptor['api_origin'] = runner.session_api.api_origin
+
+
+def publish_gateway_runtime_ready(runner):
+    descriptor = runner.session_runtime_descriptor
+    if runner.session_api.task.done() or not runner._running or runner._draining:
+        raise RuntimeError('gateway stopped before session API readiness')
+    descriptor.update(state='ready', capabilities=[
+        'session-authority-v1', 'durable-admission-v1', 'event-replay-v1'])
+
+
+async def drain_gateway_runtime(runner):
+    """Withdraw admission before any await; close sockets before DB teardown."""
+    from gateway.run_api import stop_gateway_api
+    descriptor = getattr(runner, 'session_runtime_descriptor', None)
+    if descriptor is None:
+        return
+    descriptor.update(state='draining', capabilities=[])
+    store = getattr(runner, 'session_ticket_store', None)
+    if store is not None:
+        store.revoke()
+    handle = getattr(runner, 'session_api', None)
+    if handle is not None:
+        await stop_gateway_api(handle)
+
+
+async def settle_gateway_runtime(runner):
+    """Keep authority tasks alive until their last durable settlement write."""
+    authority = getattr(runner, 'session_authority', None)
+    if authority is None:
+        return
+    tasks = [live.task for live in authority.sessions.values() if live.task is not None]
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)

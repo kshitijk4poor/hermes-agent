@@ -224,19 +224,7 @@ async def _start_gateway_start_control_socket(runner):
         # failure only means consumers fall back to the process-scan/state-file layer, exactly as before
         # this feature. See #92091.
         from gateway.control_socket import GatewayControlServer, build_identify_payload
-        from gateway.runtime_bootstrap import TicketStore
-        from gateway.runtime_ownership import process_ownership
-        import uuid
-        descriptor = {
-            "instance_id": uuid.uuid4().hex, "runtime_protocol": 1,
-            "state": "starting", "capabilities": [],
-            "served_profiles": [{"profile_id": str(home), "home": str(home)}
-                                for home in process_ownership.homes],
-        }
-        runner.session_runtime_descriptor = descriptor
-        runner.session_ticket_store = TicketStore(
-            descriptor["instance_id"],
-            frozenset(item["profile_id"] for item in descriptor["served_profiles"]))
+        descriptor = runner.session_runtime_descriptor
 
         def _identify_runtime():
             payload = build_identify_payload()
@@ -464,11 +452,14 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         return False
 
     _control_server = None
+    runner = None
     _planned_stop_watcher_stop = None
     try:
         _start_gateway_configure_logging(verbosity)
 
         runner = GatewayRunner(resolved_config)
+        from gateway.run_runtime import initialize_gateway_runtime
+        await initialize_gateway_runtime(runner)
         # Multiplex: swap the launch-home file handlers for per-profile routers so each profile's records
         # land in its own logs/. Must run after the runner resolved (possibly None) config and setup_logging.
         # See #82936.
@@ -527,6 +518,10 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
 
         # Right after the PID claim (which makes us authoritative); non-fatal — consumers fall back to scan.
         _control_server = await _start_gateway_start_control_socket(runner)
+        if _control_server is None:
+            raise RuntimeError("gateway session bootstrap control listener unavailable")
+        from gateway.run_runtime import start_gateway_runtime_api
+        await start_gateway_runtime_api(runner)
 
         def _lifecycle_record_startup() -> None:
             # Report if the previous life died uncleanly (SIGKILL / OOM / VM death), then claim the
@@ -590,6 +585,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             _start_gateway_start_cron_and_housekeeping(runner))
 
         # READY only once adapters, cron and housekeeping run; missing systemd state just disables watchdog.
+        from gateway.run_runtime import publish_gateway_runtime_ready
+        publish_gateway_runtime_ready(runner)
         runner._start_systemd_watchdog()
 
         await runner.wait_for_shutdown()
@@ -599,6 +596,12 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
 
     finally:
+        if runner is not None:
+            from gateway.run_runtime import drain_gateway_runtime
+            await drain_gateway_runtime(runner)
+            # Startup may have opened adapters before an exception. The same
+            # stop path owns their writers and DB handles on every exit.
+            await runner.stop()
         if _planned_stop_watcher_stop is not None:
             _planned_stop_watcher_stop.set()
         if _control_server is not None:

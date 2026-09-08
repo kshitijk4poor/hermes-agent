@@ -24,7 +24,7 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
     from hermes_cli import web_server as web
 
     # Existing routers/auth helpers share one process-local app. Never rebind it
-    # underneath another listener. Multiplex profiles use this same authority.
+    # underneath another listener. Each authority is bound to its own profile DB.
     if getattr(web.app.state, "gateway_runner", None) is not None:
         raise RuntimeError("gateway API already started")
     web._configure_auth_gate(host, False, None, None)
@@ -41,6 +41,10 @@ async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -
         listener.close()
         raise
 
+    # Wrap this server's ASGI graph, never the module-global app/router.
+    if not config.loaded:
+        config.load()
+    config.loaded_app = GatewayRuntimeAPI(config.loaded_app, runner, web.app)
     web.app.state.gateway_runner = runner
     web.app.state.session_authority = getattr(runner, "session_authority", None)
     web.app.state.bound_host = host
@@ -83,3 +87,53 @@ async def stop_gateway_api(handle: GatewayAPIHandle) -> None:
     """Drain sockets without stopping the session authority or taking signals."""
     handle.server.should_exit = True
     await asyncio.shield(handle.task)
+
+
+class GatewayRuntimeAPI:
+    """Redeem private local tickets at the existing WS subprotocol boundary.
+
+    Other credentials and HTTP routes retain the complete dashboard gate. Local
+    bootstrap never grants an exposure/worker ticket interactive permissions.
+    """
+    def __init__(self, app, runner, web_app):
+        self.app, self.runner, self.web_app = app, runner, web_app
+
+    async def __call__(self, scope, receive, send):
+        descriptor = getattr(self.runner, 'session_runtime_descriptor', None)
+        if scope['type'] not in {'http', 'websocket'} or descriptor is None:
+            return await self.app(scope, receive, send)
+        if descriptor['state'] != 'ready' or self.runner._draining:
+            if scope['type'] == 'websocket':
+                await send({'type': 'websocket.close', 'code': 1013})
+            else:
+                from starlette.responses import JSONResponse
+                await JSONResponse({'error': 'gateway_not_ready', 'state': descriptor['state']},
+                                   status_code=503)(scope, receive, send)
+            return
+        if scope['type'] != 'websocket' or scope['path'] != '/api/ws':
+            return await self.app(scope, receive, send)
+        from starlette.websockets import WebSocket
+        from hermes_cli.web_server_chat import (
+            _gateway_ws_ticket_from_subprotocol, _ws_request_is_allowed,
+        )
+        scope['app'] = self.web_app
+        ws = WebSocket(scope, receive, send)
+        ticket, reason = _gateway_ws_ticket_from_subprotocol(ws)
+        if reason == 'none':
+            return await self.app(scope, receive, send)
+        from hermes_cli import web_server as web
+        if (reason != 'ok' or not web._DASHBOARD_EMBEDDED_CHAT_ENABLED
+                or not _ws_request_is_allowed(ws) or ws.headers.get('origin')
+                or not ws.client or ws.client.host not in {'127.0.0.1', '::1'}):
+            await ws.close(code=4403)
+            return
+        try:
+            grant = self.runner.session_ticket_store.redeem(
+                ticket, profile_id=self.runner.session_authority.profile_id,
+                purpose='interactive')
+        except PermissionError:
+            await ws.close(code=4401)
+            return
+        from tui_gateway.ws import handle_ws
+        await handle_ws(ws, auth_identity={'user_id': grant['subject'], 'provider': 'local'},
+                        subprotocol='hermes-gateway-v1')
