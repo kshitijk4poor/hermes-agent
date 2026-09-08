@@ -14,7 +14,7 @@ from gateway.session_contract import (
     SubscriptionSnapshot,
 )
 from gateway.session_events import SessionEvents
-from gateway.session_pending_controls import PendingApprovals
+from gateway.session_pending_controls import PendingControls
 from hermes_state_runtime import (
     RuntimeStoreError, admit_session_input, begin_runtime_epoch,
     cancel_session_input, claim_session_input, get_session_admission,
@@ -29,10 +29,10 @@ class LiveSession:
     task: asyncio.Task | None = None
     subscribers: dict = field(default_factory=dict)
     event_stream: SessionEvents = field(default_factory=SessionEvents)
-    controls: PendingApprovals = field(init=False)
+    controls: PendingControls = field(init=False)
 
     def __post_init__(self):
-        self.controls = PendingApprovals(self.event_stream)
+        self.controls = PendingControls(self.event_stream)
 
 
 class SessionAuthority:
@@ -224,8 +224,17 @@ class SessionAuthority:
             self.check_approval_generation(session_id, generation)
             live.controls.register(session_id, route, generation, data)
 
-    async def respond(self, actor, ref, generation, prompt_id, response):
-        self.authorize(actor, ref, "session:approve")
+    def register_clarify(self, session_id, generation, entry):
+        live = self.sessions[session_id]
+        with live.event_stream.lock:
+            self.check_approval_generation(session_id, generation)
+            live.controls.register_clarify(session_id, generation, entry)
+
+    async def respond(self, actor, ref, generation, prompt_id, response, *, kind="approval"):
+        capability = {"approval": "session:approve", "clarify": "session:control"}.get(kind)
+        if capability is None:
+            raise RuntimeStoreError("invalid_params")
+        self.authorize(actor, ref, capability)
         live = self.sessions[ref.session_id]
         with live.event_stream.lock:
             if actor not in live.subscribers.values():
@@ -235,7 +244,7 @@ class SessionAuthority:
             self.check_approval_generation(ref.session_id, generation)
             if not isinstance(prompt_id, str) or not prompt_id:
                 raise RuntimeStoreError("invalid_params")
-            return live.controls.respond(ref.session_id, generation, prompt_id, response)
+            return live.controls.respond(ref.session_id, generation, prompt_id, response, kind=kind)
 
     async def _drain(self, ref):
         from gateway.session_ingress import execute_admission

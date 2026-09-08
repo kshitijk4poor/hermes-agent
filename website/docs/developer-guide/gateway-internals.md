@@ -8,6 +8,27 @@ description: "How the messaging gateway boots, authorizes users, routes sessions
 
 The messaging gateway is the long-running process that connects Hermes to 20+ external messaging platforms through a unified architecture.
 
+## Shared authority clarification protocol
+
+When the HTTP/WebSocket surface is bound to a `SessionAuthority`, attached authorized
+viewers receive `clarify.request` events and pending questions in the `session.resume`
+`prompts` snapshot. This is an authority API contract; it does not imply that every
+native frontend already renders the shared form or that ordinary bootstrap is complete.
+
+A response uses `clarify.respond` with `session_id`, `execution_generation`, `prompt_id`,
+and an `answer` string. The connected viewer must be subscribed and have
+`session:control`. The authority checks the running generation and resolves the existing
+native clarify waiter by exact prompt ID, without adding a user prompt to the admission
+queue. The first response wins; detach does not cancel it. Native answers and timeouts
+retire the same prompt and emit `clarify.settled`; response text is not placed in the
+control replay stream, although the normal clarify tool result becomes part of the
+conversation. Questions and choice labels use the existing display redactor.
+
+Publication follows successful native card delivery. A failed native delivery does not
+create an actionable shared form. Ordinary approvals use the separate `approval.respond`
+permission path; sudo/secret prompts and durable control restoration after daemon restart
+are not implemented by this clarification path.
+
 ## Key Files
 
 | File | Purpose |

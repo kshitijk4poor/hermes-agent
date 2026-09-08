@@ -26,7 +26,7 @@ class AuthorityConnection:
         handlers = {'session.resume': self.resume, 'prompt.submit': self.submit,
                     'prompt.receipt': self.receipt, 'prompt.cancel': self.cancel,
                     'session.interrupt': self.interrupt, 'session.events.since': self.events_since,
-                    'approval.respond': self.respond}
+                    'approval.respond': self.respond, 'clarify.respond': self.respond_clarify}
         try:
             if method not in handlers:
                 raise RuntimeStoreError('invalid_params')
@@ -87,6 +87,12 @@ class AuthorityConnection:
             raise RuntimeStoreError("invalid_params")
         return await self.authority.respond(self.actor, ref, params["execution_generation"],
                                             params["prompt_id"], {"choice": params["choice"]})
+
+    async def respond_clarify(self, ref, params):
+        if set(params) != {"session_id", "execution_generation", "prompt_id", "answer"}:
+            raise RuntimeStoreError("invalid_params")
+        return await self.authority.respond(self.actor, ref, params["execution_generation"],
+            params["prompt_id"], {"answer": params["answer"]}, kind="clarify")
 
     async def close(self):
         for subscription in self.subscriptions.values():

@@ -1,7 +1,7 @@
 """Generation-bound projection/control of the existing blocking approval queue.
 
-Only ordinary approval choices cross this boundary. Clarify and secret/sudo
-prompts remain on their native paths; no answer is published or journaled here.
+Ordinary approvals and clarify prompts share the existing native waiters.
+Secret/sudo prompts remain native; no response is published or journaled here.
 """
 from copy import deepcopy
 
@@ -9,7 +9,7 @@ from hermes_state_runtime import RuntimeStoreError
 from tools.approval import list_gateway_approvals, resolve_gateway_approval
 
 
-class PendingApprovals:
+class PendingControls:
     def __init__(self, events):
         self.events = events
         self.pending = {}
@@ -31,23 +31,45 @@ class PendingApprovals:
             self.pending[prompt_id] = (route, prompt)
             self.events.publish(session_id, prompt, event_type='approval.request')
 
+    def register_clarify(self, session_id, generation, entry):
+        from gateway.run import _redact_approval_command
+        with self.events.lock:
+            prompt = {"kind": "clarify", "prompt_id": entry.clarify_id,
+                      "execution_generation": generation,
+                      "question": _redact_approval_command(entry.question),
+                      "choices": [_redact_approval_command(c) for c in entry.choices or []],
+                      "multi_select": entry.multi_select}
+            self.pending[entry.clarify_id] = (entry, prompt)
+            self.events.publish(session_id, prompt, event_type="clarify.request")
+
     def snapshot(self, session_id, generation):
         with self.events.lock:
             for prompt_id, (route, prompt) in list(self.pending.items()):
-                active = {p['request_id'] for p in list_gateway_approvals(route)}
-                if prompt['execution_generation'] != generation or prompt_id not in active:
+                active = (not route.event.is_set() if prompt['kind'] == 'clarify' else
+                          any(p['request_id'] == prompt_id for p in list_gateway_approvals(route)))
+                if prompt['execution_generation'] != generation or not active:
                     del self.pending[prompt_id]
                     self.events.publish(session_id, {'prompt_id': prompt_id,
-                        'execution_generation': prompt['execution_generation']}, event_type='approval.settled')
+                        'execution_generation': prompt['execution_generation']}, event_type=prompt['kind'] + '.settled')
             return tuple(deepcopy(prompt) for _, prompt in self.pending.values())
 
-    def respond(self, session_id, generation, prompt_id, response):
+    def respond(self, session_id, generation, prompt_id, response, *, kind="approval"):
         with self.events.lock:
             self.snapshot(session_id, generation)
             entry = self.pending.get(prompt_id)
             if entry is None:
                 return {'status': 'already_resolved', 'prompt_id': prompt_id}
             route, prompt = entry
+            if prompt['kind'] != kind:
+                raise RuntimeStoreError('invalid_params')
+            if kind == 'clarify':
+                from tools.clarify_gateway import resolve_gateway_clarify
+                if (not isinstance(response, dict) or set(response) != {'answer'}
+                        or not isinstance(response['answer'], str)):
+                    raise RuntimeStoreError('invalid_params')
+                resolved = resolve_gateway_clarify(prompt_id, response['answer'])
+                self.snapshot(session_id, generation)
+                return {'status': 'resolved' if resolved else 'already_resolved', 'prompt_id': prompt_id}
             if not isinstance(response, dict) or set(response) != {'choice'} or response['choice'] not in prompt['choices']:
                 raise RuntimeStoreError('invalid_params')
             # The tools lock arbitrates native taps versus attached responders;
