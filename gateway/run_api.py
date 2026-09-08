@@ -119,7 +119,7 @@ class GatewayRuntimeAPI:
         scope['app'] = self.web_app
         ws = WebSocket(scope, receive, send)
         ticket, reason = _gateway_ws_ticket_from_subprotocol(ws)
-        if reason == 'none':
+        if reason == 'none' or ws.headers.get('origin'):
             return await self.app(scope, receive, send)
         from hermes_cli import web_server as web
         if (reason != 'ok' or not web._DASHBOARD_EMBEDDED_CHAT_ENABLED
@@ -132,8 +132,9 @@ class GatewayRuntimeAPI:
                 ticket, profile_id=self.runner.session_authority.profile_id,
                 purpose='interactive')
         except PermissionError:
-            await ws.close(code=4401)
-            return
+            # Browser/OAuth tickets use the same protocol but a different
+            # issuer. Let the existing gate validate them, never mint a grant.
+            return await self.app(scope, receive, send)
         from tui_gateway.ws import handle_ws
         await handle_ws(ws, auth_identity={'user_id': grant['subject'], 'provider': 'local'},
                         subprotocol='hermes-gateway-v1')
