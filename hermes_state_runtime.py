@@ -501,11 +501,38 @@ def _worker_turn(db, conn, session_id, payload, operation):
     return {'value': value}
 
 
+def _worker_usage(db, conn, session_id, payload, *, auxiliary=False):
+    from hermes_state_usage import _MODEL_USAGE_FIELDS, _TOKEN_COUNTERS
+    allowed = (_MODEL_USAGE_FIELDS - {'billing_mode', 'actual_cost_usd', 'cost_status', 'cost_source'} | {'task'}) if auxiliary else (_MODEL_USAGE_FIELDS | {'pricing_version', 'absolute'})
+    if set(payload) - allowed:
+        raise RuntimeStoreError('invalid_params')
+    for key, value in payload.items():
+        if key in (*_TOKEN_COUNTERS, 'api_call_count'):
+            valid = type(value) is int and 0 <= value <= 2**53
+        elif key in ('estimated_cost_usd', 'actual_cost_usd'):
+            valid = value is None or (type(value) in (int, float) and 0 <= value <= 1e12)
+        elif key == 'absolute':
+            valid = type(value) is bool
+        else:
+            valid = value is None or (isinstance(value, str) and len(value) <= 4096)
+        if not valid:
+            raise RuntimeStoreError('invalid_params')
+    if auxiliary:
+        if not payload.get('task'):
+            raise RuntimeStoreError('invalid_params')
+        db._record_model_usage(conn, session_id, **({'api_call_count': 1} | payload))
+    else:
+        db._update_token_counts_in_transaction(conn, session_id, **payload)
+    return {'value': None}
+
+
 def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
                             sequence, operation, payload):
     """One closed durable mutation and receipt; never call a self-committing API here."""
     handlers = {
         'transcript.append': _worker_append,
+        'usage.main': _worker_usage,
+        'usage.auxiliary': lambda db, conn, sid, p: _worker_usage(db, conn, sid, p, auxiliary=True),
         **{name: (lambda db, conn, sid, p, op=name: _worker_turn(db, conn, sid, p, op))
            for name in ('turn.acquire', 'turn.renew', 'turn.release')},
     }
