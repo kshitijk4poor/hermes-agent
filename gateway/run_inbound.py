@@ -1338,6 +1338,12 @@ class GatewayInboundMixin:
         if _reply is not None:
             return _reply
 
+        authority = getattr(self, 'session_authority', None)
+        if authority is not None and not event.get_command() and not is_internal:
+            from gateway.session_ingress import admit_message, executing_admission
+            if not executing_admission.get():
+                return await admit_message(authority, event)
+
         # Evict a leaked/reaped ``_running_agents`` slot before the busy-session fast-path.
         self._hm_evict_idle_stale_agent(_quick_key)
         if self._is_session_running(_quick_key):
