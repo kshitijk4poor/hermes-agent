@@ -592,11 +592,16 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
         runner._start_systemd_watchdog()
 
         from gateway.run_runtime import wait_gateway_runtime
-        await wait_gateway_runtime(runner)
-
-        return await _start_gateway_shutdown_tail(
-            runner, _control_server, cron_stop, cron_provider, cron_thread, housekeeping_thread,
-            _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
+        try:
+            await wait_gateway_runtime(runner)
+        finally:
+            try:
+                await runner.stop()
+            finally:
+                verdict = await _start_gateway_shutdown_tail(
+                    runner, _control_server, cron_stop, cron_provider, cron_thread, housekeeping_thread,
+                    _planned_stop_watcher_stop, _planned_stop_watcher_thread, _signal_initiated_shutdown)
+        return verdict
 
     finally:
         try:

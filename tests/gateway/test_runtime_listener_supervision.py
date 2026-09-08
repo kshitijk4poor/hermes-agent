@@ -38,3 +38,41 @@ async def test_runtime_wait_observes_listener_exit(tmp_path, listener_failure):
             await asyncio.gather(waiter, return_exceptions=True)
         await runner.stop()
         process_ownership.close()
+
+
+@pytest.mark.asyncio
+async def test_listener_failure_stops_bootstrap_background_threads(monkeypatch):
+    import threading
+    from gateway import run_bootstrap, run_runtime
+    from gateway.config import GatewayConfig
+    from hermes_constants import get_hermes_home
+
+    get_hermes_home().chmod(0o700)
+    stopped = threading.Event()
+    threads = []
+
+    def start_owned_threads(runner):
+        for _ in range(2):
+            thread = threading.Thread(target=stopped.wait, daemon=True)
+            thread.start()
+            threads.append(thread)
+        return stopped, None, *threads
+
+    publish = run_runtime.publish_gateway_runtime_ready
+
+    def fail_after_ready(runner):
+        publish(runner)
+        runner.session_api.server.should_exit = True
+
+    monkeypatch.setattr(run_bootstrap, '_start_gateway_start_cron_and_housekeeping', start_owned_threads)
+    monkeypatch.setattr(run_runtime, 'publish_gateway_runtime_ready', fail_after_ready)
+    try:
+        with pytest.raises(RuntimeError, match='session API stopped unexpectedly'):
+            await asyncio.wait_for(run_bootstrap.start_gateway(GatewayConfig()), 20)
+        assert threads
+        assert stopped.is_set(), 'listener failure skipped background-writer shutdown'
+        assert all(not thread.is_alive() for thread in threads)
+    finally:
+        stopped.set()
+        for thread in threads:
+            thread.join(timeout=2)
