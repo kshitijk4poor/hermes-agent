@@ -63,12 +63,15 @@ async def handshake(home, descriptor):
                 break
         assert reply['error']['message'] == 'not_found', reply
         assert ws.subprotocol == 'hermes-gateway-v1'
-        async def rpc(socket, method, **params):
+        async def rpc(socket, method, expected_error=None, **params):
             await socket.send(json.dumps({'jsonrpc': '2.0', 'id': method, 'method': method, 'params': params}))
             async with asyncio.timeout(15):
                 while True:
                     result = json.loads(await socket.recv())
                     if result.get('id') == method:
+                        if expected_error is not None:
+                            assert result.get('error', {}).get('message') == expected_error, result
+                            return result['error']
                         assert 'result' in result, result
                         return result['result']
 
@@ -88,7 +91,21 @@ async def handshake(home, descriptor):
                     break
                 await asyncio.sleep(.05)
         assert snapshot['stored_session_id'] == sid
-        print(json.dumps({'ordinary_created_session': sid, 'reply_persisted': True}))
+        edit = {'session_id': sid, 'request_id': 'ordinary-rename',
+                'expected_revision': snapshot['revision'], 'operation': 'rename',
+                'payload': {'title': 'Shared metadata receipt'}}
+        renamed = await rpc(viewer, 'session.mutate', **edit)
+        assert renamed['title'] == edit['payload']['title'], renamed
+    reconnect = control(home, 'session-ticket', binding)
+    async with connect(url, subprotocols=['hermes-gateway-v1',
+                                        'hermes-gateway-ticket.' + reconnect['ticket']]) as viewer:
+        assert await rpc(viewer, 'session.mutate', **edit) == renamed
+        await rpc(viewer, 'session.mutate', expected_error='revision_conflict',
+                  **{**edit, 'request_id': 'stale-rename', 'payload': {'title': 'Stale overwrite'}})
+        listing = await rpc(viewer, 'session.list')
+        assert next(row for row in listing['sessions'] if row['session_id'] == sid)['title'] == renamed['title']
+        print(json.dumps({'ordinary_created_session': sid, 'reply_persisted': True,
+                          'mutation_retry_after_reconnect': True, 'stale_mutation_rejected': True}))
     with pytest.raises(InvalidStatus):
         async with connect(url, subprotocols=protocols):
             pass
