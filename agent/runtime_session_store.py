@@ -84,15 +84,32 @@ class RuntimeSessionStore:
         if self.path.parent.is_symlink() or self.path.is_symlink():
             raise WorkerPersistenceError('unsafe_outbox')
         os.chmod(self.path.parent, 0o700)
-        if self.path.exists():
-            self.journal = json.loads(self.path.read_text(encoding="utf-8"))
-            if self.journal['scope'] != self.scope:
-                raise WorkerPersistenceError('outbox_scope_mismatch')
-        else:
-            self.journal = {'scope': self.scope, 'next_sequence': 1, 'pending': []}
-            self._save(self.journal)
+        from gateway.status import _try_acquire_file_lock
+        lock_path = self.path.parent / 'owner.lock'
+        if lock_path.is_symlink():
+            raise WorkerPersistenceError('unsafe_outbox')
+        self._outbox_owner = lock_path.open('a+', encoding='utf-8')
+        os.chmod(lock_path, 0o600)
+        if not _try_acquire_file_lock(self._outbox_owner):
+            self._outbox_owner.close()
+            raise WorkerPersistenceError('outbox_in_use')
+        try:
+            if self.path.exists():
+                if self.path.stat().st_size > max_bytes:
+                    raise WorkerPersistenceError('outbox_full')
+                self.journal = json.loads(self.path.read_text(encoding="utf-8"))
+                if self.journal['scope'] != self.scope:
+                    raise WorkerPersistenceError('outbox_scope_mismatch')
+            else:
+                self.journal = {'scope': self.scope, 'next_sequence': 1, 'pending': []}
+                self._save(self.journal)
+        except Exception:
+            self._outbox_owner.close()
+            raise
 
     def _save(self, journal):
+        if self._outbox_owner.closed:
+            raise WorkerPersistenceError('outbox_closed')
         encoded = json.dumps(journal, ensure_ascii=True, allow_nan=False, separators=(',', ':')).encode()
         if len(encoded) > self.max_bytes:
             self.failure = 'outbox_full'
@@ -125,7 +142,7 @@ class RuntimeSessionStore:
                 raise WorkerPersistenceError('pending_receipt')
             entry = {'sequence': self.journal['next_sequence'], 'operation': operation, 'payload': payload}
             candidate = json.loads(json.dumps(self.journal))
-            candidate['pending'].append(entry)
+            candidate['pending'].append(json.loads(json.dumps(entry, allow_nan=False)))
             candidate['next_sequence'] += 1
             self._save(candidate)
             self.journal = candidate
@@ -196,4 +213,8 @@ class RuntimeSessionStore:
             return True
 
     def close(self):
-        self.flush_token_counts()
+        with self.lock:
+            try:
+                self.flush_token_counts()
+            finally:
+                self._outbox_owner.close()
