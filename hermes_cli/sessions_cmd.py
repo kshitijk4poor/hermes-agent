@@ -1201,7 +1201,20 @@ def cmd_sessions(args, sessions_parser=None):
     observational = action in _OBSERVATIONAL_DB_ACTIONS
     from hermes_state import SessionDB, _default_db_path
     try:
-        db = SessionDB(read_only=observational)
+        from hermes_state import SessionDB
+        from hermes_constants import get_hermes_home
+        path = get_hermes_home() / "state.db"
+        empty_messages = {
+            "list": "No sessions found.",
+            "stats": "Total sessions: 0\nTotal messages: 0",
+            "pinned": "[]" if getattr(args, "json", False) else
+                "No pinned sessions. Pin one with: hermes sessions pin <session_id>",
+        }
+        read_only = action in empty_messages
+        if read_only and not path.exists():
+            print(empty_messages[action])
+            return
+        db = SessionDB(db_path=path, read_only=read_only)
     except Exception as e:
         # mode=ro cannot create the store; a reader on a fresh profile reports empty rather than failing.
         if observational and not _default_db_path().exists():
