@@ -16,6 +16,13 @@ async def test_authenticated_token_can_create_without_identityless_permissions(t
     from hermes_constants import get_hermes_home
     from hermes_cli import web_server as web
 
+    # Session creation persists a restorable model policy, even without a turn.
+    (get_hermes_home() / 'config.yaml').write_text(json.dumps({
+        'model': {'provider': 'custom', 'default': 'local-wire-stub',
+                  'base_url': 'http://127.0.0.1:1/v1'},
+        'platform_toolsets': {'cli': []},
+        'auxiliary': {'title_generation': {'enabled': False}},
+    }))
     process_ownership.reserve([get_hermes_home()])
     runner = GatewayRunner(GatewayConfig())
     try:
