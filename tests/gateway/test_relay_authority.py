@@ -132,6 +132,29 @@ async def probe(peer):
                               {'native_text_v1': rows[0]['payload']['native_text_v1']}):
                     denied = await rpc('prompt.submit', session_id=sid, input_id='forged', text='forged', **extra)
                     assert 'error' in denied, denied
+                # A busy relay callback must not block the same reader that receives
+                # outbound ACKs. The FIFO is the authority's, not a second adapter queue.
+                blocked = deepcopy(raw)
+                blocked.update(message_id='relay-3', text='BLOCK_FIFO')
+                await connector_ws.send(json.dumps({'type': 'inbound', 'event': blocked}) + '\n')
+                assert await asyncio.to_thread(peer.blocked.wait, 5)
+                queued = deepcopy(raw)
+                queued.update(message_id='relay-4', text='QUEUED_AFTER_BLOCK')
+                await connector_ws.send(json.dumps({'type': 'inbound', 'event': queued}) + '\n')
+                try:
+                    async with asyncio.timeout(5):
+                        while not any(r['request_id'] == 'relay-4' for r in list_session_admissions(
+                                authority.db, session_id=sid, pending_only=False)):
+                            await asyncio.sleep(.01)
+                    assert not adapter._pending_messages
+                finally:
+                    peer.release.set()
+                async with asyncio.timeout(10):
+                    while adapter._active_sessions or any(r['status'] != 'terminal' for r in
+                            list_session_admissions(authority.db, session_id=sid, pending_only=False)):
+                        await asyncio.sleep(.01)
+                rows = list_session_admissions(authority.db, session_id=sid, pending_only=False)
+                assert len(peer.requests) == 4, peer.requests
                 payload = rows[0]['payload']
                 for mutate in ('user_id', 'profile', 'platform'):
                     forged = deepcopy(payload)
@@ -162,7 +185,7 @@ async def probe(peer):
                 finals = [f for f in outgoing if f.get('type') == 'outbound'
                           and f.get('action', {}).get('op') in ('send', 'edit')
                           and 'LOCAL_ACK_' in f.get('action', {}).get('content', '')]
-                assert len(finals) == 2, outgoing
+                assert len(finals) == 4, outgoing
                 receipt = {'same_agent': True, 'negative_controls': True,
                     'admissions': [r['admission_id'] for r in rows], 'model_requests': len(peer.requests),
                     'finals': finals, 'observer_complete': True, 'reconnect_dedupe': True}
@@ -180,6 +203,7 @@ def main():
     from shared_authority_peer import ModelPeer
     peer = ThreadingHTTPServer(('127.0.0.1', 0), ModelPeer)
     peer.requests, peer.metadata_requests = [], []
+    peer.blocked, peer.release = threading.Event(), threading.Event()
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{peer.server_port}/v1'
     os.environ.update(OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
