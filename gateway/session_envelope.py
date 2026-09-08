@@ -1,7 +1,8 @@
 """Owner-only durable native input codec; never a client-supplied wire format.
 
 Ordinary context and local media are retained without serializing delegated trust.
-Multiplex callbacks bind current connector ownership; role/relay grants stay unsupported.
+Multiplex callbacks bind current connector ownership; roles require fresh preflight.
+Upstream-relay delegation remains unsupported.
 """
 from copy import deepcopy
 from datetime import datetime

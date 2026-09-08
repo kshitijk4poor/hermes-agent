@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import threading
+import sys
 import traceback
 from types import SimpleNamespace
 
@@ -21,6 +22,7 @@ async def probe(peer):
     from hermes_state_runtime import list_session_admissions
 
     class Guild:
+        hook = None
         id = 100
         roles = [SimpleNamespace(id=700)]
         calls = 0
@@ -31,7 +33,10 @@ async def probe(peer):
             assert not authority.db._conn.in_transaction
             self.calls += 1
             await asyncio.sleep(0)
-            return SimpleNamespace(id=uid, guild=self, roles=list(self.roles))
+            roles = list(self.roles)
+            if self.hook:
+                self.hook()
+            return SimpleNamespace(id=uid, guild=self, roles=roles)
 
         def get_member(self, uid):
             raise AssertionError('cached membership is not authorization')
@@ -69,6 +74,29 @@ async def probe(peer):
         async with asyncio.timeout(15):
             while adapter._active_sessions:
                 await asyncio.sleep(0.01)
+
+    if sys.argv[1] == 'multiplex':
+        from agent.secret_scope import set_multiplex_active
+        from gateway.profile_routing import ProfileRoute
+        state = Path(os.environ['HERMES_HOME'])
+        transport = state / 'profiles' / 'transport'
+        transport.mkdir(parents=True)
+        (state / '.env').write_text('DISCORD_ALLOWED_ROLES=999\n')
+        (transport / '.env').write_text('DISCORD_ALLOWED_ROLES=700\n')
+        (transport / 'config.yaml').write_text((state / 'config.yaml').read_text())
+        runner.config.multiplex_profiles = True
+        runner.config._runtime_profile_homes = [('default', state), ('transport', transport)]
+        runner.config.profile_routes = [ProfileRoute(name='role-route', platform='discord',
+                                                    profile='default', chat_id='300')]
+        set_multiplex_active(True)
+        runner.adapters.clear()
+        runner._profile_adapters = {'transport': {Platform.DISCORD: adapter}}
+        runner._configure_profile_adapter(adapter, 'transport', Platform.DISCORD)
+
+    if sys.argv[1] not in {'positive', 'multiplex'}:
+        from native_role_fences import fences
+        await fences(runner, authority, adapter, guild, event, peer, sys.argv[1])
+        return
 
     ev = event('positive')
     await send(ev)

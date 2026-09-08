@@ -121,7 +121,7 @@ class SessionAuthority:
             live.task = asyncio.create_task(self._drain(ref))
 
     async def admit_native(self, event):
-        """Trusted adapter entry; commit the snapshot before yielding or ACKing."""
+        """Await current connector policy, then commit before ACK or scheduling execution."""
         import json
         from gateway.session_envelope import prepare_native, restore_native
         payload = await prepare_native(self.runner, event)
@@ -131,7 +131,8 @@ class SessionAuthority:
                                source.thread_id, source.user_id], separators=(',', ':'))
         row = admit_session_input(self.db, epoch=self.epoch, principal_id='messaging:' + identity,
                                   session_id=ref.session_id,
-                                  request_id=str(event.message_id or uuid.uuid4().hex), payload=payload)
+                                  request_id=str(payload['native_text_v1']['event']['message_id'] or uuid.uuid4().hex),
+                                  payload=payload)
         event._gateway_accepted = True
         self._schedule(ref)
         return self._receipt(row)
@@ -259,6 +260,11 @@ class SessionAuthority:
                     from gateway.session_envelope import check_native_route
                     await check_native_route(self.runner, first['payload'], ref.session_id, live.source,
                                        self.runner._adapter_for_source(live.source))
+                    # Cancellation may advance FIFO while the connector is awaited.
+                    # Never let the successor inherit this row's fresh verdict.
+                    current = get_session_admission(self.db, admission_id=first['admission_id'])
+                    if current is None or current['status'] != 'queued':
+                        continue
                 row = claim_session_input(self.db, epoch=self.epoch, session_id=ref.session_id)
             except RuntimeStoreError as exc:
                 import logging
