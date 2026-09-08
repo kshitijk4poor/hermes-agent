@@ -22,14 +22,18 @@ existing session does not apply the viewer's creation options.
 Prepared submission IDs and captured destination fences remain authoritative.
 The wire adapter maps `submission_id` to canonical `input_id` and translates the
 receipt's `ref` into the existing journal acknowledgement shape. Resume/create
-snapshots and events retain the authority epoch and execution generation. Shared
+snapshots and events retain the authority epoch and execution generation. Stored
+conversation `content` is translated to transcript display text, so a fully settled
+reconnect does not depend on catching a final live event. Canonical readiness is
+published once, after `runtime.describe`, rather than also forwarding the listener's
+legacy readiness event. Shared
 approval/clarify responses carry the actual prompt ID and generation; a resumed
 snapshot restores its pending prompt cards. Stop includes the active generation.
 
 ## Current gaps
 
-- The baseline runtime supports only CLI creation; fresh TUI creation needs the
-  separately integrated TUI launch-policy support. No CLI impersonation is used.
+- Fresh TUI creation requires an authority advertising TUI launch-policy support;
+  older CLI-only runtimes are rejected. No CLI impersonation is used.
 - Runtime descriptions and session metadata are intentionally narrow. Ink renders
   an explicit unavailable-inventory message, not fabricated tool/skill lists.
 - Most legacy rich UI RPCs (config, wake, slash execution, uploads, historical
@@ -49,4 +53,27 @@ OpenAI-compatible model, and real Ink processes on native Linux PTYs. It creates
 an explicitly labelled seed session with the runtime's supported policy, resumes
 it from two Ink viewers, submits through the real renderer, checks both rendered
 replies, detaches both viewers, and resumes persisted history in a new Ink process.
-The fixture does not replace renderer predicates or inject RPC results.
+The fixture does not replace renderer predicates or inject RPC results. It waits
+for the real authority to settle and retains that snapshot **before** starting the
+reconnected viewer; otherwise a late live delta can conceal broken history hydration.
+
+Optional mode argument after the receipt directory:
+
+- `text` (default): two viewers, committed journal acknowledgement, settled reconnect.
+- `approval` / `clarify`: detach both viewers with a pending card, restore and answer
+  natively, then verify the owned effect / exact tool response on the model wire.
+- `startup`: absent owner → native Ink ensure → one fresh TUI-policy session and reply.
+- `launcher`: the same fresh path through `python -m hermes_cli.main --tui chat -q ...`,
+  using the supported prebuilt `HERMES_TUI_DIR` path (no dependency install).
+- `stop` / `stop-control`: hold the loopback inference stream before a harmless
+  fixture-owned tool effect. Native Ctrl+C must receive the real generation-bearing
+  acknowledgement and suppress that effect; the no-Stop control must execute it.
+  Both then type a fresh prompt and require rendered and persisted completion.
+  These modes run the ordinary daemon entry via `native_stop_probe.py`, whose
+  observation-only dispatch wrapper records the unchanged real interrupt RPC
+  request/response. No response or execution predicate is replaced.
+
+Use the repository Python environment. Every mode keeps HOME/HERMES_HOME temporary,
+uses only a loopback model, and cleans up its owned processes. Raw PTY output and
+JSON receipts stay in the requested receipt directory; timeout is a failure, never
+an invitation to rerun until green.
