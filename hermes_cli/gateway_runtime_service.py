@@ -34,10 +34,15 @@ def remaining(deadline: float) -> float:
 
 
 def service_suffix(home: Path) -> str:
-    from hermes_constants import get_default_hermes_root
+    from hermes_constants import _get_platform_default_hermes_home
     from hermes_cli.gateway import _profile_name_from_home
-    default = get_default_hermes_root().resolve()
+    default = _get_platform_default_hermes_home().resolve()
     home = home.resolve()
+    # Mirror the installer's custom-root rule for the REQUESTED home, not the
+    # initiating client's environment. Two custom roots can share a unit name;
+    # effective binding validation, not a guessed hash, disambiguates them.
+    if not home.is_relative_to(default):
+        default = home.parent.parent if home.parent.name == "profiles" else home
     if home == default:
         return ""
     return _profile_name_from_home(home, default) or hashlib.sha256(str(home).encode()).hexdigest()[:8]
@@ -205,7 +210,7 @@ def start_existing_gateway_service(service: ExistingService, *, deadline: float)
     if service.running:
         return
     try:
-        result = _run(service.start_argv, deadline)
+        result = _run(service.start_argv, deadline, encoding=None)
     except subprocess.TimeoutExpired:
         raise TimeoutError from None
     except OSError as exc:
