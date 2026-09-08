@@ -37,6 +37,10 @@ def run():
         user = base / 'user'
         user.mkdir()
         peer_class = ModelPeer
+        stopping = kind in ('stop', 'stop-control')
+        if stopping:
+            from native_stop_probe import StopPeer
+            peer_class = StopPeer
         if kind in ('approval', 'clarify'):
             sys.path.insert(0, str(ROOT / 'tests/gateway/fixtures'))
             if kind == 'approval':
@@ -49,6 +53,9 @@ def run():
         model = ThreadingHTTPServer(('127.0.0.1', 0), peer_class)
         model.command = 'rm -r -- ' + shlex.quote(str(target))
         model.requests, model.metadata_requests = [], []
+        model.blocked, model.release, model.disconnected = threading.Event(), threading.Event(), threading.Event()
+        if stopping:
+            model.command = 'touch -- ' + shlex.quote(str(home / 'stop-effect'))
         threading.Thread(target=model.serve_forever, daemon=True).start()
         model_url = f'http://127.0.0.1:{model.server_port}/v1'
         (home / 'config.yaml').write_text(json.dumps({
@@ -155,7 +162,10 @@ def run():
                 assert receipts['prepared_journal_cleared']
                 return
             log = (base / 'daemon.log').open('w+')
-            daemon = subprocess.Popen([sys.executable, '-m', 'gateway.run'], cwd=ROOT, env=env,
+            daemon_argv = [sys.executable, '-m', 'gateway.run']
+            if stopping:
+                daemon_argv = [sys.executable, str(ROOT / 'ui-tui/scripts/native_stop_probe.py')]
+            daemon = subprocess.Popen(daemon_argv, cwd=ROOT, env=env,
                                       stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + 35
             while time.monotonic() < deadline:
@@ -170,6 +180,11 @@ def run():
             receipts['instance_id'] = g['instance_id']
             sid = asyncio.run(seed())
             first = launch('first', sid, 'WS_SHARED')
+            if stopping:
+                from native_stop_probe import exercise
+                exercise(kind, model, first, sid, grant, rpc, connect, home, receipts, Path(sys.argv[1]))
+                receipts['daemon_survived_stop'] = daemon.poll() is None
+                return
             second = launch('second', sid)
             if kind != 'text':
                 card = b'Allow once' if kind == 'approval' else b'green'
@@ -248,6 +263,9 @@ def run():
                 assert receipts['native_answer_on_model_wire']
             assert receipts['reconnect_rendered_reply']
         finally:
+            model.release.set()
+            if 'first' in locals():
+                (Path(sys.argv[1]) / 'last-first.pty').write_bytes(first[2])
             for proc, master in children:
                 if proc.poll() is None:
                     os.killpg(proc.pid, signal.SIGTERM)
