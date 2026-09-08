@@ -15,7 +15,7 @@ from tests.gateway.test_normal_runtime_boot import control, model_peer  # noqa: 
 
 
 @pytest.mark.linux_only
-def test_native_classic_fresh_resume_and_oneshot(tmp_path, model_peer):
+def test_native_classic_fresh_resume_and_oneshot(tmp_path, model_peer, request):
     home = tmp_path / "state"
     home.mkdir(mode=0o700)
     user = tmp_path / "user"
@@ -23,6 +23,7 @@ def test_native_classic_fresh_resume_and_oneshot(tmp_path, model_peer):
     cwd = tmp_path / "caller"
     cwd.mkdir()
     root = Path(__file__).resolve().parents[2]
+    gateway_root = Path(request.config.getoption("--client-test-runtime-root", default=None) or root).resolve()
     model_url = f"http://127.0.0.1:{model_peer.server_port}/v1"
     (home / "config.yaml").write_text(json.dumps({
         "gateway": {"multiplex_profiles": False},
@@ -86,7 +87,8 @@ finally:
 
     log_path = tmp_path / "gateway.log"
     with log_path.open("w") as log:
-        daemon = subprocess.Popen([sys.executable, "-m", "gateway.run"], cwd=root, env=env,
+        daemon = subprocess.Popen([sys.executable, "-m", "gateway.run"], cwd=gateway_root,
+                                  env={**env, "PYTHONPATH": str(gateway_root)},
                                   stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 40
@@ -156,7 +158,24 @@ finally:
             tmux("send-keys", "-t", "chat", "/quit", "Enter")
             until("CLI_RC=0")
             assert json.loads(witness.read_text()) == []
-            receipt = {"approval_detach_reconnect": approval_sid, "approval": approved,
+            tmux("kill-session", "-t", "chat")
+            cwd_supported = "cannot preserve caller cwd" not in first
+            cwd_receipt = tmp_path / "cwd-proof.txt"
+            model_peer.command = "pwd > " + shlex.quote(str(cwd_receipt))
+            launch("--cli", "chat", "-q", "Record the caller directory", "-Q", "--in", str(cwd),
+                   "--model", "local-wire-stub", "--toolsets", "terminal")
+            if cwd_supported:
+                policy = until("CLI_RC=0")
+                assert cwd_receipt.read_text().strip() == str(cwd)
+                assert "APPROVAL_FINISHED" in policy
+            else:
+                policy = until("CLI_RC=1")
+                assert "does not support --in" in policy
+                assert not cwd_receipt.exists()
+            assert json.loads(witness.read_text()) == []
+            receipt = {"gateway_root": str(gateway_root), "caller_cwd_effect_verified": cwd_supported,
+                       "policy": policy, "direct_cli": direct,
+                       "approval_detach_reconnect": approval_sid, "approval": approved,
                        "invalid_choice_no_effect": True, "real_terminal_effect": True,"session_id": sid, "daemon_pid": daemon.pid,
                        "same_instance": descriptor["instance_id"], "client_agent_db_owners": [],
                        "fresh": fresh, "detach": detached, "resume": resumed, "oneshot": oneshot}
