@@ -46,5 +46,16 @@ def test_structured_worker_receipts_are_atomic_and_scoped(tmp_path):
             apply(3, 'SQL', {'sql': 'DELETE FROM messages'})
         assert apply(3, 'turn.renew', {'holder': 'worker-lease', 'ttl_seconds': 300})['value']
         assert apply(4, 'turn.release', {'holder': 'worker-lease'}) == {'value': None}
+        assistant = {'role': 'assistant', 'content': 'canonical winner'}
+        winner = apply(5, 'transcript.append', {'messages': [assistant]})
+        repaired = apply(6, 'transcript.append', {'messages': [{'role': 'assistant',
+            'content': 'loser', '_row_id': winner['annotations'][0]['_row_id']}]})
+        assert repaired['count'] == 0
+        assert repaired['annotations'][0]['_canonical_content'] == 'canonical winner'
+        terminal = apply(7, 'execution.finish', {})
+        assert terminal['status'] == 'terminal'
+        assert apply(7, 'execution.finish', {}) == terminal
+        with pytest.raises(RuntimeStoreError, match='stale_generation'):
+            apply(8, 'usage.main', {'input_tokens': 1})
     finally:
         db.close()

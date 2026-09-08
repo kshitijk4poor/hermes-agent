@@ -212,6 +212,9 @@ class RuntimeSessionStore:
                 raise WorkerPersistenceError('pending_receipt')
             return True
 
+    def finish(self):
+        return self._apply('execution.finish', {})
+
     def close(self):
         with self.lock:
             try:

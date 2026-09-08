@@ -79,6 +79,8 @@ for line in sys.stdin:
             adopted = transport('worker.adopt', **{k: v for k, v in scope.items() if k != 'epoch'})
             store.adopt(adopted['owner_epoch'])
             store.refresh_session_turn_lease(sid, 'owned-worker-lease')
+            store.release_session_turn_lease(sid, 'owned-worker-lease')
+            assert store.finish()['status'] == 'terminal'
             output = {'stale': stale, 'epoch': adopted['owner_epoch'], 'pid': os.getpid(),
                       'writable_canonical_fds': writable_fds(home)}
         sys.stdout.write(json.dumps(output) + '\n'); sys.stdout.flush()

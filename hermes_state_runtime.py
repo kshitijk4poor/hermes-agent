@@ -528,11 +528,18 @@ def _worker_usage(db, conn, session_id, payload, *, auxiliary=False):
     return {'value': None}
 
 
+def _worker_finish(db, conn, session_id, payload):
+    if payload:
+        raise RuntimeStoreError('invalid_params')
+    return {'status': 'terminal'}
+
+
 def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
                             sequence, operation, payload):
     """One closed durable mutation and receipt; never call a self-committing API here."""
     handlers = {
         'transcript.append': _worker_append,
+        'execution.finish': _worker_finish,
         'usage.main': _worker_usage,
         'usage.auxiliary': lambda db, conn, sid, p: _worker_usage(db, conn, sid, p, auxiliary=True),
         **{name: (lambda db, conn, sid, p, op=name: _worker_turn(db, conn, sid, p, op))
@@ -564,8 +571,8 @@ def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
         result = handlers[operation](db, conn, session_id, json.loads(encoded))
         conn.execute('INSERT INTO worker_receipts(execution_id,sequence,payload_digest,result_json) VALUES(?,?,?,?)',
                      (execution_id, sequence, digest, _json(result)))
-        conn.execute("UPDATE worker_executions SET last_sequence=?,status='running' WHERE execution_id=?",
-                     (sequence, execution_id))
+        conn.execute("UPDATE worker_executions SET last_sequence=?,status=? WHERE execution_id=?",
+                     (sequence, 'terminal' if operation == 'execution.finish' else 'running', execution_id))
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (session_id,))
         return result
     return db._execute_write(write, patience_s=db._TRANSCRIPT_WRITE_PATIENCE_S)
