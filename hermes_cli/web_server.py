@@ -176,7 +176,7 @@ def _start_desktop_cron_ticker(stop_event: "threading.Event", interval: int = 60
 _DESKTOP_MCP_DISCOVERY_DELAY_S = 1.0
 
 
-from hermes_cli.web_server_app import standalone_lifespan  # noqa: E402
+from hermes_cli.web_server_app import app_lifespan  # noqa: E402
 
 
 def _app_state_default(app: "FastAPI", name: str, factory):
@@ -201,7 +201,7 @@ def _get_pty_active_session_files(app: "FastAPI") -> dict[str, Path]:
     return _app_state_default(app, "pty_active_session_files", dict)
 
 
-app = FastAPI(title="Hermes Agent", version=__version__, lifespan=standalone_lifespan)
+app = FastAPI(title="Hermes Agent", version=__version__, lifespan=app_lifespan)
 
 
 # Memory-provider OAuth connect routes live in the memory layer, not here.

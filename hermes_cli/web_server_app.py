@@ -146,3 +146,33 @@ async def standalone_lifespan(app: "FastAPI"):
             pass
         if os.getenv("HERMES_DESKTOP") == "1":
             _terminate_desktop_managed_gateway()
+
+
+@asynccontextmanager
+async def http_lifespan(app: FastAPI):
+    """The gateway already owns schema, rooms, scheduler and model services."""
+    from hermes_cli.web_server import _dashboard_selftest_loop
+    from hermes_cli.web_server_chat import PTY_REGISTRY
+
+    app.state.event_channels = {}
+    app.state.event_lock = asyncio.Lock()
+    app.state.pty_active_session_files = {}
+    app.state.chat_argv_lock = asyncio.Lock()
+    tasks = [
+        asyncio.create_task(run_reaper(PTY_REGISTRY), name="gateway-api-pty-reaper"),
+        asyncio.create_task(_dashboard_selftest_loop(), name="gateway-api-selftest"),
+    ]
+    try:
+        yield
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await PTY_REGISTRY.close_all()
+
+
+@asynccontextmanager
+async def app_lifespan(app: FastAPI):
+    lifespan = http_lifespan if getattr(app.state, "gateway_runner", None) is not None else standalone_lifespan
+    async with lifespan(app):
+        yield

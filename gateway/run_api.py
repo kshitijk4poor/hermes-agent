@@ -1,0 +1,82 @@
+"""Compose the existing complete HTTP/WS surface into the gateway event loop.
+
+The caller initializes session authority before starting this listener and owns
+all runtime services and signals. This module owns only HTTP resources; it does
+not bootstrap an agent, scheduler, hosted room, or a second gateway.
+"""
+
+import asyncio
+from dataclasses import dataclass
+import socket
+from typing import Any
+
+
+@dataclass
+class GatewayAPIHandle:
+    api_origin: str
+    server: Any
+    task: asyncio.Task
+    app: Any
+    socket: socket.socket
+
+
+async def start_gateway_api(runner, *, host: str = "127.0.0.1", port: int = 0) -> GatewayAPIHandle:
+    from hermes_cli import web_server as web
+
+    # Existing routers/auth helpers share one process-local app. Never rebind it
+    # underneath another listener. Multiplex profiles use this same authority.
+    if getattr(web.app.state, "gateway_runner", None) is not None:
+        raise RuntimeError("gateway API already started")
+    web._configure_auth_gate(host, False, None, None)
+    config, server = web._build_uvicorn_server(host, port)
+    config.timeout_graceful_shutdown = 5
+    family, kind, proto, _, address = socket.getaddrinfo(
+        host, port, type=socket.SOCK_STREAM,
+    )[0]
+    listener = socket.socket(family, kind, proto)
+    try:
+        listener.bind(address)
+        listener.setblocking(False)
+    except BaseException:
+        listener.close()
+        raise
+
+    web.app.state.gateway_runner = runner
+    web.app.state.bound_host = host
+    web.app.state.bound_port = listener.getsockname()[1]
+    try:
+        if not config.loaded:
+            config.load()
+        server.lifespan = config.lifespan_class(config)
+        await server.startup(sockets=[listener])
+        if not server.started or server.should_exit:
+            raise RuntimeError("gateway API lifespan startup failed")
+    except BaseException:
+        listener.close()
+        web.app.state.gateway_runner = None
+        if hasattr(server, "lifespan") and not server.lifespan.should_exit:
+            await server.lifespan.shutdown()
+        raise
+
+    async def serve():
+        try:
+            await server.main_loop()
+        finally:
+            try:
+                await server.shutdown(sockets=[listener])
+            finally:
+                listener.close()
+                web.app.state.gateway_runner = None
+
+    task = asyncio.create_task(serve(), name="gateway-api")
+    origin_host = f"[{host}]" if ":" in host else host
+    return GatewayAPIHandle(
+        api_origin=f"http://{origin_host}:{web.app.state.bound_port}",
+        server=server, task=task, app=web.app, socket=listener,
+    )
+
+
+async def stop_gateway_api(handle: GatewayAPIHandle) -> None:
+    """Drain sockets without stopping the session authority or taking signals."""
+    handle.server.should_exit = True
+    await asyncio.shield(handle.task)
