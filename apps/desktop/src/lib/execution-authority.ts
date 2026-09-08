@@ -12,11 +12,17 @@ export function acceptExecutionEvent(
   type: string,
   payload?: Record<string, unknown>
 ): boolean {
-  if (!['session.info', 'message.start', 'message.complete', 'message.error'].includes(type)) {return true}
+  const lifecycle = ['session.info', 'message.start', 'message.complete', 'message.error'].includes(type)
   const previous = authorities.get(key)
   const epoch = payload?.execution_epoch
   const generation = payload?.execution_generation
   const versioned = typeof epoch === 'string' && epoch.length > 0 && typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0
+
+  // Output may follow the current owner, but cannot establish another one.
+  // Keep legacy unversioned output compatible; fence stamped late frames.
+  if (!lifecycle) {
+    return !versioned || !previous || (previous.epoch === epoch && previous.generation === generation && !previous.terminal)
+  }
 
   if (!versioned) {return !previous}
   const terminal = type === 'message.complete' || type === 'message.error' || payload?.running === false

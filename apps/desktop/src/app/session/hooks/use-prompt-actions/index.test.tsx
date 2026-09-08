@@ -444,6 +444,8 @@ describe('Stop and shared-owner execution', () => {
     expect(handle!.state()).toMatchObject({ interrupted: false, busy: true, awaitingResponse: true })
     send('message.delta', epoch, generation, { text: 'external answer' })
     send('message.delta', 'owner-a', 4, { text: 'obsolete tail' })
+    send('message.interim', epoch, generation)
+    expect(handle!.state().messages.at(-1)?.parts).toContainEqual(expect.objectContaining({ text: 'external answer' }))
     send('message.complete', 'owner-a', 4, { text: 'obsolete final' })
     expect(handle!.state().busy).toBe(true)
     send('message.complete', epoch, generation, { text: 'external answer' })

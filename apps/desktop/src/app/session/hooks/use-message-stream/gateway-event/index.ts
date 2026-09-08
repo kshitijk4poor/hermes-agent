@@ -173,7 +173,18 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
       const sessionId = route.sessionId
       const authorityKey = `${registryBackendScopeKey(event.connectionId ?? null, event.profile ?? null)}\u0000${sessionId}`
 
+      const previousAuthority = executionAuthorities.current.get(authorityKey)
+
       if (sessionId && !acceptExecutionEvent(executionAuthorities.current, authorityKey, event.type, payload)) {return}
+
+      const authority = executionAuthorities.current.get(authorityKey)
+
+      if (sessionId && previousAuthority && authority && !authority.terminal &&
+          (authority.epoch !== previousAuthority.epoch || authority.generation > previousAuthority.generation)) {
+        // Stop belongs to the cancelled execution, not the shared session.
+        // Only an accepted newer owner start/snapshot may retire its latch.
+        deps.updateSessionState(sessionId, state => state.interrupted ? { ...state, interrupted: false } : state)
+      }
 
       // Late stragglers: an unscoped stream event attributed via the
       // active-session fallback (no pin) to a session that has no live turn
