@@ -112,7 +112,7 @@ def probe(base, source):
             epochs = [desc['authority_epoch']]
             async def recovered(desc):
                 await wait(lambda: all(r['status'] == 'terminal' for r in rows()))
-                # Retry the unacknowledged producer on its real recovered watcher cadence.
+                # Leave ordinary startup/watchers running before checking zero replay.
                 await asyncio.sleep(8)
                 assert len(rows()) == len(receipt['committed']), rows()
                 assert rows()[-1]['outcome'] == 'completed', rows()
