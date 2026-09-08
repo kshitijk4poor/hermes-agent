@@ -45,6 +45,7 @@ def supervisor(tmp_path, monkeypatch):
                 "if 'start' in args: active.touch()\n"
                 "if 'is-active' in args: print('active' if active.exists() else 'inactive')\n"
                 "elif 'show-user' in args: print('yes')\n"
+                "elif 'show' in args: print('LoadState=not-found')\n"
                 "elif 'is-system-running' in args: print('running')\n",
                 encoding="utf-8",
             )
@@ -162,3 +163,30 @@ def test_explicit_install_records_only_completed_install(supervisor, monkeypatch
     else:
         gateway._cmd_install(args)
     assert config_api.load_config()["gateway"]["service_install_choice"] == ("decline" if fail else "install")
+
+
+@pytest.mark.linux_only
+def test_wizard_start_does_not_spawn_over_reserved_owner(supervisor, monkeypatch):
+    from gateway.runtime_ownership import ProfileOwnership
+    profile, calls = supervisor
+    profile.chmod(0o700)
+    config_api.save_config({"gateway": {"service_install_choice": "decline"}})
+    stream = io.StringIO()
+    stream.isatty = lambda: True
+    monkeypatch.setattr(sys, "stdin", stream)
+    monkeypatch.setattr(gateway, "prompt_yes_no", lambda *args: True)
+    spawned = []
+    original = gateway.subprocess.Popen
+    def boundary(argv, *args, **kwargs):
+        if "hermes_cli.main" in argv:
+            spawned.append(argv)
+            return None
+        return original(argv, *args, **kwargs)
+    monkeypatch.setattr(gateway.subprocess, "Popen", boundary)
+    owner = ProfileOwnership()
+    owner.reserve([profile])
+    try:
+        setup_service._wizard_install_service("systemd")
+        assert not spawned
+    finally:
+        owner.close()

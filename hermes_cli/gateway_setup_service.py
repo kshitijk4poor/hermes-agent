@@ -105,7 +105,7 @@ def _wizard_install_service(backend: str) -> None:
     """Choose persistence once; start-now without persistence stays unmanaged."""
     import subprocess
     from hermes_cli import gateway as gw
-    from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
+    from hermes_cli.gateway_runtime import ensure_gateway_runtime
 
     if not sys.stdin.isatty():
         return
@@ -113,19 +113,11 @@ def _wizard_install_service(backend: str) -> None:
     if not wants_service_install(interactive=True):
         gw.print_info("Without a service, messaging and scheduled jobs stop at logout/reboot; jobs cannot run while the host is off.")
         if start_now:
-            log_dir = gw.get_hermes_home() / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            # A setup start is not a request to evict an existing runtime.
-            command = [arg for arg in gw._timestamped_stderr_gateway_command(
-                log_dir / "gateway.error.log"
-            ) if arg != "--replace"]
-            try:
-                with (log_dir / "gateway.log").open("ab") as output:
-                    subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
-                                     stderr=subprocess.DEVNULL, **windows_detach_popen_kwargs())
-                gw.print_info("Gateway launch requested without installing a service. Check: hermes gateway status")
-            except OSError as exc:
-                gw.print_error(f"Gateway launch failed: {exc}")
+            result = ensure_gateway_runtime(gw.get_hermes_home(), timeout=5.0)
+            if result.state == "ready":
+                gw.print_success("Gateway runtime ready; no service was installed.")
+            else:
+                gw.print_info(f"Gateway runtime: {result.state} ({result.reason_code or 'pending'}). Check: hermes gateway status")
         else:
             gw.print_info("Run later: hermes gateway run. Install later: hermes gateway install")
         return
