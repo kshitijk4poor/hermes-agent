@@ -18,6 +18,8 @@ class Peer(BaseHTTPRequestHandler):
         self.server.requests.append(body)
         messages = body.get('messages', [])
         done = any(m.get('role') == 'tool' for m in messages)
+        if messages and not done:
+            self.server.first_round.wait(timeout=20)
         message = {'role': 'assistant', 'content': 'POLICY_DONE'}
         if not done:
             message = {'role': 'assistant', 'content': None, 'tool_calls': [
@@ -103,6 +105,10 @@ async def probe(peer):
             names = {t['function']['name'] for t in requests[0]['tools']}
             assert 'terminal' in names
             assert ('desktop_ui' in agent.enabled_toolsets) == (source == 'gui')
+            from toolsets import resolve_toolset
+            desktop_names = resolve_toolset('desktop_ui')
+            surface_on_wire = any(name in json.dumps(requests[0]['tools']) for name in desktop_names)
+            assert surface_on_wire == (source == 'gui'), (source, desktop_names, names)
             await ws.close()
             reconnected = await connect()
             sockets.append(reconnected)
@@ -121,6 +127,7 @@ async def probe(peer):
 def main():
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Peer)
     peer.requests = []
+    peer.first_round = threading.Barrier(3)
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{peer.server_port}/v1'
     os.environ.update(OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)

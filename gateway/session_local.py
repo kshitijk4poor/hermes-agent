@@ -84,8 +84,11 @@ def create_local_session(authority, actor, params):
     if 'session:create' not in actor.capabilities:
         raise RuntimeStoreError('permission_denied')
     from gateway.session_policy import build_policy
-    from gateway.run import _load_gateway_config
+    from gateway.run import _load_gateway_config, _resolve_gateway_model
+    from dataclasses import replace
     policy = build_policy(params, _load_gateway_config())
+    if policy.model is None:
+        policy = replace(policy, model=_resolve_gateway_model(policy.config()))
     request_id = params.get('request_id', uuid.uuid4().hex)
     if not isinstance(request_id, str) or not request_id or len(request_id) > 256:
         raise RuntimeStoreError('invalid_params')
