@@ -1334,7 +1334,7 @@ class GatewayInboundMixin:
             return _paused_notice
 
         _quick_key = self._session_key_for_source(source)
-        _reply = await self._hm_pending_reply_intercepts(event, source, _quick_key)
+        _reply = None if is_internal else await self._hm_pending_reply_intercepts(event, source, _quick_key)
         if _reply is not None:
             return _reply
 

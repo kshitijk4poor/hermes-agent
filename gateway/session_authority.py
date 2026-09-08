@@ -155,6 +155,10 @@ class SessionAuthority:
         if live.task is None or live.task.done():
             live.task = asyncio.create_task(self._drain(ref))
 
+    async def admit_automation(self, adapter, event, identity):
+        from gateway.session_automation import admit_automation
+        return await admit_automation(self, adapter, event, identity)
+
     async def admit_native(self, event):
         """Await current connector policy, then commit before ACK or scheduling execution."""
         import json

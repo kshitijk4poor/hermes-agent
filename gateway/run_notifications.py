@@ -1344,7 +1344,17 @@ class GatewayNotificationsMixin:
             _prime = getattr(adapter, "prime_routing_cache", None)
             if callable(_prime):
                 _prime(synth_event)
-            await admit_internal_event(adapter, synth_event)
+            authority = getattr(self, 'session_authority', None)
+            if authority is not None:
+                from gateway.session_automation import producer_identity
+                from hermes_state_runtime import RuntimeStoreError
+                try:
+                    identity = producer_identity(self, evt)
+                    await authority.admit_automation(adapter, synth_event, identity)
+                except RuntimeStoreError as exc:
+                    raise WakeNotAccepted(str(exc)) from exc
+            else:
+                await admit_internal_event(adapter, synth_event)
             return True
         except WakeNotAccepted:
             # Durable callers refund the claim; ordinary watch callers just requeue.

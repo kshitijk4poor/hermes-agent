@@ -131,15 +131,23 @@ def restore_native(payload, runner=None):
         runner = runner or callback_runner()
         if runner is not None:
             restore_provenance(runner, source, envelope['provenance'])
-    return MessageEvent(text=payload['text'], source=source,
+    event = MessageEvent(text=payload['text'], source=source,
                         timestamp=datetime.fromisoformat(envelope['timestamp']),
                         message_type=MessageType(envelope.get('message_type', 'text')),
                         media_urls=restore_native_media(envelope.get('media', [])),
                         **deepcopy(envelope['event']))
+    if 'automation' in envelope:
+        event.internal = True
+        event.metadata = {'gateway_session_key': envelope['route'],
+                          'gateway_session_id': envelope['automation']['owner']}
+    return event
 
 
 async def check_native_route(runner, payload, session_id, available_source, adapter):
     """Read-only preflight: route/auth rejection must never consume a queued row."""
+    if 'automation' in payload['native_text_v1']:
+        from gateway.session_automation import check_automation_route
+        return check_automation_route(runner, payload, session_id, available_source, adapter)
     event = restore_native(payload, runner)
     # Validate the stored sender without recapturing files or trusting the binding caller.
     from gateway.session_ingress_context import reauthorize_roles
