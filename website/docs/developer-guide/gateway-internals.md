@@ -17,7 +17,7 @@ native frontend already renders the shared form or that ordinary bootstrap is co
 
 A response uses `clarify.respond` with `session_id`, `execution_generation`, `prompt_id`,
 and an `answer` string. The connected viewer must be subscribed and have
-`session:control`. The authority checks the running generation and resolves the existing
+`session:respond`. The authority checks the running generation and resolves the existing
 native clarify waiter by exact prompt ID, without adding a user prompt to the admission
 queue. The first response wins; detach does not cancel it. Native answers and timeouts
 retire the same prompt and emit `clarify.settled`; response text is not placed in the
@@ -28,6 +28,21 @@ Publication follows successful native card delivery. A failed native delivery do
 create an actionable shared form. Ordinary approvals use the separate `approval.respond`
 permission path; sudo/secret prompts and durable control restoration after daemon restart
 are not implemented by this clarification path.
+
+## Revision-checked session metadata
+
+The authority-bound WebSocket accepts `session.mutate` for a registered session.
+Parameters are `session_id`, `request_id`, `expected_revision`, `operation`, and
+`payload`. `rename` accepts only `{"title": "New title"}`; `archive` accepts only
+`{"archived": true}` or `{"archived": false}`. The caller needs `session:control`.
+The session handle in `session.resume` supplies the current revision.
+
+The edit and its retry receipt commit together. Repeating the same request returns
+the original result without incrementing the revision again; reusing its ID with
+different contents returns `admission_conflict`. A competing edit with a stale
+revision returns `revision_conflict`. Draining rejects new mutations. These edits
+do not interrupt a running turn. This RPC does not yet migrate legacy direct
+writers, expose arbitrary SQL, or implement reset, delete, or rewind.
 
 ## Key Files
 

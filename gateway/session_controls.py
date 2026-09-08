@@ -33,6 +33,7 @@ class AuthorityConnection:
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
         handlers = {'session.create': self.create, 'ping': self.ping, 'runtime.describe': self.describe,
                     'session.list': self.list_sessions, 'session.info': self.info,
+                    'session.mutate': self.mutate,
                     'session.resume': self.resume, 'prompt.submit': self.submit,
                     'prompt.receipt': self.receipt, 'prompt.cancel': self.cancel,
                     'session.interrupt': self.interrupt, 'session.events.since': self.events_since,
@@ -133,6 +134,17 @@ class AuthorityConnection:
         receipt = await self.authority.submit(self.actor, Submission(
             request_id, ref, {'text': params.get('text')}, 'queue'))
         return asdict(receipt)
+
+    async def mutate(self, ref, params):
+        from hermes_state_runtime import mutate_runtime_session
+        self.authority.authorize(self.actor, ref, 'session:control')
+        self.authority._require_admission_open()
+        if set(params) != {'session_id', 'request_id', 'expected_revision', 'operation', 'payload'}:
+            raise RuntimeStoreError('invalid_params')
+        return mutate_runtime_session(
+            self.authority.db, epoch=self.authority.epoch, principal_id=self.actor.subject,
+            session_id=ref.session_id, request_id=params['request_id'],
+            expected_revision=params['expected_revision'], operation=params['operation'], payload=params['payload'])
 
     async def receipt(self, ref, params):
         return asdict(await self.authority.receipt(self.actor, ref, params.get('admission_id')))
