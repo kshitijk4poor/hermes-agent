@@ -61,6 +61,16 @@ it('recovers remote pending text into the queue and journal without a local subm
   }
 })
 
+it('maps optimistic input identity to the admission identity before local drain can replay it', () => {
+  enqueueQueuedPrompt('mapped', { id: 'input-id', text: 'same', attachments: [] })
+  const receipt = { admission_id: 'admission-id', input_id: 'input-id', status: 'queued', user: 'same' }
+  reconcilePendingSubmissions('mapped', [receipt])
+  expect(getQueuedPrompts('mapped')).toMatchObject([{ id: 'admission-id', serverStatus: 'queued', text: 'same' }])
+  expect(getQueuedPrompts('mapped')).toHaveLength(1)
+  reconcilePendingSubmissions('mapped', [{ ...receipt, status: 'started' }])
+  expect(getQueuedPrompts('mapped')).toEqual([])
+})
+
 it('persists identified direct submissions independently of the automatic local queue', () => {
   trackPendingSubmission('chat', { id: 'direct', text: 'hello' })
   const stored = JSON.parse(window.localStorage.getItem('hermes.desktop.pendingSubmissions.v1')!)

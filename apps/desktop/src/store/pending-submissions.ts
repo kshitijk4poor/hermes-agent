@@ -21,10 +21,12 @@ export function reconcilePendingSubmissions(key: string, value: unknown): void {
   const journal = readJournal()
   const known = journal[key] ?? {}
   const receipts = new Map<string, PendingSubmission>()
+  const admissionByInput = new Map<string, string>()
 
   for (const raw of value) {
     if (!raw || typeof raw.admission_id !== 'string' || !['queued', 'started', 'unknown'].includes(raw.status)) { continue }
     const id = raw.admission_id
+    if (typeof raw.input_id === 'string') { admissionByInput.set(raw.input_id, id) }
     receipts.set(id, { ...known[id], id, text: typeof raw.user === 'string' ? raw.user : known[id]?.text ?? '', status: raw.status })
   }
 
@@ -32,11 +34,11 @@ export function reconcilePendingSubmissions(key: string, value: unknown): void {
   const next: QueuedPromptEntry[] = []
 
   for (const entry of current) {
-    const receipt = receipts.get(entry.id)
+    const receipt = receipts.get(admissionByInput.get(entry.id) ?? entry.id)
 
     if (receipt) {
-      if (receipt.status !== 'started') { next.push({ ...entry, serverStatus: receipt.status }) }
-      receipts.delete(entry.id)
+      if (receipt.status !== 'started') { next.push({ ...entry, id: receipt.id, serverStatus: receipt.status }) }
+      receipts.delete(receipt.id)
     } else if (!entry.serverStatus) { next.push(entry) }
   }
 
