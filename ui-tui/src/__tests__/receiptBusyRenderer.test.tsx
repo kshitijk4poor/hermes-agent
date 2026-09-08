@@ -105,9 +105,8 @@ it('reconciles terminal and unknown retries to idle so queued follow-ups can dra
       await expect.poll(() => h.submits.length).toBe(2)
       h.submits[1]!.resolve(h.receipt(item.submissionId!, status))
       await expect.poll(() => h.queue.queueRef.current.length).toBe(0)
-      // The unfixed path never requests a snapshot and remains optimistically busy.
-      await new Promise(resolve => setTimeout(resolve, 20))
-      h.snapshots[0]?.resolve(h.snapshot(false, 1))
+      await expect.poll(() => h.snapshots.length).toBe(1)
+      h.snapshots[0]!.resolve(h.snapshot(false, 1))
       await expect.poll(() => getUiState().busy).toBe(false)
       expect(getUiState().status).toBe('ready')
       h.queue.enqueue('follow-up')
@@ -127,9 +126,9 @@ it('preserves a newer running generation across old receipts and delayed idle sn
       if (!delayed) { h.emit('message.start', 2) }
       h.submits[0]!.resolve(h.receipt(item.submissionId!, 'terminal'))
       await expect.poll(() => h.queue.queueRef.current.length).toBe(0)
-      await new Promise(resolve => setTimeout(resolve, 20))
+      await expect.poll(() => h.snapshots.length).toBe(1)
       if (delayed) { h.emit('message.start', 2) }
-      h.snapshots[0]?.resolve(h.snapshot(!delayed, delayed ? 1 : 2))
+      h.snapshots[0]!.resolve(h.snapshot(!delayed, delayed ? 1 : 2))
       await new Promise(resolve => setTimeout(resolve, 20))
       expect(getUiState()).toMatchObject({ busy: true, status: 'running…', info: { execution_generation: 2 } })
       h.queue.enqueue('must wait')

@@ -1,12 +1,12 @@
 import type { GatewayClient } from '../gatewayClient.js'
-import type { InputDetectDropResponse, PromptSubmitResponse } from '../gatewayTypes.js'
+import type { InputDetectDropResponse, PromptSubmitResponse, SessionActivateResponse } from '../gatewayTypes.js'
 import type { QueueItem } from '../hooks/useQueue.js'
 import { savePendingInput } from '../lib/pendingInputs.js'
 import type { Msg } from '../types.js'
 
 import { captureDestination, isCurrentDestination, type SubmissionDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
-import { patchUiState } from './uiStore.js'
+import { getUiState, patchUiState } from './uiStore.js'
 
 const SESSION_BUSY_RE = /session busy|waiting for model response/i
 
@@ -117,6 +117,38 @@ export function submitPrompt(
             ['queued', 'started', 'terminal', 'unknown'].includes(r?.status ?? '')
 
           item.settle?.(accepted)
+
+          // A replay receipt ends this admission, not necessarily the current
+          // execution. Refresh the same live attachment without its transcript.
+          if (accepted && focused() && ['terminal', 'unknown'].includes(r.status ?? '')) {
+            const observed = getUiState().info
+
+            void deps.gw.request<SessionActivateResponse>('session.activate', { session_id: sid, omit_messages: true })
+              .then(snapshot => {
+                const current = getUiState().info
+                const info = snapshot.info
+
+                // Push lifecycle events (including same-generation completion)
+                // win over an in-flight snapshot; attachment changes win too.
+                if (!focused() || current !== observed || snapshot.session_id !== sid ||
+                    (snapshot.session_key || info?.stored_session_id) !== destination.storedSid ||
+                    typeof snapshot.running !== 'boolean' ||
+                    (current?.execution_generation !== undefined &&
+                      (info?.execution_epoch !== current.execution_epoch ||
+                        !Number.isSafeInteger(info?.execution_generation) ||
+                        (info?.execution_generation ?? -1) < current.execution_generation))) {
+                  return
+                }
+
+                patchUiState({ busy: snapshot.running, status: snapshot.running ? 'running…' : 'ready',
+                  info: current && { ...current, execution_epoch: info?.execution_epoch ?? current.execution_epoch,
+                    execution_generation: info?.execution_generation ?? current.execution_generation,
+                    running: snapshot.running } })
+              })
+              .catch((error: Error) => {
+                if (focused()) { deps.sys(`execution status unconfirmed: ${error.message}`) }
+              })
+          }
 
           if (!accepted && focused()) {
             deps.sys('admission not confirmed — input retained; use Alt+K to retry with the same identity')
