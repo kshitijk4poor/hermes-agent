@@ -195,6 +195,7 @@ def run():
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline and expected not in third[2]:
                 time.sleep(.1)
+            (Path(sys.argv[1]) / 'reconnected.pty').write_bytes(third[2])
             receipts['reconnect_rendered_reply'] = expected in third[2]
             receipts['daemon_survived_detach'] = daemon.poll() is None
             if kind == 'approval':
