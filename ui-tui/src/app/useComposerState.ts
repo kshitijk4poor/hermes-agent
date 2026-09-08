@@ -28,7 +28,7 @@ import type {
   UseComposerStateResult
 } from './interfaces.js'
 import { $isBlocked } from './overlayStore.js'
-import { captureDestination, isCurrentDestination } from './submissionDestination.js'
+import { captureDestination, isCurrentDestination, type SubmissionDestination } from './submissionDestination.js'
 import { getUiState } from './uiStore.js'
 
 const TOKEN_MAX_COUNT = 32
@@ -206,6 +206,47 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
     [setComposerTokens]
   )
 
+  const attachmentFlights = useRef(0)
+  const staleAttachments = useRef<Array<{ destination: SubmissionDestination; path: string }>>([])
+  const resolveAttachment = useCallback(
+    async <T extends { path?: string }>(
+      destination: SubmissionDestination,
+      revision: number,
+      request: Promise<T | null>,
+      accept: (attached: T | null) => ComposerPasteResult | null
+    ): Promise<ComposerPasteResult | null> => {
+      attachmentFlights.current++
+      try {
+        const attached = await request
+
+        if (isCurrentDestination(destination) && revision === composerRevision.current) {
+          return accept(attached)
+        }
+        if (attached?.path) {
+          staleAttachments.current.push({ destination, path: attached.path })
+        }
+
+        return null
+      } finally {
+        attachmentFlights.current--
+        // Detach is path-based: wait for concurrent replies before deciding
+        // whether that path belongs to a surviving visible attachment.
+        if (!attachmentFlights.current) {
+          for (const stale of staleAttachments.current.splice(0)) {
+            if (
+              isCurrentDestination(stale.destination) &&
+              tokensRef.current.some(token => token.kind === 'image' && token.path === stale.path)
+            ) {
+              continue
+            }
+            void gw.request('image.detach', { session_id: stale.destination.sid, path: stale.path }).catch(() => {})
+          }
+        }
+      }
+    },
+    [gw]
+  )
+
   /**
    * Pull an image off the system clipboard into the composer as a token.
    *
@@ -223,23 +264,24 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
         return null
       }
 
-      const r = await gw
-        .request<ClipboardPasteResponse & { path?: string }>('clipboard.paste', { session_id: sid })
-        .catch(() => null)
+      return resolveAttachment(
+        destination,
+        revision,
+        gw.request<ClipboardPasteResponse & { path?: string }>('clipboard.paste', { session_id: sid })
+          .catch(() => null),
+        r => {
+          if (r?.attached) {
+            return attachImageToken(r, value, cursor)
+          }
+          if (!quiet) {
+            sys(r?.message || 'No image found in clipboard')
+          }
 
-      if (!(isCurrentDestination(destination) && revision === composerRevision.current)) {return null}
-
-      if (r?.attached) {
-        return attachImageToken(r, value, cursor)
-      }
-
-      if (!quiet) {
-        sys(r?.message || 'No image found in clipboard')
-      }
-
-      return null
+          return null
+        }
+      )
     },
-    [attachImageToken, gw, sys]
+    [attachImageToken, gw, resolveAttachment, sys]
   )
 
   const handleResolvedPaste = useCallback(
@@ -256,19 +298,15 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
 
       if (sid && looksLikeDroppedPath(cleanedText)) {
         try {
-          const attached = await gw.request<ImageAttachResponse>('image.attach', {
-            path: cleanedText,
-            session_id: sid
-          })
+          const next = await resolveAttachment(
+            destination,
+            revision,
+            gw.request<ImageAttachResponse & { path?: string }>('image.attach', { path: cleanedText, session_id: sid }),
+            attached => attached?.name ? attachImageToken(attached, value, cursor) : null
+          )
 
-          if (!(isCurrentDestination(destination) && revision === composerRevision.current)) {return null}
-
-          if (attached?.name) {
-            // Drop an `[[ Image N ]]` token where the path was typed. The old
-            // path printed a notice above the status bar and left the composer
-            // untouched, so the only trace of the attachment lived outside the
-            // input the user was editing.
-            return attachImageToken(attached, value, cursor)
+          if (next) {
+            return next
           }
         } catch {
           // Fall back to generic file-drop detection below.
@@ -328,7 +366,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
 
       return inserted
     },
-    [attachImageToken, gw, pasteClipboardImage, setComposerTokens]
+    [attachImageToken, gw, pasteClipboardImage, resolveAttachment, setComposerTokens]
   )
 
   const handleTextPaste = useCallback(
@@ -408,17 +446,21 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
           return null
         }
 
-        const attached = await gw
-          .request<ImageAttachResponse & { path?: string }>('image.attach', { path, session_id: sid })
-          .catch((e: Error) => {
-            if ((isCurrentDestination(destination) && revision === composerRevision.current)) {sys(`error: ${e.message}`)}
+        return resolveAttachment(
+          destination,
+          revision,
+          gw.request<ImageAttachResponse & { path?: string }>('image.attach', { path, session_id: sid })
+            .catch((e: Error) => {
+              if (isCurrentDestination(destination) && revision === composerRevision.current) {
+                sys(`error: ${e.message}`)
+              }
 
-            return null
-          })
-
-        return (isCurrentDestination(destination) && revision === composerRevision.current) && attached?.name ? attachImageToken(attached, value, cursor) : null
+              return null
+            }),
+          attached => attached?.name ? attachImageToken(attached, value, cursor) : null
+        )
       }),
-    [appendAttachment, attachImageToken, gw, sys]
+    [appendAttachment, attachImageToken, gw, resolveAttachment, sys]
   )
 
   const openEditor = useCallback(async () => {

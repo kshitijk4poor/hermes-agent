@@ -303,6 +303,9 @@ export function useSubmission(opts: UseSubmissionOptions) {
         const queued =
           parsed.name === 'queue' || parsed.name === 'q' ? queueItemFromSlash(slash.display, slash.command) : undefined
 
+        // Attachment commands capture the cleared composer's revision.
+        composerActions.clearIn()
+
         if (queued) {
           // Handled here, before the slash handler, so it is counted here.
           reportSlashCommand(gw, parsed.name, getUiState().sid)
@@ -311,8 +314,6 @@ export function useSubmission(opts: UseSubmissionOptions) {
         } else {
           slashRef.current(slash.command)
         }
-
-        composerActions.clearIn()
 
         return
       }
