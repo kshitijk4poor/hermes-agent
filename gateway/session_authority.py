@@ -13,6 +13,7 @@ from gateway.session_contract import (
     AdmissionReceipt, Principal, SessionHandle, SessionRef, Submission,
     SubscriptionSnapshot,
 )
+from tui_gateway.transport import FanoutTransport
 from hermes_state_runtime import (
     RuntimeStoreError, admit_session_input, begin_runtime_epoch,
     cancel_session_input, claim_session_input, get_session_admission,
@@ -27,6 +28,7 @@ class LiveSession:
     task: asyncio.Task | None = None
     subscribers: dict = field(default_factory=dict)
     sequence: int = 0
+    fanout: FanoutTransport = field(default_factory=FanoutTransport)
 
 
 class SessionAuthority:
@@ -79,6 +81,9 @@ class SessionAuthority:
         subscription = next((key for key, member in live.subscribers.items()
                              if member == actor), None) or uuid.uuid4().hex
         live.subscribers[subscription] = actor
+        transport = self.events.get(actor.transport_id)
+        if transport is not None:
+            live.fanout.attach(transport)
         return SubscriptionSnapshot(subscription, self._handle(ref), self.instance_id,
                                     live.sequence, tuple(self.db.get_messages_as_conversation(ref.session_id)),
                                     tuple(self._receipt(r) for r in list_session_admissions(
@@ -90,6 +95,9 @@ class SessionAuthority:
                 if live.subscribers[subscription_id] != actor:
                     raise RuntimeStoreError('permission_denied')
                 del live.subscribers[subscription_id]
+                transport = self.events.get(actor.transport_id)
+                if transport is not None:
+                    live.fanout.detach(transport)
                 return
         raise RuntimeStoreError('not_found')
 
@@ -219,10 +227,7 @@ class SessionAuthority:
                 'type': 'message.complete', 'session_id': ref.session_id,
                 'payload': {'text': response, 'content': response, 'admission_id': admission_id,
                             'outcome': settled['outcome']}, 'seq': live.sequence}}
-            for actor in tuple(live.subscribers.values()):
-                transport = self.events.get(actor.transport_id)
-                if transport is not None:
-                    transport.write(frame)
+            live.fanout.write(frame)
             waiter = self.waiters.pop(admission_id, None)
             if waiter is not None and not waiter.done():
                 waiter.set_result(response)
