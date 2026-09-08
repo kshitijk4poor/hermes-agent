@@ -21,7 +21,7 @@ import hermes_cli.gateway_setup_service as service_setup
 
 @pytest.fixture(autouse=True)
 def _no_real_gateway_service(monkeypatch):
-    """run_import() auto-installs the gateway service post-restore; tests must
+    """run_import() may start an existing gateway service post-restore; tests must
     never touch the host's systemd/launchd. Individual tests re-patch these to
     assert the wiring."""
     import hermes_cli.gateway as gateway_mod
@@ -728,6 +728,7 @@ class TestImport:
         out = capsys.readouterr().out
         assert "Preserved 1 runtime state file(s)" in out
         assert "Done. Your Hermes configuration has been restored." in out
+        assert "hermes gateway run" in out
 
 
 

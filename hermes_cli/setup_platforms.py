@@ -346,10 +346,7 @@ def setup_gateway(config: dict):
         print_success("Messaging platforms configured!")
         _warn_missing_home_channels()
 
-    # Gateway service setup runs UNCONDITIONALLY — a gateway with zero platforms is a supported
-    # mode (cron keeps running; adapters come up once tokens are added via `hermes import` /
-    # `hermes setup gateway`). Gating it on messaging config left install-then-import machines
-    # with cron jobs and bot tokens but no process to serve them.
+    # Offer optional persistence even with no messaging platforms: cron can run alone.
     from hermes_cli.gateway import _is_service_running, supports_systemd_services
     from hermes_cli.gateway_setup_service import ensure_gateway_service
     supports_systemd = supports_systemd_services()

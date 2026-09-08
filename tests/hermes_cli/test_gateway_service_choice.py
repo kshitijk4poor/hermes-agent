@@ -65,14 +65,25 @@ def _operations(calls):
 
 @pytest.mark.linux_only
 @pytest.mark.parametrize("choice", [None, "decline", "install"])
-def test_import_and_ordinary_setup_never_authorize_install(supervisor, choice):
+@pytest.mark.parametrize("installed", [False, True])
+def test_import_and_ordinary_setup_never_authorize_install(supervisor, choice, installed):
     profile, calls = supervisor
     config_api.save_config({"gateway": {"service_install_choice": choice}})
+    if installed:
+        unit = gateway.get_systemd_unit_path()
+        unit.parent.mkdir(parents=True)
+        unit.write_text(gateway.generate_systemd_unit(), encoding="utf-8")
     before = (profile / "config.yaml").read_bytes()
-    assert setup_service.ensure_gateway_service() is False
-    assert setup_service.ensure_gateway_service(context="import") is False
-    assert not gateway.get_systemd_unit_path().exists()
-    assert not any(set(op) & {"enable", "enable-linger", "start", "daemon-reload"} for op in _operations(calls))
+    assert setup_service.ensure_gateway_service() is installed
+    assert setup_service.ensure_gateway_service(interactive=True) is installed
+    assert setup_service.ensure_gateway_service(context="import", install=True) is installed
+    from hermes_cli.backup import _revive_gateway_after_import
+    _revive_gateway_after_import(profile)
+    assert gateway.get_systemd_unit_path().exists() is installed
+    forbidden = {"enable", "enable-linger", "daemon-reload"}
+    if not installed:
+        forbidden.add("start")
+    assert not any(set(op) & forbidden for op in _operations(calls))
     assert (profile / "config.yaml").read_bytes() == before
 
 
@@ -106,13 +117,14 @@ def test_explicit_setup_consent_is_durable_only_after_success(supervisor, monkey
 
 @pytest.mark.linux_only
 @pytest.mark.parametrize("start_now", [False, True])
-def test_wizard_declined_service_does_not_install(supervisor, monkeypatch, start_now):
+@pytest.mark.parametrize("consent", [False, True])
+def test_wizard_service_choice_controls_installation(supervisor, monkeypatch, start_now, consent):
     profile, calls = supervisor
     config_api.save_config({"gateway": {"service_install_choice": None}})
     stream = io.StringIO()
     stream.isatty = lambda: True
     monkeypatch.setattr(sys, "stdin", stream)
-    answers = iter([start_now, False])
+    answers = iter([start_now, consent])
     monkeypatch.setattr(gateway, "prompt_yes_no", lambda *args: next(answers))
     monkeypatch.setattr(gateway, "prompt_choice", lambda *args, **kwargs: 0)
     spawned = []
@@ -127,9 +139,9 @@ def test_wizard_declined_service_does_not_install(supervisor, monkeypatch, start
 
     monkeypatch.setattr(gateway.subprocess, "Popen", popen)
     setup_service._wizard_install_service("systemd")
-    assert not gateway.get_systemd_unit_path().exists()
-    assert bool(spawned) is start_now
-    assert config_api.load_config()["gateway"]["service_install_choice"] == "decline"
+    assert gateway.get_systemd_unit_path().exists() is consent
+    assert bool(spawned) is (start_now and not consent)
+    assert config_api.load_config()["gateway"]["service_install_choice"] == ("install" if consent else "decline")
     if spawned:
         assert "--replace" not in spawned[0][0]
 

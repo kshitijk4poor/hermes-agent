@@ -73,7 +73,7 @@ def ensure_gateway_service(context: str = "setup", *, interactive: bool = False,
             elif gw.is_macos():
                 gw.launchd_install(force=False)
             else:
-                gw._gw_windows().install(force=False)
+                gw._gw_windows().install(force=False, start_now=True, start_on_login=True)
             # Installers can refuse without raising (e.g. temporary-home guard).
             if not gw._is_service_installed():
                 gw.print_warning("Gateway service install did not complete. Retry: hermes gateway install")

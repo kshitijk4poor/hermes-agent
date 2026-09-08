@@ -25,6 +25,32 @@ The messaging gateway is the long-running process that connects Hermes to 20+ ex
 | `plugins/platforms/<name>/` | Bundled messaging adapters (most platforms: `adapter.py` + `plugin.yaml`) |
 | `gateway/platforms/` | Shared `base.py` plus legacy/direct adapters (Signal, API server, webhooks, …) |
 
+## Optional service installation
+
+A running gateway and an installed OS service are different things. `hermes gateway run`
+works without a service, including with no messaging platforms configured.
+
+`hermes setup`, quick setup, and `hermes gateway setup` ask interactive users once:
+
+> Install the gateway service so Hermes starts automatically at login and keeps scheduled jobs and messaging available?
+
+The profile's `gateway.service_install_choice` stores `null`, `install`, or `decline`.
+An unset value is not permission to install. Declining records `decline` without creating,
+enabling, or removing a service. In the gateway wizard, choosing **Start now** but declining
+service installation launches an unmanaged gateway; it does not create a disabled service.
+Without service persistence, messaging and scheduled work stop at logout/reboot. Jobs cannot
+run while the host is off.
+
+Noninteractive setup and imports do not install a missing service, even when the imported
+config says `install`. Existing installed services remain authoritative and can be started
+regardless of the saved preference. To opt in explicitly later, run `hermes gateway install`;
+the choice is recorded only after successful installation. To be asked again during setup,
+reset the choice with `hermes config set gateway.service_install_choice null`.
+
+Setup orchestration lives in `hermes_cli/gateway_setup_service.py`. Its
+`ensure_gateway_service` helper is not a general runtime discovery or auto-start API:
+ordinary calls never reinstall a missing service based only on stored preference.
+
 ## Architecture Overview
 
 ```text

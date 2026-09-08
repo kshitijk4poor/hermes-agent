@@ -1096,7 +1096,7 @@ def _revive_gateway_after_import(hermes_root: Path) -> None:
             (native_default / marker).exists() for marker in ("config.yaml", ".env", "state.db")):
         print("\nRestored into a non-default home; leaving the gateway service alone to avoid clashing "
               f"with the install at {native_default}.\n"
-              "To start a gateway for this home, run:  hermes gateway install")
+              "To start a gateway for this home, run:  hermes gateway run")
         return
     try:
         from hermes_cli.gateway import _is_service_running
@@ -1105,7 +1105,7 @@ def _revive_gateway_after_import(hermes_root: Path) -> None:
             print()
             ensure_gateway_service(context="import")
     except Exception:
-        print("\nStart the gateway to activate cron jobs and messaging:\n  hermes gateway install")
+        print("\nStart the gateway to activate cron jobs and messaging:\n  hermes gateway run")
 
 
 # --- Quick state snapshots (used by /snapshot slash command and hermes backup --quick) ---
