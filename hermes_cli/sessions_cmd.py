@@ -1214,7 +1214,7 @@ def cmd_sessions(args, sessions_parser=None):
         if read_only and not path.exists():
             print(empty_messages[action])
             return
-        db = SessionDB(db_path=path, read_only=read_only)
+        db = SessionDB(db_path=path, read_only=True) if read_only else SessionDB()
     except Exception as e:
         # mode=ro cannot create the store; a reader on a fresh profile reports empty rather than failing.
         if observational and not _default_db_path().exists():
