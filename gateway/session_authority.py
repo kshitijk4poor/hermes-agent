@@ -60,7 +60,7 @@ class SessionAuthority:
             restore_local_session(self, ref.session_id)
         from gateway.config import Platform
         source = self.sessions[ref.session_id].source
-        if source.platform == Platform.LOCAL and source.user_id != actor.subject:
+        if source is not None and source.platform == Platform.LOCAL and source.user_id != actor.subject:
             raise RuntimeStoreError('permission_denied')
 
     def _require_admission_open(self):
