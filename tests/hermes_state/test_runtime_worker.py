@@ -1,0 +1,63 @@
+import pytest
+import sqlite3
+
+from hermes_state import SessionDB
+import hermes_state_runtime as rt
+
+
+def setup_worker(tmp_path):
+    assert callable(getattr(rt, 'register_worker_execution', None)), 'canonical worker receipts missing'
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    db.create_session('s', source='test')
+    epoch = rt.begin_runtime_epoch(db, instance_id='boot')
+    assignment = dict(execution_id='worker', session_id='s', generation=0)
+    rt.register_worker_execution(db, epoch=epoch, **assignment, kind='compute', adoption_secret='private-fixture')
+    return db, epoch, assignment
+
+
+def test_worker_receipts_require_exact_sequence_assignment_and_adoption(tmp_path):
+    db, epoch, assignment = setup_worker(tmp_path)
+    try:
+        assert rt.claim_session_input(db, epoch=epoch, session_id='s') is None
+        args = dict(epoch=epoch, **assignment, sequence=1, role='assistant', content='kept output')
+        result = rt.persist_worker_message(db, **args)
+        assert rt.persist_worker_message(db, **args) == result
+        assert len(db.get_messages('s')) == 1
+        for change, reason in [({'content': 'different'}, 'admission_conflict'), ({'sequence': 3}, 'invalid_params'), ({'session_id': 'other'}, 'permission_denied'), ({'generation': 1}, 'stale_generation')]:
+            with pytest.raises(rt.RuntimeStoreError, match=reason):
+                rt.persist_worker_message(db, **(args | change))
+        new_epoch = rt.begin_runtime_epoch(db, instance_id='replacement')
+        rt.recover_session_inputs(db, epoch=new_epoch)
+        with pytest.raises(rt.RuntimeStoreError, match='stale_epoch'):
+            rt.persist_worker_message(db, **args)
+        with pytest.raises(rt.RuntimeStoreError, match='stale_epoch'):
+            rt.persist_worker_message(db, **(args | {'epoch': new_epoch}))
+        with pytest.raises(rt.RuntimeStoreError, match='permission_denied'):
+            rt.adopt_worker_execution(db, epoch=new_epoch, **assignment, adoption_secret='wrong')
+        adopted = rt.adopt_worker_execution(db, epoch=new_epoch, **assignment, adoption_secret='private-fixture')
+        assert adopted['owner_epoch'] == new_epoch and 'adoption_digest' not in adopted
+        assert rt.persist_worker_message(db, **(args | {'epoch': new_epoch})) == result
+        rt.persist_worker_message(db, **(args | {'epoch': new_epoch, 'sequence': 2, 'content': 'next'}))
+        rt.finish_worker_execution(db, epoch=new_epoch, **assignment)
+        with pytest.raises(rt.RuntimeStoreError, match='stale_generation'):
+            rt.persist_worker_message(db, **(args | {'epoch': new_epoch, 'sequence': 3}))
+        assert [r['content'] for r in db.get_messages('s')] == ['kept output', 'next']
+    finally:
+        db.close()
+
+
+def test_worker_mutation_and_receipt_roll_back_together(tmp_path):
+    db, epoch, assignment = setup_worker(tmp_path)
+    try:
+        db._conn.execute("CREATE TRIGGER reject_receipt BEFORE INSERT ON worker_receipts BEGIN SELECT RAISE(ABORT, 'receipt fixture'); END")
+        args = dict(epoch=epoch, **assignment, sequence=1, role='assistant', content='once')
+        with pytest.raises(sqlite3.IntegrityError, match='receipt fixture'):
+            rt.persist_worker_message(db, **args)
+        assert db.get_messages('s') == []
+        assert db.get_session('s')['message_count'] == 0
+        assert db._conn.execute("SELECT last_sequence FROM worker_executions WHERE execution_id='worker'").fetchone()[0] == 0
+        db._conn.execute('DROP TRIGGER reject_receipt')
+        rt.persist_worker_message(db, **args)
+        assert len(db.get_messages('s')) == db.get_session('s')['message_count'] == 1
+    finally:
+        db.close()

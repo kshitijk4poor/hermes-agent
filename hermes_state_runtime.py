@@ -114,7 +114,9 @@ def claim_session_input(db, *, epoch: int, session_id: str) -> dict | None:
         blocked = conn.execute("SELECT status FROM session_admissions WHERE target_session_id=? AND status IN ('started','unknown')", (session_id,)).fetchall()
         if any(row[0] == 'unknown' for row in blocked):
             raise RuntimeStoreError('unknown_execution')
-        if blocked:
+        if conn.execute("SELECT 1 FROM worker_executions WHERE session_id=? AND status='unknown'", (session_id,)).fetchone():
+            raise RuntimeStoreError('unknown_execution')
+        if blocked or conn.execute("SELECT 1 FROM worker_executions WHERE session_id=? AND status IN ('registered','running')", (session_id,)).fetchone():
             return None
         row = conn.execute("SELECT * FROM session_admissions WHERE target_session_id=? AND status='queued' ORDER BY seq LIMIT 1", (session_id,)).fetchone()
         if row is None:
@@ -163,6 +165,7 @@ def recover_session_inputs(db, *, epoch: int) -> int:
     """Never replay started work. Live worker adoption is a separate explicit operation."""
     def write(conn):
         _epoch(conn, epoch)
+        conn.execute("UPDATE worker_executions SET status='unknown' WHERE status IN ('registered','running') AND owner_epoch!=?", (epoch,))
         return conn.execute("UPDATE session_admissions SET status='unknown' WHERE status='started' AND owner_epoch!=?", (epoch,)).rowcount
     return db._execute_write(write)
 
@@ -262,4 +265,118 @@ def resolve_unknown_session_input(db, *, epoch: int, admission_id: str, generati
         conn.execute("UPDATE session_admissions SET status='terminal',outcome='interrupted' WHERE admission_id=?", (admission_id,))
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
         return _row(_admission(conn, admission_id))
+    return db._execute_write(write)
+
+
+def _worker_public(row):
+    result = dict(row)
+    result.pop('adoption_digest')
+    return result
+
+
+def _worker_assignment(conn, execution_id, session_id, generation):
+    row = conn.execute('SELECT * FROM worker_executions WHERE execution_id=?', (execution_id,)).fetchone()
+    if row is None:
+        raise RuntimeStoreError('not_found')
+    if row['session_id'] != session_id:
+        raise RuntimeStoreError('permission_denied')
+    if (type(generation) is not int or row['generation'] != generation
+            or _session(conn, session_id)['runtime_generation'] != generation
+            or row['status'] == 'terminal'):
+        raise RuntimeStoreError('stale_generation')
+    return row
+
+
+def _secret_digest(secret):
+    import hashlib
+    _text(secret)
+    return hashlib.sha256(secret.encode('utf-8')).hexdigest()
+
+
+def register_worker_execution(db, *, epoch: int, execution_id: str, session_id: str,
+                              generation: int, kind: str, adoption_secret: str) -> dict:
+    for value in (execution_id, session_id):
+        _text(value)
+    if kind not in ('cron', 'child', 'compute', 'kanban'):
+        raise RuntimeStoreError('invalid_params')
+    digest = _secret_digest(adoption_secret)
+    def write(conn):
+        _epoch(conn, epoch)
+        session = _session(conn, session_id)
+        if type(generation) is not int or session['runtime_generation'] != generation:
+            raise RuntimeStoreError('stale_generation')
+        old = conn.execute('SELECT * FROM worker_executions WHERE execution_id=?', (execution_id,)).fetchone()
+        if old is not None:
+            if (old['session_id'], old['generation'], old['kind'], old['owner_epoch'], old['adoption_digest']) != (session_id, generation, kind, epoch, digest):
+                raise RuntimeStoreError('admission_conflict')
+            return _worker_public(old)
+        if conn.execute("SELECT 1 FROM worker_executions WHERE session_id=? AND status!='terminal'", (session_id,)).fetchone():
+            raise RuntimeStoreError('stale_generation')
+        if conn.execute("SELECT 1 FROM session_admissions WHERE target_session_id=? AND status='unknown'", (session_id,)).fetchone():
+            raise RuntimeStoreError('unknown_execution')
+        conn.execute("""INSERT INTO worker_executions(execution_id,session_id,kind,owner_epoch,generation,status,adoption_digest)
+            VALUES(?,?,?,?,?,'registered',?)""", (execution_id, session_id, kind, epoch, generation, digest))
+        return _worker_public(_worker_assignment(conn, execution_id, session_id, generation))
+    return db._execute_write(write)
+
+
+def adopt_worker_execution(db, *, epoch: int, execution_id: str, session_id: str,
+                           generation: int, adoption_secret: str) -> dict:
+    """Authority first verifies the original producer claim and live worker proof."""
+    import hmac
+    digest = _secret_digest(adoption_secret)
+    def write(conn):
+        _epoch(conn, epoch)
+        row = _worker_assignment(conn, execution_id, session_id, generation)
+        if not hmac.compare_digest(row['adoption_digest'], digest):
+            raise RuntimeStoreError('permission_denied')
+        conn.execute("UPDATE worker_executions SET owner_epoch=?,status='running' WHERE execution_id=?", (epoch, execution_id))
+        return _worker_public(_worker_assignment(conn, execution_id, session_id, generation))
+    return db._execute_write(write)
+
+
+def persist_worker_message(db, *, epoch: int, execution_id: str, session_id: str,
+                           generation: int, sequence: int, role: str, content: str) -> dict:
+    """Typed text append primitive, NOT a general remote SessionDB implementation.
+
+    Structured tools/reasoning/usage/compression require their own typed operations.
+    No caller-supplied callable can commit inside this transaction.
+    """
+    import time
+    if type(sequence) is not int or sequence < 1 or role not in ('user', 'assistant', 'system') or not isinstance(content, str):
+        raise RuntimeStoreError('invalid_params')
+    digest = admission_fingerprint(canonical_target=session_id, payload={'operation': 'append_text', 'role': role, 'content': content})
+    def write(conn):
+        _epoch(conn, epoch)
+        row = _worker_assignment(conn, execution_id, session_id, generation)
+        if row['owner_epoch'] != epoch:
+            raise RuntimeStoreError('stale_epoch')
+        old = conn.execute('SELECT * FROM worker_receipts WHERE execution_id=? AND sequence=?', (execution_id, sequence)).fetchone()
+        if old is not None:
+            if old['payload_digest'] != digest:
+                raise RuntimeStoreError('admission_conflict')
+            return json.loads(old['result_json'])
+        if sequence != row['last_sequence'] + 1:
+            raise RuntimeStoreError('invalid_params')
+        now = time.time()
+        message = conn.execute('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)', (session_id, role, content, now))
+        conn.execute('UPDATE sessions SET message_count=message_count+1,last_activity_at=?,runtime_revision=runtime_revision+1 WHERE id=?', (now, session_id))
+        result = {'message_id': message.lastrowid}
+        conn.execute('INSERT INTO worker_receipts(execution_id,sequence,payload_digest,result_json) VALUES(?,?,?,?)', (execution_id, sequence, digest, _json(result)))
+        conn.execute("UPDATE worker_executions SET last_sequence=?,status='running' WHERE execution_id=?", (sequence, execution_id))
+        return result
+    return db._execute_write(write)
+
+
+def finish_worker_execution(db, *, epoch: int, execution_id: str, session_id: str,
+                            generation: int) -> dict:
+    def write(conn):
+        _epoch(conn, epoch)
+        row = _worker_assignment(conn, execution_id, session_id, generation)
+        if row['owner_epoch'] != epoch:
+            raise RuntimeStoreError('stale_epoch')
+        conn.execute("UPDATE worker_executions SET status='terminal' WHERE execution_id=?", (execution_id,))
+        result = _worker_public(row)
+        result['status'] = 'terminal'
+        return result
     return db._execute_write(write)
