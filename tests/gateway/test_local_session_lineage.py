@@ -119,6 +119,15 @@ async def test_local_lineage_transitions_preserve_owner_or_roll_back(tmp_path, m
     db.set_meta('gateway.local_policy.v1:unrelated-fork', json.dumps(local_receipt(db, ref.session_id)))
     with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
         await restarted.attach(actor, SessionRef('fixture', 'unrelated-fork'))
+    # Route reuse by a native reset must not pick a departed logical owner's generation.
+    from gateway.run_turn_runner import TurnRunner
+    from gateway.session import SessionSource
+    from gateway.session_authority import LiveSession
+    restarted.sessions[reset.session_id] = LiveSession(None, live.route)
+    native = SimpleNamespace(session_id=reset.session_id, session_key=live.route,
+                             source=SessionSource(Platform.TELEGRAM, 'native'))
+    turn = TurnRunner(fourth, native)
+    assert turn._approval_owner[1] == reset.session_id
 
 
 @pytest.mark.linux_only

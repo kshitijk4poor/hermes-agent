@@ -88,8 +88,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         authority = getattr(runner, "session_authority", None)
         self._approval_owner = None
         if authority is not None:
-            owner_id = next((sid for sid, live in authority.sessions.items()
-                             if live.route == ctx.session_key), ctx.session_id)
+            source = getattr(ctx, 'source', None)
+            owner_id = source.chat_id if getattr(source, 'platform', None) == Platform.LOCAL else ctx.session_id
             if owner_id in authority.sessions:
                 generation = authority.db.get_session(owner_id)["runtime_generation"]
                 self._approval_owner = (authority, owner_id, generation)
