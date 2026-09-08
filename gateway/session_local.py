@@ -4,8 +4,6 @@ Source and supported launch settings are frozen per route, never process env.
 """
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 
 from gateway.config import Platform, PlatformConfig
@@ -91,25 +89,22 @@ def create_local_session(authority, actor, params):
     request_id = params.get('request_id', uuid.uuid4().hex)
     if not isinstance(request_id, str) or not request_id or len(request_id) > 256:
         raise RuntimeStoreError('invalid_params')
-    adapter = authority.runner.adapters.get(Platform.LOCAL)
-    if adapter is None:
-        adapter = LocalSessionAdapter(authority)
-        authority.runner.adapters[Platform.LOCAL] = adapter
-    if not isinstance(adapter, LocalSessionAdapter) or adapter.authority is not authority:
-        raise RuntimeStoreError('runtime_draining')
-    # Stable route lets the persisted SessionStore recover a lost create ACK.
-    identity = json.dumps([authority.profile_id, actor.subject, request_id], separators=(',', ':'))
-    chat_id = 'local-' + hashlib.sha256(identity.encode()).hexdigest()
-    existing = adapter.policies.get(chat_id)
-    if existing is not None and existing.request_json != policy.request_json:
-        raise RuntimeStoreError('invalid_params')
-    source = SessionSource(platform=Platform.LOCAL, chat_id=chat_id,
+    from dataclasses import asdict
+    from datetime import datetime, timezone
+    from gateway.session import SessionEntry
+    from gateway.session_local_recovery import local_identity, restore_local_session
+    from hermes_state_local import commit_local_session
+    authority._require_admission_open()
+    sid = local_identity(authority.profile_id, actor.subject, request_id)
+    source = SessionSource(platform=Platform.LOCAL, chat_id=sid,
                            user_id=actor.subject, chat_type='dm')
-    ref = authority.register(source)
-    source = authority.sessions[ref.session_id].source
-    adapter.policies.setdefault(chat_id, policy)
-    adapter.register_source(source)
-    return ref
+    route = authority.runner.session_store._generate_session_key(source)
+    now = datetime.now(timezone.utc)
+    entry = SessionEntry(route, sid, now, now, origin=source, platform=Platform.LOCAL)
+    commit_local_session(authority.db, epoch=authority.epoch, receipt={
+        'profile_id': authority.profile_id, 'principal_id': actor.subject, 'request_id': request_id,
+        'session_id': sid, 'route': route, 'entry': entry.to_dict(), 'policy': asdict(policy)})
+    return restore_local_session(authority, sid)
 
 
 def local_session_info(authority, ref):

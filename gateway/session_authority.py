@@ -53,7 +53,15 @@ class SessionAuthority:
         if capability not in actor.capabilities:
             raise RuntimeStoreError('permission_denied')
         if ref.session_id not in self.sessions:
-            raise RuntimeStoreError('not_found')
+            row = self.db.get_session(ref.session_id)
+            if row is None or not str(row.get('chat_id') or '').startswith('local-'):
+                raise RuntimeStoreError('not_found')
+            from gateway.session_local_recovery import restore_local_session
+            restore_local_session(self, ref.session_id)
+        from gateway.config import Platform
+        source = self.sessions[ref.session_id].source
+        if source.platform == Platform.LOCAL and source.user_id != actor.subject:
+            raise RuntimeStoreError('permission_denied')
 
     def _require_admission_open(self):
         if self.runner._draining:
@@ -313,4 +321,6 @@ async def initialize_session_authority(runner, *, profile_id, instance_id):
     recover_session_inputs(db, epoch=epoch)
     authority = SessionAuthority(runner, profile_id=profile_id, instance_id=instance_id, db=db, epoch=epoch)
     runner.session_authority = authority
+    from gateway.session_local_recovery import recover_local_sessions
+    recover_local_sessions(authority)
     return authority

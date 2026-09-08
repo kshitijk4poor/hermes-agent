@@ -1,0 +1,59 @@
+"""Local creation is durable before publication and restart never replays a claim."""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+
+@pytest.mark.asyncio
+async def test_local_create_receipt_survives_cold_authority_atomically(tmp_path, monkeypatch):
+    from gateway.config import GatewayConfig, Platform
+    from gateway.session import SessionStore
+    from gateway.session_authority import initialize_session_authority
+    from gateway.session_contract import Principal
+    from gateway.session_local import create_local_session
+    from gateway import run
+    from hermes_state_runtime import RuntimeStoreError
+
+    config = {'platform_toolsets': {'cli': []}}
+    monkeypatch.setattr(run, '_load_gateway_config', lambda: config)
+    def runner():
+        store = SessionStore(tmp_path / 'sessions', GatewayConfig())
+        return SimpleNamespace(session_store=store, _session_db=store._db,
+                               adapters={}, _draining=False)
+    first = runner()
+    authority = await initialize_session_authority(first, profile_id='fixture', instance_id='first')
+    actor = Principal('owner', 'fixture', frozenset({'session:create', 'session:read'}), 'socket')
+    params = {'request_id': 'retry', 'source': 'gui', 'cwd': str(tmp_path), 'model': 'frozen', 'toolsets': []}
+    ref = create_local_session(authority, actor, params)
+    policy = first.adapters[Platform.LOCAL].policies[authority.sessions[ref.session_id].source.chat_id]
+    second = runner()
+    cold = await initialize_session_authority(second, profile_id='fixture', instance_id='second')
+    assert ref.session_id in cold.sessions, 'durable creation was lost with process-local registry'
+    config['platform_toolsets']['cli'] = ['terminal']
+    assert create_local_session(cold, actor, params) == ref
+    assert second.adapters[Platform.LOCAL].policies[cold.sessions[ref.session_id].source.chat_id] == policy
+    with pytest.raises(RuntimeStoreError, match='invalid_params'):
+        create_local_session(cold, actor, {**params, 'source': 'tui'})
+    foreign = Principal('other', 'fixture', actor.capabilities, 'other-socket')
+    with pytest.raises(RuntimeStoreError, match='permission_denied'):
+        await cold.resolve(foreign, ref)
+
+    db = cold.db
+    write = db._execute_write
+    def abort(callback, **kwargs):
+        def fail(conn):
+            callback(conn)
+            raise RuntimeError('injected transaction abort')
+        return write(fail, **kwargs)
+    before = db.session_count()
+    monkeypatch.setattr(db, '_execute_write', abort)
+    with pytest.raises(RuntimeError, match='injected transaction abort'):
+        create_local_session(cold, actor, {**params, 'request_id': 'aborted'})
+    monkeypatch.setattr(db, '_execute_write', write)
+    assert db.session_count() == before
+    assert set(cold.sessions) == {ref.session_id}
+    with db._read_ctx() as conn:
+        policies = conn.execute("SELECT value FROM state_meta WHERE key LIKE 'gateway.local_policy.v1:%'").fetchall()
+    assert len(policies) == 1
+    assert json.loads(policies[0][0])['principal_id'] == actor.subject

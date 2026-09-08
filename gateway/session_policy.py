@@ -68,6 +68,28 @@ def build_policy(params, config):
                               json.dumps(config), json.dumps(request, sort_keys=True), json.dumps(terminal))
 
 
+def restore_policy(data):
+    """Reject incomplete private policy rather than rebuilding from current defaults."""
+    try:
+        policy = LocalSessionPolicy(**data)
+        if (policy.source not in SURFACES or policy.platform != SURFACES[policy.source]
+                or not isinstance(policy.cwd, str) or not Path(policy.cwd).is_absolute()
+                or not Path(policy.cwd).is_dir()
+                or not isinstance(policy.model, str) or not policy.model.strip()
+                or not isinstance(policy.toolsets, (list, tuple))
+                or any(not isinstance(name, str) for name in policy.toolsets)):
+            raise ValueError('invalid policy')
+        from dataclasses import replace
+        for value in (policy.config_json, policy.request_json, policy.terminal_json):
+            if not isinstance(json.loads(value), dict):
+                raise ValueError('invalid policy object')
+        if json.loads(policy.terminal_json).get('TERMINAL_CWD') != policy.cwd:
+            raise ValueError('terminal policy mismatch')
+        return replace(policy, toolsets=tuple(policy.toolsets))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeStoreError('storage_unavailable') from exc
+
+
 def policy_for_source(runner, source):
     from gateway.session_local import LocalSessionAdapter
     from gateway.config import Platform

@@ -38,6 +38,8 @@ async def start_gateway_runtime_api(runner):
     from gateway.run_api import start_gateway_api
     runner.session_api = await start_gateway_api(runner)
     runner.session_runtime_descriptor['api_origin'] = runner.session_api.api_origin
+    from gateway.session_local_recovery import recover_local_sessions
+    recover_local_sessions(runner.session_authority, schedule=True)
 
 
 def publish_gateway_runtime_ready(runner):
