@@ -56,4 +56,8 @@ tickets, a loopback OpenAI-compatible model, the real TurnRunner/AIAgent, and th
 terminal tool. It proves persisted identity and same-agent reattachment; closes both
 viewers while approval is pending; reconnects and consents before deleting only an owned
 temporary directory; checks canonical history; and rejects forged authentication/source/
-profile and unsupported launch fields. No native messaging allow-all credential is used.
+profile and unsupported launch fields. A second case runs the real clarify tool,
+reattaches after all viewers close, and verifies the answer reaches the next loopback
+model request. No native messaging allow-all credential authorizes the execution; a
+separate negative control enables messaging allow-all only while proving reconstructed
+local source/profile objects still fail closed.

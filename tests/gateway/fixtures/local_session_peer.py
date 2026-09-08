@@ -5,13 +5,14 @@ import json
 import os
 from pathlib import Path
 import shlex
+import sys
 import threading
 import traceback
 
 from authority_controls_peer import ModelPeer
 
 
-async def probe(peer, target):
+async def probe(peer, target, kind):
     import websockets
     from gateway.run import GatewayRunner
     from gateway.session_authority import initialize_session_authority
@@ -102,6 +103,7 @@ async def probe(peer, target):
         agent = authority.agent(ref)
         assert isinstance(agent, AIAgent)
         prompt = snapshot['result']['prompts'][0]
+        assert prompt['kind'] == kind, prompt
         await a.close()
         await b.close()
         assert target.exists()
@@ -109,14 +111,19 @@ async def probe(peer, target):
         snapshot = await rpc(c, 'session.resume', session_id=sid)
         assert snapshot['result']['prompts'][0]['prompt_id'] == prompt['prompt_id']
         assert authority.agent(ref) is agent
-        answer = await rpc(c, 'approval.respond', session_id=sid,
-                           prompt_id=prompt['prompt_id'], execution_generation=prompt['execution_generation'], choice='once')
+        response = {'choice': 'once'} if kind == 'approval' else {'answer': 'green'}
+        answer = await rpc(c, kind + '.respond', session_id=sid,
+                           prompt_id=prompt['prompt_id'], execution_generation=prompt['execution_generation'], **response)
         assert answer.get('result', {}).get('status') == 'resolved', answer
         await asyncio.wait_for(authority.sessions[sid].task, 25)
-        assert not target.exists(), 'real owned terminal effect missing'
+        if kind == 'approval':
+            assert not target.exists(), 'real owned terminal effect missing'
+        else:
+            assert any('green' in json.dumps(m) for messages in peer.requests
+                       for m in messages if m['role'] == 'tool'), peer.requests
         final = await rpc(c, 'session.resume', session_id=sid)
         assert final['result']['session_id'] == sid
-        assert any(m.get('content') == 'APPROVAL_FINISHED' for m in final['result']['messages']), final
+        assert any(m.get('content') == kind.upper() + '_FINISHED' for m in final['result']['messages']), final
         assert authority.agent(ref) is agent
         pong = await rpc(c, 'ping')
         assert pong.get('result', {}).get('pong') is True, pong
@@ -132,11 +139,14 @@ async def probe(peer, target):
         else:
             raise AssertionError('unauthenticated socket accepted')
         Path(os.environ['HERMES_HOME'], 'receipt.json').write_text(json.dumps({
-            'terminal_effect': True, 'same_agent': True, 'detached_pending': True,
+            'terminal_effect': not target.exists(), 'human_response': True,
+            'same_agent': True, 'detached_pending': True,
             'negative_controls': True, 'reconnected_identity': sid, 'model_requests': len(peer.requests)}))
     finally:
         if sid is not None:
             resolve_gateway_approval(authority.sessions[sid].route, 'deny', resolve_all=True)
+            from tools import clarify_gateway
+            clarify_gateway.clear_session(authority.sessions[sid].route)
             task = authority.sessions[sid].task
             if task is not None:
                 await asyncio.wait_for(task, 30)
@@ -149,7 +159,9 @@ def main():
     target = Path(os.environ['HERMES_HOME'], 'owned-removal')
     target.mkdir()
     (target / 'owned.txt').write_text('disposable')
-    peer = ThreadingHTTPServer(('127.0.0.1', 0), ModelPeer)
+    kind = sys.argv[1] if len(sys.argv) > 1 else 'approval'
+    from authority_clarify_peer import ModelPeer as ClarifyPeer
+    peer = ThreadingHTTPServer(('127.0.0.1', 0), ModelPeer if kind == 'approval' else ClarifyPeer)
     peer.requests = []
     peer.command = 'rm -r -- ' + shlex.quote(str(target))
     threading.Thread(target=peer.serve_forever, daemon=True).start()
@@ -161,7 +173,7 @@ def main():
         'streaming:\n  enabled: false\n'
         'auxiliary:\n  title_generation:\n    enabled: false\n')
     try:
-        asyncio.run(probe(peer, target))
+        asyncio.run(probe(peer, target, kind))
     finally:
         peer.shutdown()
         peer.server_close()
