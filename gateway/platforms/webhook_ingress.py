@@ -31,4 +31,49 @@ async def producer_scope(adapter, event):
 
 async def admit_producer(adapter, event):
     async with producer_scope(adapter, event) as authority:
+        from gateway.config import Platform
+        if adapter.platform == Platform.WEBHOOK:
+            prior = await _webhook_retry(authority, event)
+            if prior is not None:
+                return prior
         return await authority.admit_native(event)
+
+
+async def _webhook_retry(authority, event):
+    # One-shot finalization ends the route. Resolve an existing provider receipt
+    # before SessionStore would rotate it into a new physical session.
+    import json
+    from gateway.session_envelope import prepare_native, restore_native
+    from hermes_state_runtime import get_session_admission
+    payload = await prepare_native(authority.runner, event)
+    source = restore_native(payload).source
+    identity = json.dumps([source.profile, source.platform.value, source.chat_id,
+                           source.thread_id, source.user_id], separators=(',', ':'))
+    rows = authority.db._read_all('SELECT admission_id FROM session_admissions '
+        'WHERE principal_id=? AND request_id=?', ('messaging:' + identity, event.message_id))
+    if not rows:
+        return None
+    row = get_session_admission(authority.db, admission_id=rows[0]['admission_id'])
+    if len(rows) != 1 or row['payload'] != payload:
+        raise RuntimeStoreError('admission_conflict')
+    return authority._receipt(row)
+
+
+def finalize_webhook(authority, receipt):
+    """End only the settled admitted generation, atomically with the epoch fence."""
+    import time
+    if receipt.status != 'terminal' or receipt.execution_generation is None:
+        return False
+    sid = receipt.ref.session_id
+    def write(conn):
+        return authority.db._end_and_bump(conn, """
+            UPDATE sessions SET ended_at=?, end_reason=?
+            WHERE id=? AND ended_at IS NULL AND runtime_generation=?
+              AND EXISTS (SELECT 1 FROM runtime_epoch WHERE singleton=1 AND epoch=?)
+              AND EXISTS (SELECT 1 FROM session_admissions WHERE admission_id=?
+                AND target_session_id=? AND status='terminal' AND generation=? AND owner_epoch=?)
+              AND NOT EXISTS (SELECT 1 FROM session_admissions WHERE target_session_id=? AND status!='terminal')
+            """, (time.time(), 'webhook_complete', sid, receipt.execution_generation,
+                  receipt.authority_epoch, receipt.admission_id, sid, receipt.execution_generation,
+                  receipt.authority_epoch, sid), sid, 'webhook_complete')
+    return bool(authority.db._execute_write(write))

@@ -66,6 +66,10 @@ async def probe(peer):
             duplicate = await client.post(url, data=body, headers=headers)
             assert duplicate.status in (200, 202), await duplicate.text()
             assert len(rows()) == 1 and len(peer.requests) == 1
+            async with asyncio.timeout(5):
+                while adapter._background_tasks:
+                    await asyncio.sleep(.01)
+            assert authority.db.get_session(rows()[0]['target_session_id'])['ended_at'] is not None
             Path(os.environ['HERMES_HOME'], 'webhook-receipt.json').write_text(json.dumps({
                 'failed_status': failed.status, 'retry_status': accepted.status,
                 'admissions': len(rows()), 'inferences': len(peer.requests), 'signature_denied': denied.status}))
