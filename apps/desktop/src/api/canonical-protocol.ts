@@ -79,6 +79,10 @@ export class CanonicalDesktopProtocol {
     if (!payload || !event.session_id) { return }
     const sid = event.session_id
 
+    if (Array.isArray(payload.pending)) {
+      payload.pending_submissions = payload.pending.map(row => ({ ...row, user: row.text }))
+    }
+
     if (typeof payload.execution_generation === 'number') {
       const current = this.generations.get(sid) ?? -1
 
@@ -136,7 +140,7 @@ export class CanonicalDesktopProtocol {
         return projected
       })
 
-      return { ...value, pending_approval: prompts.find((p: any) => p.kind === 'approval'), pending_clarify: prompts.find((p: any) => p.kind === 'clarify'), info: { ...value.info, execution_generation: value.execution_generation, running: value.running } }
+      return { ...value, pending_approval: prompts.find((p: any) => p.kind === 'approval'), pending_clarify: prompts.find((p: any) => p.kind === 'clarify'), info: { ...value.info, stored_session_id: value.stored_session_id, pending_submissions: value.pending_submissions, execution_generation: value.execution_generation, running: value.running } }
     }
 
     if (method === 'session.events.since') {

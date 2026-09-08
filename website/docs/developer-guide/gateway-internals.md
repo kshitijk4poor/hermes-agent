@@ -16,6 +16,11 @@ This includes native messaging inputs and local-client inputs. Snapshots do not 
 private native routing, source, or authorization envelopes. Submission and receipt
 ACKs retain their existing shape. Clients must use `admission_id` for cancellation
 and receipt queries rather than assuming it equals the original input ID.
+Queue admission, claim, cancellation and settlement also publish `session.info` to
+attached viewers. Its `pending` rows use the same projection as resume. Settlement
+publishes this state before `message.complete`, retaining the terminal event as the
+last event of that turn. Desktop translates both paths into its existing
+`pending_submissions` queue store.
 
 ## Shared authority setup readiness
 

@@ -197,6 +197,9 @@ async def probe():
                     assert envelope is not None, 'ACK has no durable native source envelope'
                     assert envelope['source']['user_id'] == 'fixture-user'
                     assert envelope['route'] == entry.session_key
+                    published = await until(lambda f: f.get('params', {}).get('type') == 'session.info'
+                        and any(r.get('input_id') == 'fifo-2' for r in f['params'].get('payload', {}).get('pending', [])))
+                    assert any(r['text'] == 'FIFO_SECOND' for r in published['params']['payload']['pending'])
                     await ws.send(json.dumps({'jsonrpc': '2.0', 'id': 'queue-snapshot',
                         'method': 'session.resume', 'params': {'session_id': entry.session_id}}))
                     projected = (await until(lambda f: f.get('id') == 'queue-snapshot'))['result']['pending']

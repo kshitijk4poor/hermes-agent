@@ -210,9 +210,10 @@ async def probe(peer, target):
         assert [e['seq'] for e in events] == list(range(snapshot['last_sequence'] + 1, events[-1]['seq'] + 1))
         for event in events:
             assert event['session_id'] == ref.session_id
-            assert event['execution_generation'] == rows[0]['generation']
-            assert event['authority_epoch'] == authority.epoch
-            assert event['admission_id'] == receipt['admission_id']
+            if event['type'] != 'session.info':
+                assert event['execution_generation'] == rows[0]['generation']
+                assert event['authority_epoch'] == authority.epoch
+                assert event['admission_id'] == receipt['admission_id']
             assert event['replay_epoch'] == snapshot['replay_epoch']
         assert all(isinstance(e['payload']['text'], str) for e in events if e['type'] == 'message.delta'), 'native segment sentinel leaked as text delta'
         tools = [e for e in events if e['type'].startswith('tool.')]

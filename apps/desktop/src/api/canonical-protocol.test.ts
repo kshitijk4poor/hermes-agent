@@ -42,3 +42,16 @@ test('canonical receipts preserve admission identity and replay restores fenced 
   protocol.event({ type: 'message.start', session_id: 's', payload: { execution_generation: 4 } })
   expect(() => protocol.prepare('approval.respond', { session_id: 's', request_id: 'p', choice: 'once' })).toThrow('stale')
 })
+
+test('pending resume and live updates share the existing queue projection', () => {
+  const protocol = new CanonicalDesktopProtocol()
+  const pending = [{ admission_id: 'a', input_id: 'original', text: 'queued text', status: 'queued' }]
+  const resumed = protocol.result('session.resume', {}, { session_id: 's', pending })
+  const event = { type: 'session.info', session_id: 's', payload: { pending } }
+  protocol.event(event)
+  expect(resumed.info.pending_submissions).toEqual([{ ...pending[0], user: 'queued text' }])
+  expect(event.payload).toHaveProperty('pending_submissions', resumed.info.pending_submissions)
+  const cleared = { type: 'session.info', session_id: 's', payload: { pending: [] } }
+  protocol.event(cleared)
+  expect(cleared.payload).toHaveProperty('pending_submissions', [])
+})

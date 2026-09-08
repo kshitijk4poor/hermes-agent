@@ -41,7 +41,7 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
     # Small real rings exercise truncation and cross-session eviction without
     # a timing race or a thousand model calls. Execution/storage are real;
     # the runner's answer boundary is deliberately deterministic here.
-    monkeypatch.setattr(event_replay, '_REPLAY_BUFFER_MAX', 2)
+    monkeypatch.setattr(event_replay, '_REPLAY_BUFFER_MAX', 5)
     monkeypatch.setattr(event_replay, '_REPLAY_SESSIONS_MAX', 1)
     db = SessionDB(tmp_path / 'replay.db')
     async def answer(event):

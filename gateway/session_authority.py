@@ -6,7 +6,7 @@ Transport attachment never constructs an agent or takes a turn lease.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import uuid
 
 from gateway.session_contract import (
@@ -137,6 +137,18 @@ class SessionAuthority:
             text = payload.get('native_text_v1', {}).get('event', {}).get('text', '')
         return PendingAdmission(**vars(self._receipt(row)), input_id=row['request_id'], text=text)
 
+    def _publish_pending(self, ref):
+        live = self.sessions[ref.session_id]
+        with live.event_stream.lock:
+            handle = self._handle(ref)
+            pending = [asdict(self._pending_receipt(row)) for row in
+                       list_session_admissions(self.db, session_id=ref.session_id)]
+            live.event_stream.publish(ref.session_id, {
+                'stored_session_id': ref.session_id, 'pending': pending,
+                'running': handle.execution_state == 'running',
+                'execution_generation': handle.execution_generation,
+            }, event_type='session.info')
+
     def _schedule(self, ref):
         live = self.sessions[ref.session_id]
         if live.task is None or live.task.done():
@@ -158,6 +170,7 @@ class SessionAuthority:
                                   request_id=str(payload['native_text_v1']['event']['message_id'] or uuid.uuid4().hex),
                                   payload=payload)
         event._gateway_accepted = True
+        self._publish_pending(ref)
         self._schedule(ref)
         return self._receipt(row)
 
@@ -201,6 +214,7 @@ class SessionAuthority:
         row = admit_session_input(self.db, epoch=self.epoch, principal_id=actor.subject,
                                   session_id=request.ref.session_id, request_id=request.request_id,
                                   payload=dict(request.payload), intent=request.intent)
+        self._publish_pending(request.ref)
         self._schedule(request.ref)
         return self._receipt(row)
 
@@ -215,7 +229,9 @@ class SessionAuthority:
 
     async def cancel_queued(self, actor, ref, admission_id):
         await self.receipt(actor, ref, admission_id)
-        return self._receipt(cancel_session_input(self.db, epoch=self.epoch, admission_id=admission_id))
+        row = cancel_session_input(self.db, epoch=self.epoch, admission_id=admission_id)
+        self._publish_pending(ref)
+        return self._receipt(row)
 
     async def interrupt(self, actor, ref, generation):
         self.authorize(actor, ref, 'session:control')
@@ -309,6 +325,7 @@ class SessionAuthority:
                     'authority_epoch': self.epoch, 'execution_generation': row['generation'],
                     'admission_id': admission_id}
                 live.event_stream.publish(ref.session_id, {}, event_type='message.start')
+                self._publish_pending(ref)
             try:
                 response = await execute_admission(self, ref, row)
                 outcome = 'completed'
@@ -319,6 +336,7 @@ class SessionAuthority:
                 settled = settle_session_input(self.db, epoch=self.epoch, admission_id=admission_id,
                                                generation=row['generation'], outcome=outcome)
                 live.controls.snapshot(ref.session_id, None)
+                self._publish_pending(ref)
                 live.event_stream.publish(ref.session_id, {
                     'text': response, 'content': response, 'admission_id': admission_id,
                     'outcome': settled['outcome']})
