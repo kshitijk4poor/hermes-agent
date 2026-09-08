@@ -20,6 +20,22 @@ def producer_identity(runner, event):
     return json.dumps(identity, separators=(',', ':'))
 
 
+def completion_admission(runner, event):
+    authority = getattr(runner, 'session_authority', None)
+    if authority is None:
+        return None
+    entry = runner.session_store.lookup_by_session_key(str(event.get('session_key') or ''))
+    if entry is None:
+        return None
+    from hermes_state_runtime import list_session_admissions
+    identity = producer_identity(runner, event)
+    for row in list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False):
+        descriptor = row['payload'].get('native_text_v1', {}).get('automation', {})
+        if identity in descriptor.get('identities', [descriptor.get('identity')]):
+            return row
+    return None
+
+
 def _owner(runner, event):
     route = event.metadata.get('gateway_session_key') or runner.session_store._generate_session_key(event.source)
     entry = runner.session_store.lookup_by_session_key(route)
@@ -40,7 +56,7 @@ def snapshot_automation(authority, adapter, event, identity):
     if (not event.internal or event.message_type != MessageType.TEXT or event.is_command()
             or not isinstance(event.text, str) or not identity
             or event.media_urls or event.prompt_response or event.source.platform == Platform.API_SERVER
-            or set(event.metadata) - {'gateway_session_key', 'gateway_session_id'}):
+            or set(event.metadata) - {'gateway_session_key', 'gateway_session_id', 'automation_identities'}):
         raise RuntimeStoreError('invalid_params')
     entry = _owner(runner, event)
     if event.source.platform == Platform.LOCAL:
@@ -68,6 +84,9 @@ def snapshot_automation(authority, adapter, event, identity):
         'timestamp': datetime.fromtimestamp(0, timezone.utc).isoformat(),
         'event': {'message_id': identity}, 'provenance': provenance,
         'automation': {'identity': identity, 'owner': entry.session_id}}
+    identities = event.metadata.get('automation_identities')
+    if identities:
+        envelope['automation']['identities'] = sorted(set(identities))
     return {'text': event.text, 'native_text_v1': envelope}, entry
 
 
