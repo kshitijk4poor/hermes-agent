@@ -433,6 +433,23 @@ describe('submit timeout admission fences', () => {
 describe('terminal receipt settlement', () => {
   afterEach(cleanup)
 
+  it('admits a native queued input without taking ownership of the running turn', async () => {
+    let handle: HarnessHandle | null = null
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method !== 'prompt.submit') { return {} as never }
+      expect(handle!.state()).toMatchObject({ busy: true, awaitingResponse: true, streamId: 'owner-stream', turnLive: true })
+      return { admission_id: 'server-queue', submission_id: params?.submission_id, session_id: RUNTIME_SESSION_ID, status: 'queued' } as never
+    })
+    await actRender(<Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    Object.assign(handle!.state(), { busy: true, awaitingResponse: true, streamId: 'owner-stream', turnLive: true })
+    $connection.set({ wsUrl: 'ws://localhost/api/ws?native_dial=unminted', mode: 'local' } as never)
+    try {
+      expect(await handle!.submitText('next input', { fromQueue: true })).toBe(true)
+      expect(handle!.state()).toMatchObject({ busy: true, awaitingResponse: true, streamId: 'owner-stream', turnLive: true })
+      expect(JSON.parse(window.localStorage.getItem('hermes.desktop.preparedSubmissions.v1')!)).toEqual({})
+    } finally { $connection.set(null) }
+  })
+
   it('settles a retained terminal retry without waiting for another lifecycle event', async () => {
     let terminal = false
 
