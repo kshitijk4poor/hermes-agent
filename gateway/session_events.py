@@ -33,6 +33,10 @@ class SessionEvents:
                 'type': 'message.complete', 'session_id': self._key,
                 'payload': deepcopy(payload), 'replay_epoch': self.epoch}}
             event_replay._stamp_event(frame)
+            if frame['params']['seq'] <= self.sequence:
+                # Another publisher may evict us after watermark's lookup.
+                self.epoch = uuid.uuid4().hex
+                frame['params']['replay_epoch'] = self.epoch
             # The ring owns this same event object; its lookup key remains
             # private while both replay and live recipients see canonical IDs.
             frame['params']['session_id'] = session_id

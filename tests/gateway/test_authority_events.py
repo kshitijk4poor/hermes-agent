@@ -98,6 +98,17 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
         after = (await since(refreshed['replay_epoch'], refreshed['last_sequence']))['result']
         assert not after['snapshot_required'] and len(after['events']) == 1
         assert after['events'][0]['payload']['text'] == '5'
+        before_race = await b.resume(ref, {})
+        stamp = event_replay._stamp_event
+        def evict_then_stamp(frame):
+            stamp({'method': 'event', 'params': {'session_id': 'competing-owner'}})
+            stamp(frame)
+        with monkeypatch.context() as race:
+            race.setattr(event_replay, '_stamp_event', evict_then_stamp)
+            await turn(6)
+        raced = (await since(before_race['replay_epoch'], before_race['last_sequence']))['result']
+        assert raced['snapshot_required'], 'eviction during stamp reused an old epoch/sequence'
+        assert raced['replay_epoch'] != before_race['replay_epoch']
     finally:
         await a.close()
         await b.close()
