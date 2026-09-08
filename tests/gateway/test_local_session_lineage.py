@@ -99,3 +99,9 @@ async def test_local_lineage_transitions_preserve_owner_or_roll_back(tmp_path, m
     db.set_meta('gateway.local_policy.v1:unrelated-fork', json.dumps(local_receipt(db, ref.session_id)))
     with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
         await restarted.attach(actor, SessionRef('fixture', 'unrelated-fork'))
+
+
+@pytest.mark.linux_only
+def test_real_local_lineage_survives_cold_daemon(tmp_path):
+    from tests.gateway.fixtures.local_lineage_probe import probe
+    print(json.dumps(probe(tmp_path)))

@@ -61,8 +61,8 @@ def websocket(home, desc):
 
 
 @contextmanager
-def daemon(root, home, env, *, barrier):
-    command = [sys.executable, str(root / 'tests/gateway/fixtures/local_recovery_daemon.py')] if barrier else [sys.executable, '-m', 'gateway.run']
+def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
+    command = [sys.executable, str(root / 'tests/gateway/fixtures' / fixture)] if barrier else [sys.executable, '-m', 'gateway.run']
     with (home / ('first.log' if barrier else 'restart.log')).open('w+') as log:
         proc = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
