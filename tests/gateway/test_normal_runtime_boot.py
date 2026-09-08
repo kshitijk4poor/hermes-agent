@@ -84,6 +84,7 @@ async def handshake(home, descriptor):
         created = await rpc(ws, 'session.create', request_id='ordinary-launch', source='cli')
         sid = created['session_id']
         assert sid == created['stored_session_id']
+        initial = await rpc(ws, 'session.resume', session_id=sid)
         admitted = await rpc(ws, 'prompt.submit', session_id=sid, input_id='ordinary-input', text='WS_SHARED')
         assert admitted['status'] == 'queued', admitted
     # A fresh control ticket and socket must see the same committed execution.
@@ -97,6 +98,22 @@ async def handshake(home, descriptor):
                     break
                 await asyncio.sleep(.05)
         assert snapshot['stored_session_id'] == sid
+        # Transcript persistence precedes terminal publication; await the actual
+        # replay receipt rather than assuming a persisted reply means settlement.
+        async with asyncio.timeout(25):
+            while True:
+                replay = await rpc(viewer, 'session.events.since', session_id=sid,
+                                   replay_epoch=initial['replay_epoch'],
+                                   last_sequence=initial['last_sequence'])
+                assert not replay['snapshot_required'], replay
+                completed = [event for event in replay['events'] if event['type'] == 'message.complete']
+                if completed:
+                    break
+                await asyncio.sleep(.05)
+        assert len(completed) == 1, replay
+        assert 'LOCAL_ACK_WS_SHARED' in completed[0]['payload']['text'], replay
+        snapshot = await rpc(viewer, 'session.resume', session_id=sid)
+        assert completed[0]['seq'] <= snapshot['last_sequence']
         edit = {'session_id': sid, 'request_id': 'ordinary-rename',
                 'expected_revision': snapshot['revision'], 'operation': 'rename',
                 'payload': {'title': 'Shared metadata receipt'}}
@@ -110,7 +127,7 @@ async def handshake(home, descriptor):
                   **{**edit, 'request_id': 'stale-rename', 'payload': {'title': 'Stale overwrite'}})
         listing = await rpc(viewer, 'session.list')
         assert next(row for row in listing['sessions'] if row['session_id'] == sid)['title'] == renamed['title']
-        print(json.dumps({'ordinary_created_session': sid, 'reply_persisted': True,
+        print(json.dumps({'ordinary_created_session': sid, 'reply_persisted': True, 'reconnect_event_replay': True,
                           'mutation_retry_after_reconnect': True, 'stale_mutation_rejected': True}))
     with pytest.raises(InvalidStatus):
         async with connect(url, subprotocols=protocols):

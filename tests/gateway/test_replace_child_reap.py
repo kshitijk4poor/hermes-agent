@@ -197,6 +197,7 @@ async def test_start_gateway_replace_reaps_old_gateway_children_posix(
             return True
 
         async def stop(self):
+            self.session_store.close_all_db_handles()
             self._session_db.close()
 
     _pid_state = {"alive": True}

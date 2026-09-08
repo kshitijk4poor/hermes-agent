@@ -120,4 +120,4 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
     finally:
         await a.close()
         await b.close()
-        db.close()
+        store.close_all_db_handles()
