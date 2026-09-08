@@ -909,16 +909,46 @@ class SessionSessionsMixin:
     def _set_lineage_column(self, column: str, session_id: str, value: Any, *,
                             extra_set_sql: str = "") -> bool:
         """Set one ``sessions`` column across a whole compression lineage: Desktop projects roots
-        forward to their tip, so updating only the tip would let the root resurrect it on refresh.
-        *extra_set_sql* (trusted literal, ``, col = expr``) rides the same UPDATE."""
-        return self._write_rowcount(
-            _LINEAGE_CTE_SQL + f"""
+        forward to their tip, so updating only the tip would let the root resurrect it on refresh."""
+        return bool(self._execute_write(
+            lambda conn: self._set_lineage_column_in_transaction(conn, column, session_id, value)
+        ))
+
+    def _set_lineage_column_in_transaction(self, conn, column: str, session_id: str, value: Any):
+        """Return affected IDs so authority revisions share this exact lineage selector."""
+        return [row[0] for row in conn.execute(
+            f"""
+            WITH RECURSIVE
+              ancestors(id) AS (
+                SELECT ?
+                UNION
+                SELECT parent.id
+                FROM ancestors a
+                JOIN sessions child ON child.id = a.id
+                JOIN sessions parent ON parent.id = child.parent_session_id
+                WHERE parent.end_reason = 'compression'
+              ),
+              descendants(id) AS (
+                SELECT ?
+                UNION
+                SELECT child.id
+                FROM descendants d
+                JOIN sessions parent ON parent.id = d.id
+                JOIN sessions child ON child.parent_session_id = parent.id
+                WHERE parent.end_reason = 'compression'
+              ),
+              lineage(id) AS (
+                SELECT id FROM ancestors
+                UNION
+                SELECT id FROM descendants
+              )
             UPDATE sessions
             SET {column} = ?{extra_set_sql}
             WHERE id IN (SELECT id FROM lineage)
+            RETURNING id
             """,
             (session_id, session_id, value),
-        ) > 0
+        ).fetchall()]
 
     def set_session_archived(self, session_id: str, archived: bool) -> bool:
         """Soft-hide (or unhide) a session and its compression lineage; messages are kept.

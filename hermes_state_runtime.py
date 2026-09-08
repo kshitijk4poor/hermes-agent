@@ -171,6 +171,63 @@ def recover_session_inputs(db, *, epoch: int) -> int:
     return db._execute_write(write)
 
 
+def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str,
+                           request_id: str, expected_revision: int,
+                           operation: str, payload: dict) -> dict:
+    """Commit a closed metadata edit and its retry receipt in the same transaction.
+
+    Caller authorizes the principal and resolves the canonical session. These
+    metadata edits do not stop execution. Existing direct writers must migrate
+    before this seam can provide universal revision fencing.
+    """
+    for value in (principal_id, session_id, request_id):
+        _text(value)
+    if type(expected_revision) is not int or expected_revision < 0:
+        raise RuntimeStoreError('invalid_params')
+    fields = {'rename': ('title', str), 'archive': ('archived', bool)}
+    if not isinstance(operation, str) or operation not in fields or not isinstance(payload, dict):
+        raise RuntimeStoreError('invalid_params')
+    field, value_type = fields[operation]
+    if set(payload) != {field} or type(payload[field]) is not value_type:
+        raise RuntimeStoreError('invalid_params')
+    # Snapshot caller data before waiting for the writer lock.
+    payload = json.loads(_json(payload))
+    key = 'gateway.session_mutation.v1.' + admission_fingerprint(
+        canonical_target=session_id, payload={'principal': principal_id, 'request': request_id})
+    digest = admission_fingerprint(canonical_target=session_id, payload={
+        'operation': operation, 'payload': payload, 'expected_revision': expected_revision})
+
+    def write(conn):
+        _epoch(conn, epoch)
+        old = conn.execute('SELECT value FROM state_meta WHERE key=?', (key,)).fetchone()
+        if old is not None:
+            receipt = json.loads(old[0])
+            if receipt['digest'] != digest:
+                raise RuntimeStoreError('admission_conflict')
+            return receipt['result']
+        session = _session(conn, session_id)
+        if session['runtime_revision'] != expected_revision:
+            raise RuntimeStoreError('stale_revision')
+        if operation == 'rename':
+            db._set_session_title_in_transaction(
+                conn, session_id, payload['title'], source=db.TITLE_SOURCE_USER)
+            affected = [session_id]
+        else:
+            affected = db._set_lineage_column_in_transaction(
+                conn, 'archived', session_id, int(payload['archived']))
+        conn.executemany('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?',
+                         [(target,) for target in affected])
+        updated = _session(conn, session_id)
+        result = {'session_id': session_id, 'revision': updated['runtime_revision'],
+                  'operation': operation, field: updated[field]}
+        if operation == 'archive':
+            result[field] = bool(result[field])
+        conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)',
+                     (key, _json({'digest': digest, 'result': result})))
+        return result
+    return db._execute_write(write)
+
+
 _IMPORT_KEY = 'gateway.prompt_admissions_import.v1'
 
 
