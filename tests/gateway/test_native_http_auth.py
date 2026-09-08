@@ -107,8 +107,15 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
         for path in ('/api/config?profile=other', '/api/config?profile=current&profile=other',
                      '/api/profiles/other/soul'):
             assert client.get(path, headers=headers(ticket(home, descriptor))).status_code == 403
-        assert client.post('/api/config', json={'profile': 'other', 'config': {}},
+        assert client.put('/api/config', json={'profile': 'other', 'config': {}},
                            headers=headers(ticket(home, descriptor))).status_code == 403
+        for content_type in ('application/json', 'application/problem+json', ''):
+            response = client.put('/api/config', content=json.dumps({'profile': 'other', 'config': {}}),
+                                   headers={**headers(ticket(home, descriptor)), 'Content-Type': content_type})
+            assert response.status_code == 403, (content_type, response.text)
+        for path in ('/api/profiles/sessions', '/api/profiles/sessions/sidebar',
+                     '/api/profiles/projects/tree', '/api/cron/jobs'):
+            assert client.get(path, headers=headers(ticket(home, descriptor))).status_code == 403
         assert client.get('/api/config?profile=current',
                           headers=headers(ticket(home, descriptor))).status_code == 200
         assert client.get('/api/profiles', headers=headers(ticket(home, descriptor))).status_code == 200
@@ -128,3 +135,78 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
         assert client.get('/api/config', headers=headers(ticket(home, descriptor))).status_code == 200
     print(json.dumps({'native_http': 'ordinary daemon config and profiles HTTP passed',
                       'replay_expiry_restart_purpose_origin_profile': 'rejected'}))
+
+
+@pytest.mark.asyncio
+async def test_native_http_preserves_gated_auth_and_actual_socket_boundary(tmp_path):
+    import socket
+    from gateway.config import GatewayConfig
+    from gateway.run import GatewayRunner
+    from gateway.run_api import start_gateway_api
+    from gateway.run_runtime import initialize_gateway_runtime, publish_gateway_runtime_ready
+    from gateway.runtime_ownership import process_ownership
+    from hermes_cli import web_server as web
+    from hermes_cli.dashboard_auth import register_provider, clear_providers
+    from hermes_cli.dashboard_auth.cookies import SESSION_AT_COOKIE
+    from hermes_constants import get_hermes_home
+    from tests.hermes_cli.conftest_dashboard_auth import StubAuthProvider
+
+    home = get_hermes_home()
+    (home / 'config.yaml').write_text('dashboard:\n  public_url: https://gateway.example.test\n')
+    provider = StubAuthProvider()
+    register_provider(provider)
+    login = provider.start_login(redirect_uri='http://127.0.0.1/callback')
+    from urllib.parse import parse_qs
+    pkce = parse_qs(login.cookie_payload['hermes_session_pkce'].replace(';', '&'))
+    session = provider.complete_login(code='stub_code', state=pkce['state'][0],
+                                      code_verifier=pkce['verifier'][0],
+                                      redirect_uri='http://127.0.0.1/callback')
+    process_ownership.reserve([home])
+    runner = GatewayRunner(GatewayConfig())
+    try:
+        await initialize_gateway_runtime(runner)
+        runner.session_api = await start_gateway_api(runner, host='0.0.0.0')
+        port = runner.session_api.socket.getsockname()[1]
+        def mint():
+            return runner.session_ticket_store.mint(profile_id=str(home), subject='uid:fixture',
+                                                    purpose='native-http')
+        async with httpx.AsyncClient(base_url=f'http://127.0.0.1:{port}', trust_env=False) as client:
+            assert (await client.get('/api/config', headers=headers(mint()))).status_code == 503
+            assert await runner.start()
+            publish_gateway_runtime_ready(runner)
+            assert web.app.state.auth_required is True
+            bearer = {'Authorization': 'Bearer ' + session.access_token}
+            cookie = {'Cookie': f'{SESSION_AT_COOKIE}={session.access_token}'}
+            for normal in (bearer, cookie):
+                assert (await client.get('/api/config', headers=normal)).status_code == 200
+                assert (await client.get('/api/config', headers={**normal, **headers('bad')})).status_code == 401
+            assert (await client.get('/api/config', headers={
+                'Authorization': 'Bearer ' + web._SESSION_TOKEN})).status_code == 401
+            assert (await client.get('/api/config', headers=headers(mint()))).status_code == 200
+            # Trusted proxy rewrites client.host; native admission must retain actual peer.
+            assert (await client.get('/api/config', headers={**headers(mint()),
+                'X-Forwarded-For': '203.0.113.9'})).status_code == 200
+            for origin in ('', 'https://gateway.example.test'):
+                assert (await client.get('/api/config', headers={**headers(mint()),
+                    'Origin': origin, **cookie})).status_code == 401
+            # Real non-loopback local interface, not a forged ASGI scope or testclient IP.
+            import ipaddress
+            import psutil
+            addresses = {info.address for entries in psutil.net_if_addrs().values()
+                         for info in entries if info.family == socket.AF_INET
+                         and not ipaddress.ip_address(info.address).is_loopback}
+            assert addresses, 'real non-loopback interface required for this invariant'
+            address = sorted(addresses)[0]
+            async with httpx.AsyncClient(base_url=f'http://{address}:{port}', trust_env=False) as remote:
+                assert (await remote.get('/api/config', headers={**headers(mint()),
+                    'X-Forwarded-For': '127.0.0.1', 'Host': f'127.0.0.1:{port}'})).status_code == 401
+                assert (await remote.get('/api/config', headers={**bearer,
+                    'Host': f'127.0.0.1:{port}'})).status_code == 200
+            runner.session_runtime_descriptor['state'] = 'draining'
+            assert (await client.get('/api/config', headers=headers(mint()))).status_code == 503
+    finally:
+        await runner.stop()
+        process_ownership.close()
+        clear_providers()
+    print(json.dumps({'normal_oauth_bearer_cookie': 'passed',
+                      'native_gated_auth_raw_peer_readiness': 'passed'}))
