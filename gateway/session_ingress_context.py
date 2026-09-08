@@ -1,5 +1,6 @@
 """Process-local callback provenance; private snapshots are revalidated, not grants."""
 from contextlib import contextmanager
+from copy import copy
 from contextvars import ContextVar
 from pathlib import Path
 import weakref
@@ -153,10 +154,12 @@ def restore_provenance(runner, source, provenance):
     """Resolve current owned connector/home before installing in-process auth context."""
     if not isinstance(provenance, dict):
         raise RuntimeStoreError('invalid_params')
-    source.delivered_via_upstream_relay = 'relay' in provenance
-    adapter, home, runtime_home, expected = _binding(runner, source, provenance.get('transport_profile'))
+    candidate = copy(source)
+    candidate.delivered_via_upstream_relay = 'relay' in provenance
+    adapter, home, runtime_home, expected = _binding(runner, candidate, provenance.get('transport_profile'))
     if provenance != expected:
         raise RuntimeStoreError('profile_mismatch')
+    source.delivered_via_upstream_relay = candidate.delivered_via_upstream_relay
     source._transport_adapter_ref = weakref.ref(adapter)
     source._authorization_profile_home = home
     return runtime_home
