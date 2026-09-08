@@ -1,5 +1,6 @@
-import { test, expect } from 'vitest'
-import { ensureLocalGateway, createLocalGatewayDials } from './local-gateway'
+import { expect, test } from 'vitest'
+
+import { createLocalGatewayDials, ensureLocalGateway } from './local-gateway'
 
 test('ensure consumes structured readiness without acquiring a child owner', async () => {
   const endpoint = { profile_id: '/private/profile', instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
