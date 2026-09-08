@@ -120,14 +120,20 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
         if definition.get("Disabled"):
             raise RuntimeStartError("service_disabled")
     domains = [f"gui/{os.getuid()}", f"user/{os.getuid()}"]  # windows-footgun: ok — native launchd only
+    found = []
     for domain in domains:
         result = _run(["launchctl", "print", f"{domain}/{label}"], deadline)
         if result.returncode == 0:
-            return ExistingService("launchd", ("launchctl", "kickstart", f"{domain}/{label}"),
-                                   "state = running" in result.stdout)
+            found.append(ExistingService("launchd", ("launchctl", "kickstart", f"{domain}/{label}"),
+                                         "state = running" in result.stdout))
+            continue
         # launchctl's native absent-service code; other errors retain uncertainty.
         if result.returncode != 113:
             raise RuntimeStartError("service_manager_unavailable")
+    if len(found) > 1:
+        raise RuntimeStartError("service_scope_conflict", "conflict")
+    if found:
+        return found[0]
     if installed:
         # Load ONLY the existing file, never bootout/rewrite or kickstart -k.
         return ExistingService("launchd", ("launchctl", "bootstrap", domains[0], str(plist)))

@@ -22,7 +22,12 @@ def test_ensure_waits_for_real_control_owner_without_claiming_pending_is_ready(t
         home.mkdir(mode=0o700)
         payload = {"runtime_protocol": 1, "state": "starting", "instance_id": "peer",
                    "served_profiles": [{"profile_id": str(home), "home": str(home)}]}
-        server = GatewayControlServer(home, verb_handlers={"identify": lambda: payload})
+        stalled = False
+        def identify():
+            if stalled:
+                time.sleep(0.5)
+            return payload
+        server = GatewayControlServer(home, verb_handlers={"identify": identify})
         assert await server.start()
         try:
             before = time.monotonic()
@@ -35,6 +40,9 @@ def test_ensure_waits_for_real_control_owner_without_claiming_pending_is_ready(t
             payload["served_profiles"] = []
             result = await asyncio.to_thread(runtime.ensure_gateway_runtime, home, timeout=0.3)
             assert result.state == "inaccessible" and result.reason_code == "profile_mismatch"
+            stalled = True
+            result = await asyncio.to_thread(runtime.ensure_gateway_runtime, home, timeout=0.1)
+            assert result.state == "starting" and result.reason_code == "deadline"
             assert not (home / "logs").exists()
         finally:
             await server.stop()
@@ -57,9 +65,10 @@ def test_installed_service_start_is_nonmutating_and_failed_manager_never_spawns(
     original = unit.read_bytes()
     calls = tmp_path / "calls.jsonl"
     helper = tmp_path / "inert-supervisor"
-    helper.write_text('#!' + sys.executable + '\nimport json,sys\nfrom pathlib import Path\n'
+    helper.write_text('#!' + sys.executable + '\nimport json,sys,time\nfrom pathlib import Path\n'
                       + f'p=Path({str(calls)!r})\n'
                       + 'with p.open("a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n'
+                      + 'if (p.parent/"stall").exists(): time.sleep(5)\n'
                       + 'if (p.parent/"fail").exists(): print("private-supervisor-token"); sys.exit(3)\n'
                       + 'if "show" in sys.argv and "system" in sys.argv and (p.parent/"single").exists():\n print("LoadState=not-found")\n'
                       + 'elif "show" in sys.argv:\n print("LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=enabled")\n'
@@ -85,6 +94,12 @@ def test_installed_service_start_is_nonmutating_and_failed_manager_never_spawns(
     assert "private-supervisor-token" not in repr(result)
     assert sum("start" in json.loads(line) for line in calls.read_text().splitlines()) == 1
     assert not (home / "logs").exists()
+    (tmp_path / "stall").touch()
+    before = time.monotonic()
+    result = runtime.ensure_gateway_runtime(home, timeout=0.2)
+    assert result.reason_code == "deadline"
+    assert time.monotonic() - before < 2
+    assert sum("start" in json.loads(line) for line in calls.read_text().splitlines()) == 1
 
 
 @pytest.mark.linux_only
@@ -105,6 +120,11 @@ def test_public_ensure_json_deadline_and_invalid_invocation(tmp_path):
                             env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
     assert result.returncode == 2
     assert json.loads(result.stdout)["reason_code"] == "invalid_invocation"
+    result = subprocess.run([sys.executable, "-m", "hermes_cli.main", "gateway", "ensure", "--json", "--unknown", "private-value"],
+                            env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 2
+    assert json.loads(result.stdout)["reason_code"] == "invalid_invocation"
+    assert "private-value" not in result.stdout
 
 
 @pytest.mark.linux_only
@@ -200,3 +220,20 @@ def test_native_windows_spawn_never_retries_without_breakaway(tmp_path, monkeypa
         start.spawn_unmanaged_gateway(tmp_path, deadline=time.monotonic()+5)
     assert len(calls) == 1
     assert calls[0]["creationflags"] == windows_detach_flags()
+
+
+@pytest.mark.macos_only
+def test_native_launchd_ambiguous_domains_cannot_start(tmp_path, monkeypatch):
+    from hermes_cli.gateway_runtime_service import discover_existing_gateway_service, RuntimeStartError
+    peer = tmp_path / "inert_launchd.py"
+    peer.write_text("print('state = not running')\n", encoding="utf-8")
+    actual = subprocess.run
+    calls = []
+    def boundary(argv, **kwargs):
+        assert argv[0] == "launchctl"
+        calls.append(argv)
+        return actual([sys.executable, str(peer), *argv[1:]], **kwargs)
+    monkeypatch.setattr(subprocess, "run", boundary)
+    with pytest.raises(RuntimeStartError, match="service_scope_conflict"):
+        discover_existing_gateway_service(tmp_path.resolve(), deadline=time.monotonic()+5)
+    assert len(calls) == 2 and all(argv[1] == "print" for argv in calls)

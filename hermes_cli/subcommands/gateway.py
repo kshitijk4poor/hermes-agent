@@ -8,11 +8,24 @@ from typing import Callable
 from hermes_cli.subcommands._shared import add_accept_hooks_flag
 
 
-# `start`/`restart` on a named profile refuse while the default multiplexer serves it (a second gateway
-# would double-bind its platforms); `gateway run` carries its own broader --force text.
-_FORCE_SERVED_PROFILE_HELP = (
-    "Start a separate gateway for this profile even when the default multiplexer already serves it "
-    "(not recommended: two pollers on one bot token, port conflicts)")
+class _GatewayCommandParser(argparse.ArgumentParser):
+    """Ensure's parser errors share its machine-readable command boundary."""
+
+    def __init__(self, *args, ensure_json=False, **kwargs):
+        self.ensure_json = ensure_json
+        super().__init__(*args, **kwargs)
+
+    def parse_known_args(self, args=None, namespace=None):
+        parsed, unknown = super().parse_known_args(args, namespace)
+        if self.ensure_json and unknown:
+            self.error("unknown arguments")
+        return parsed, unknown
+
+    def error(self, message):
+        if not self.ensure_json:
+            return super().error(message)
+        print('{"endpoint":null,"reason_code":"invalid_invocation","state":"inaccessible"}')
+        self.exit(2, "gateway ensure: invalid invocation\n")
 
 
 def _flag(parser, *names, help, **kw):
@@ -38,7 +51,8 @@ def build_gateway_parser(
     """Attach the ``gateway`` and ``proxy`` subcommands to ``subparsers``."""
     gateway_parser = subparsers.add_parser("gateway", help="Messaging gateway management",
         description="Manage the messaging gateway (Telegram, Discord, WhatsApp, Weixin, and more)")
-    gateway_subparsers = gateway_parser.add_subparsers(dest="gateway_command")
+    gateway_subparsers = gateway_parser.add_subparsers(
+        dest="gateway_command", parser_class=_GatewayCommandParser)
 
     gateway_run = gateway_subparsers.add_parser(
         "run", help="Run gateway in foreground (recommended for WSL and Docker)"
@@ -90,7 +104,8 @@ def build_gateway_parser(
 
     from hermes_cli.gateway_runtime_cli import cmd_gateway_ensure
     gateway_ensure = gateway_subparsers.add_parser(
-        "ensure", help="Ensure a local runtime without installing or replacing a service",
+        "ensure", ensure_json=True,
+        help="Ensure a local runtime without installing or replacing a service",
         epilog="Exit codes: 0 ready; 2 invalid invocation; 3 incompatible; "
                "4 authorization/profile mismatch; 5 deadline; 6 draining/update-paused; "
                "7 inaccessible/conflicting supervisor. Pending startup is not readiness.")

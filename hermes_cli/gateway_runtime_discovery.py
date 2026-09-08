@@ -66,8 +66,15 @@ def query_identify(home: Path, *, timeout: float) -> dict:
     path = _socket_path(home)
     request = b'{"protocol":1,"verb":"identify","id":1}\n'
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.settimeout(max(0.001, deadline - time.monotonic()))
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise TimeoutError
+        client.settimeout(budget)
         client.connect(str(path))
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            raise TimeoutError
+        client.settimeout(budget)
         client.sendall(request)
         data = bytearray()
         while b"\n" not in data:
