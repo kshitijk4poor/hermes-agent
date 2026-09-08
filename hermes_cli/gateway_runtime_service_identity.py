@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import stat
 from typing import NoReturn
 
 
@@ -39,6 +40,8 @@ def verify_gateway_argv(argv: list[str], home: Path) -> None:
 
     # The installer wraps launchd stderr with this fixed, non-shell module.
     if len(argv) > 7 and argv[1:4] == ["-m", "hermes_cli.stderr_timestamp", "--error-log"] and argv[5] == "--":
+        if not re.fullmatch(r"python(?:w|\d+(?:\.\d+)*)?(?:\.exe)?", Path(argv[0]).name.lower()):
+            _unverified()
         argv = argv[6:]
     if not argv or not looks_like_gateway_command_line(subprocess_command(argv)):
         _unverified()
@@ -142,7 +145,7 @@ def verify_systemd(props: dict[str, str], manager_env: str, home: Path, *, syste
     verify_gateway_argv(argv, home)
 
 
-def verify_launchd_loaded(output: str, home: Path) -> None:
+def verify_launchd_loaded(output: str, home: Path, *, uid: int, username: str) -> None:
     # Only the job's own blocks, never inherited/default environments or a
     # different job embedded in launchctl diagnostic text.
     def block(name):
@@ -151,6 +154,10 @@ def verify_launchd_loaded(output: str, home: Path) -> None:
             _unverified()
         return found[0].splitlines()
 
+    for key, expected in (("uid", str(uid)), ("username", username)):
+        values = re.findall(r"^\t" + key + r" = (.+)$", output, re.M)
+        if values and values != [expected]:
+            raise ValueError("service_account_mismatch")
     env = {}
     for line in block("environment"):
         if not line.strip():
@@ -160,6 +167,8 @@ def verify_launchd_loaded(output: str, home: Path) -> None:
             _unverified()
         env[key] = value
     verify_home(home, env.get("HERMES_HOME", ""))
+    if home.parent.name != "profiles" and not env.get("HERMES_SUPERVISED_CHILD"):
+        _unverified()
     argv = [line.strip() for line in block("arguments")]
     programs = re.findall(r"^\tprogram = (.+)$", output, re.M)
     if len(programs) != 1 or not argv or programs[0] != argv[0]:
@@ -186,6 +195,20 @@ def verify_launchd_plist(definition: dict, label: str, home: Path) -> None:
     verify_gateway_argv(argv, home)
     if home.parent.name != "profiles" and not env.get("HERMES_SUPERVISED_CHILD"):
         _unverified()
+
+
+def read_definition(path: Path) -> bytes:
+    # Nonblocking open precedes fstat: a FIFO replacement must not consume the
+    # entire startup deadline waiting for a writer. Symlinked installs work.
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+            _unverified()
+        value = stream.read(1024 * 1024 + 1)
+        if len(value) > 1024 * 1024:
+            _unverified()
+        return value
 
 
 def _vbs_identity(script: str) -> tuple[str, list[str]]:
@@ -259,6 +282,6 @@ def verify_windows_task(xml: str | bytes, home: Path, account: str, sid: str) ->
     script = _absolute(match[1])
     if script.suffix.lower() != '.vbs':
         _unverified()
-    configured, argv = _vbs_identity(script.read_text(encoding="utf-8"))
+    configured, argv = _vbs_identity(read_definition(script).decode("utf-8"))
     verify_home(home, configured)
     verify_gateway_argv(argv, home)

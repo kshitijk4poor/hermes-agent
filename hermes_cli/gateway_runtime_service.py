@@ -56,9 +56,9 @@ def _run(argv: list[str] | tuple[str, ...], deadline: float, *, encoding: str | 
                           creationflags=windows_hide_flags(), timeout=remaining(deadline))
 
 
-def _verify_binding(verify, *args) -> None:
+def _verify_binding(verify, *args, **kwargs) -> None:
     try:
-        verify(*args)
+        verify(*args, **kwargs)
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         reason = str(exc)
         raise RuntimeStartError(reason if reason in {
@@ -129,9 +129,10 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
     import pwd
     suffix = service_suffix(home)
     label = f"ai.hermes.gateway{'-' + suffix if suffix else ''}"
-    account_home = Path(pwd.getpwuid(os.getuid()).pw_dir)  # windows-footgun: ok — native launchd only
+    account = pwd.getpwuid(os.getuid())  # windows-footgun: ok — native launchd only
+    account_home = Path(account.pw_dir)
     plist = account_home / "Library/LaunchAgents" / f"{label}.plist"
-    from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded, verify_launchd_plist
+    from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded, verify_launchd_plist, read_definition
     installed = _exists(plist)
     domains = [f"gui/{os.getuid()}", f"user/{os.getuid()}"]  # windows-footgun: ok — native launchd only
     found = []
@@ -149,11 +150,10 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
     if len(found) > 1:
         raise RuntimeStartError("service_scope_conflict", "conflict")
     if found:
-        _verify_binding(verify_launchd_loaded, loaded[0], home)
+        _verify_binding(verify_launchd_loaded, loaded[0], home, uid=os.getuid(), username=account.pw_name)  # windows-footgun: ok — native launchd only
         return found[0]
     if installed:
-        with plist.open("rb") as stream:
-            definition = plistlib.load(stream)
+        definition = plistlib.loads(read_definition(plist))
         _verify_binding(verify_launchd_plist, definition, label, home)
         # Load ONLY the existing file, never bootout/rewrite or kickstart -k.
         return ExistingService("launchd", ("launchctl", "bootstrap", domains[0], str(plist)))

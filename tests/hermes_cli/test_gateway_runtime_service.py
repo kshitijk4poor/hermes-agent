@@ -105,6 +105,8 @@ def test_ensure_checks_effective_service_binding_before_start(tmp_path, monkeypa
     ("requested", "gateway", None), ("other", "gateway", "profile_mismatch"),
     ("requested", "echo", "service_identity_unverified"),
     (None, "gateway", "service_identity_unverified"),
+    ("requested", "unsupervised", "service_identity_unverified"),
+    ("requested", "wrong_account", "service_account_mismatch"),
 ])
 def test_loaded_launchd_identity_is_independent_of_disk(configured, command, reason, tmp_path):
     from hermes_cli.gateway_runtime_service_identity import verify_launchd_loaded
@@ -114,11 +116,15 @@ def test_loaded_launchd_identity_is_independent_of_disk(configured, command, rea
         argv = ["/bin/echo", "hermes_cli.main", "gateway", "run"]
     environment = f"HERMES_HOME => {tmp_path / configured}" if configured else ""
     output = "gui/123/ai.hermes.gateway = {\n\tstate = not running\n\tprogram = " + argv[0] + "\n\targuments = {\n" + "\n".join("\t\t" + a for a in argv) + "\n\t}\n\tenvironment = {\n\t\t" + environment + "\n\t}\n}"
+    if command != "unsupervised":
+        output = output.replace("\n\tenvironment = {\n", "\n\tenvironment = {\n\t\tHERMES_SUPERVISED_CHILD => 1\n")
+    if command == "wrong_account":
+        output = output.replace("\n\tstate", "\n\tusername = other\n\tstate")
     if reason:
         with pytest.raises(ValueError, match=reason):
-            verify_launchd_loaded(output, home)
+            verify_launchd_loaded(output, home, uid=123, username="owner")
     else:
-        verify_launchd_loaded(output, home)
+        verify_launchd_loaded(output, home, uid=123, username="owner")
 
 
 @pytest.mark.parametrize("case,reason", [
@@ -180,7 +186,7 @@ def test_native_launchd_checks_loaded_job_before_disk(case, reason, tmp_path, mo
     home = tmp_path / 'profile'
     home.mkdir(mode=0o700)
     monkeypatch.setenv('HERMES_HOME', str(home))
-    monkeypatch.setattr(pwd, 'getpwuid', lambda uid: SimpleNamespace(pw_dir=str(tmp_path)))
+    monkeypatch.setattr(pwd, 'getpwuid', lambda uid: SimpleNamespace(pw_dir=str(tmp_path), pw_name="owner"))
     label = 'ai.hermes.gateway' + ('-' + service.service_suffix(home) if service.service_suffix(home) else '')
     plist = tmp_path / 'Library/LaunchAgents' / (label + '.plist')
     plist.parent.mkdir(parents=True)
@@ -256,3 +262,26 @@ def test_native_task_query_uses_installed_xml_and_vendor_launcher(wrong, tmp_pat
         service.start_existing_gateway_service(found, deadline=time.monotonic()+5)
         assert sum('/Run' in a for a in calls) == 1
     assert script.read_bytes() == original
+
+
+@pytest.mark.linux_only
+def test_service_definition_reads_reject_fifo_without_waiting(tmp_path):
+    from hermes_cli.gateway_runtime_service_identity import read_definition
+    regular = tmp_path / 'regular'
+    regular.write_bytes(b'installed definition')
+    assert read_definition(regular) == regular.read_bytes()
+    fifo = tmp_path / 'fifo'
+    os.mkfifo(fifo, 0o600)
+    with pytest.raises(ValueError, match='service_identity_unverified'):
+        read_definition(fifo)
+
+
+@pytest.mark.parametrize("outer", ["python", "echo"])
+def test_gateway_wrapper_requires_actual_python_entrypoint(outer, tmp_path):
+    from hermes_cli.gateway_runtime_service_identity import verify_gateway_argv
+    argv = [sys.executable if outer == 'python' else '/bin/echo', '-m', 'hermes_cli.stderr_timestamp', '--error-log', str(tmp_path / 'error.log'), '--', sys.executable, '-m', 'hermes_cli.main', 'gateway', 'run']
+    if outer == 'echo':
+        with pytest.raises(ValueError, match='service_identity_unverified'):
+            verify_gateway_argv(argv, tmp_path)
+    else:
+        verify_gateway_argv(argv, tmp_path)
