@@ -80,6 +80,9 @@ def launch_from_args(args) -> int:
     from websockets.exceptions import WebSocketException
     try:
         validate_options(args)
+        from hermes_cli.gateway_chat_startup import ensure_launch_provider
+        if not ensure_launch_provider(args):
+            return 0
         query_file = getattr(args, "query_file", None)
         if query_file:
             args.query = sys.stdin.read() if query_file == "-" else Path(query_file).read_text(encoding="utf-8")
