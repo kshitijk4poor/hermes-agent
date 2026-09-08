@@ -137,6 +137,27 @@ probes in `tests/gateway/test_native_http_auth.py`, alongside gated OAuth/cookie
 actual non-loopback-peer controls. This does not establish native Desktop UI parity
 or platform-specific Windows/macOS bootstrap validation.
 
+## Frozen local launch credentials
+
+Local `session.create` receipts retain the launch policy, not plaintext API keys.
+Inline credentials in the profile config are borrowed from that existing private
+source after restart: the canonical profile home, credential path, value fingerprint,
+and frozen policy identity must match. Provider endpoints and request settings still
+come from the frozen policy, not the current config. Missing or changed credentials
+fail closed rather than selecting a different key. No second secret store is created.
+Credential-bearing headers, environment maps, and terminal projections are redacted
+from durable policy JSON and hydrated privately through the same source checks.
+
+Retrying a creation request returns its original session and policy without binding
+current replacement credentials. An ad-hoc `--api-key` remains authority-lifetime-only;
+restart revokes that key, not config-based sessions. Older receipts that contain only
+an instance-bound credential reference cannot securely recover a lost value and remain
+fail-closed. Their history is still readable; create a new session to adopt current
+credentials. Credential fingerprints are private metadata, never public API responses.
+
+CLI cost/data-training consent runs before gateway discovery and session creation,
+including top-level one-shot launches. It does not become a process-wide option.
+
 ## Key Files
 
 | File | Purpose |
