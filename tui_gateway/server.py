@@ -2047,15 +2047,6 @@ def _finish_reload(rid, params: dict, *, coalesced: bool) -> dict:
     return _ok(rid, {"status": "reloaded", "loaded_rev": _mcp_reload_loaded_rev, **({"coalesced": True} if coalesced else {})})
 
 
-_TUI_HIDDEN: frozenset[str] = frozenset({"sethome", "set-home", "commands", "approve", "deny"})
-
-_TUI_EXTRA: list[tuple[str, str, str]] = [
-    ("/density", "Toggle compact display mode", "TUI"),
-    ("/logs", "Show recent gateway log lines", "TUI"),
-    ("/mouse", "Set mouse tracking preset [on|off|toggle|wheel|buttons|all]", "TUI"),
-    ("/sessions", "Switch between live TUI sessions", "TUI"),
-]
-
 # Commands that queue onto _pending_input in the CLI; the slash worker has no reader for that queue, so
 # slash.exec routes them to command.dispatch instead.
 _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset({
@@ -2064,57 +2055,6 @@ _PENDING_INPUT_COMMANDS: frozenset[str] = frozenset({
 })
 
 _WORKER_BLOCKED_COMMANDS: frozenset[str] = frozenset({"snapshot", "snap"})
-
-
-def _skill_usage_lookup():
-    """``(usage, origin)`` callables for the skill catalog: activity count (use + view + patch) and
-    "hub" / "bundled" / "local" (``/api/skills`` ``provenance``, "local" spelled "agent"). Failure → 0 / "local"."""
-    try:
-        from tools.skill_usage import (
-            _read_bundled_names, _read_hub_installed_names, activity_count, load_usage)
-        records, bundled, hub = load_usage(), _read_bundled_names(), _read_hub_installed_names()
-    except Exception as e:
-        logger.debug("skill usage lookup unavailable: %s", e)
-        return (lambda _name: 0), (lambda _name: "local")
-
-    def usage(name: str) -> int:
-        with contextlib.suppress(Exception):
-            return activity_count(records.get(name) or {})
-        return 0
-
-    def origin(name: str) -> str:
-        return "hub" if name in hub else "bundled" if name in bundled else "local"
-    return usage, origin
-
-
-_SLASH_COMPLETION_LIMIT = 30
-
-
-def _rank_slash_completions(items: list[dict], usage, origin_of, *, browsing: bool, score_of=None,
-                            registry_command_names: frozenset[str] | None = None) -> list[dict]:
-    """Registry commands keep their order; only skills reorder: fuzzy ``score_of`` first, then most-used, then
-    A-Z. The limit is spent PER KIND (a flat cut on a large install offered no skill at all). ``browsing``
-    (bare ``/``) drops never-used bundled skills as noise; a typed query is SEARCHING — nothing pruned, only reordered.
-    While browsing, only names in ``registry_command_names`` (default ``GATEWAY_KNOWN_COMMANDS``) skip the cap:
-    plugin-registered commands are also ``kind != "skill"`` but unbounded, so they stay capped like skills."""
-    def name_of(item: dict) -> str:
-        return str(item.get("text", "")).strip().lstrip("/").lower()
-    commands = [item for item in items if item.get("kind") != "skill"]
-    skills = [item for item in items if item.get("kind") == "skill"]
-    if browsing:
-        skills = [item for item in skills if origin_of(name_of(item)) != "bundled" or usage(name_of(item)) > 0]
-    skills.sort(key=lambda item: (
-        *(() if score_of is None else (score_of(item),)), -usage(name_of(item)), name_of(item)))
-    if browsing:
-        if registry_command_names is None:
-            from hermes_cli.commands import GATEWAY_KNOWN_COMMANDS
-            registry_command_names = GATEWAY_KNOWN_COMMANDS
-        fixed = [c for c in commands if name_of(c) in registry_command_names]
-        other = [c for c in commands if name_of(c) not in registry_command_names]
-        ranked_commands = fixed + other[:_SLASH_COMPLETION_LIMIT]
-    else:
-        ranked_commands = commands[:_SLASH_COMPLETION_LIMIT]
-    return ranked_commands + skills[:_SLASH_COMPLETION_LIMIT]
 
 
 # argv shapes that must not run headless in the gateway process → user hint.

@@ -32,6 +32,7 @@ class AuthorityConnection:
         params = request.get('params') or {}
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
         handlers = {'session.create': self.create, 'ping': self.ping, 'runtime.describe': self.describe,
+                    'commands.catalog': self.command_catalog, 'complete.slash': self.slash_completions,
                     'session.list': self.list_sessions, 'session.info': self.info,
                     'session.mutate': self.mutate,
                     'setup.status': self.setup_status, 'setup.runtime_check': self.setup_runtime_check,
@@ -50,6 +51,14 @@ class AuthorityConnection:
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+
+    async def command_catalog(self, ref, params):
+        from gateway.session_discovery import discover_commands
+        return await discover_commands(self.authority, self.actor, params)
+
+    async def slash_completions(self, ref, params):
+        from gateway.session_discovery import discover_commands
+        return await discover_commands(self.authority, self.actor, params, completion=True)
 
     async def setup_status(self, ref, params):
         from gateway.session_readiness import readiness

@@ -125,10 +125,19 @@ retains its legacy unscoped contract.
    `command.dispatch` fallback, which the gateway resolves into a skill / alias / exec directive
    (a skill command resolves to `{type: "skill", message}` and is submitted as a normal prompt).
 
-`commands.catalog` (empty-query list) and `complete.slash` (typed-query completions) already include
-built-ins, user `quick_commands`, AND skill-derived commands (`scan_skill_commands()` /
-`get_skill_commands()`) — clients do not need a new RPC to see skills. The command definitions
-themselves come from `hermes_cli/commands.py` (`hermes_cli/AGENTS.md`).
+`commands.catalog` (empty-query list) includes built-ins, user `quick_commands`, plugin commands,
+and skill-derived commands. `complete.slash` uses the existing CLI completer (registry, plugins,
+skills/bundles, argument completions); quick commands remain catalog-only. Shared data builders
+live in `tui_gateway/command_discovery.py`, without importing the legacy server. Definitions
+come from `hermes_cli/commands.py` (`hermes_cli/AGENTS.md`).
+
+The canonical gateway exposes the same two discovery RPCs through `gateway/session_discovery.py`.
+It requires authenticated `session:read` capability and the authority's exact profile before any
+discovery. An optional named `profile` must resolve to that same home; a foreign selector returns
+`profile_mismatch`. Discovery runs off-loop in the authority's profile scope, without creating a
+legacy session or execution runtime. Catalog warnings, categories, aliases, desktop metadata,
+skill usage/origin, and completion replacement offsets retain their legacy shapes. Discovery is
+not an assertion that every listed slash execution command is implemented by the canonical RPCs.
 
 ## Dev commands
 

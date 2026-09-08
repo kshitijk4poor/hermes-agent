@@ -50,16 +50,6 @@ requests = json.loads(sys.argv[1])
 results = [server._methods[method](i, params)['result'] for i, (method, params) in enumerate(requests)]
 sys.__stdout__.write(json.dumps(results) + '\\n')
 '''
-    legacy = subprocess.run([sys.executable, '-c', legacy_code, json.dumps(requests)],
-                            cwd=root, env=env, stdin=subprocess.DEVNULL,
-                            capture_output=True, text=True, timeout=45)
-    assert legacy.returncode == 0, legacy.stderr
-    expected = json.loads(legacy.stdout.splitlines()[-1])
-    pairs = dict(expected[0]['pairs'])
-    for name in ('/probe-skill', '/probe-quick', '/probe-plugin'):
-        assert name in pairs, (name, expected[0]['warning'])
-    assert {'probe-skill', 'probe-plugin'} <= {
-        row['text'].strip().lstrip('/') for row in expected[2]['items']}
 
     async def probe(descriptor):
         url = descriptor['api_origin'].replace('http:', 'ws:') + '/api/ws'
@@ -103,6 +93,17 @@ sys.__stdout__.write(json.dumps(results) + '\\n')
                 time.sleep(.1)
             log.seek(0)
             assert descriptor.get('state') == 'ready', (descriptor, log.read())
+            # Ordinary startup syncs bundled skills; compare both transports on that same snapshot.
+            legacy = subprocess.run([sys.executable, '-c', legacy_code, json.dumps(requests)],
+                                    cwd=root, env=env, stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=45)
+            assert legacy.returncode == 0, legacy.stderr
+            expected = json.loads(legacy.stdout.splitlines()[-1])
+            pairs = dict(expected[0]['pairs'])
+            for name in ('/probe-skill', '/probe-quick', '/probe-plugin'):
+                assert name in pairs, (name, expected[0]['warning'])
+            assert {'probe-skill', 'probe-plugin'} <= {
+                row['text'].strip().lstrip('/') for row in expected[2]['items']}
             receipt = asyncio.run(probe(descriptor))
             process.send_signal(signal.SIGINT)
             assert process.wait(timeout=20) == 0
