@@ -173,7 +173,10 @@ def run():
                     time.sleep(.1)
                 assert card in first[2], bytes(first[2]).decode(errors='replace')[-8000:]
                 receipts['restored_native_prompt_card'] = True
-                os.write(first[1], b'1' if kind == 'approval' else b'\r')
+                if kind == 'approval':
+                    os.write(first[1], b'1')
+                else:
+                    os.write(first[1], b'2')
             deadline = time.monotonic() + 35
             while time.monotonic() < deadline and (not model.requests or expected not in first[2]):
                 assert first[0].poll() is None, bytes(first[2]).decode(errors='replace')
@@ -217,7 +220,12 @@ def run():
                 receipts['owned_effect_after_native_consent'] = not target.exists()
                 assert not target.exists()
             if kind == 'clarify':
-                receipts['native_answer_on_model_wire'] = 'green' in json.dumps(model.requests)
+                tool_replies = [json.loads(message['content']) for messages in model.requests
+                                for message in messages if message['role'] == 'tool']
+                receipts['native_answer_on_model_wire'] = any(
+                    response.get('user_response') == 'green'
+                    for reply in tool_replies for response in reply.get('responses', []))
+                (Path(sys.argv[1]) / 'model-tool-replies.json').write_text(json.dumps(tool_replies, indent=2))
                 assert receipts['native_answer_on_model_wire']
             assert receipts['reconnect_rendered_reply']
         finally:
