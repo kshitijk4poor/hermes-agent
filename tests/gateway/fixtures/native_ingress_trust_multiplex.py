@@ -109,6 +109,16 @@ async def multiplex_probe(runner, authority, primary, state, mode, peer):
             await asyncio.sleep(0.01)
     assert rows(entry.session_id) == committed
     if mode == 'multiplex':
+        sessions_before = set(authority.sessions)
+        runner.config.profile_routes.append(ProfileRoute(name='unowned-runtime', platform='telegram',
+                                                         profile='transport', chat_id='unowned-runtime'))
+        unowned = adapter.build_source(chat_id='unowned-runtime', chat_type='dm', user_id='fixture-user')
+        await adapter.handle_message(MessageEvent(text='NO_SECONDARY_DB_OWNER', source=unowned, message_id='unowned'))
+        async with asyncio.timeout(10):
+            while adapter._active_sessions:
+                await asyncio.sleep(0.01)
+        assert set(authority.sessions) == sessions_before, 'launch DB impersonated secondary runtime'
+        runner.config.profile_routes = [route]
         await adapter.handle_message(MessageEvent(text='BLOCK_FIFO', source=source, message_id='busy-1'))
         assert await asyncio.to_thread(peer.blocked.wait, 5), 'model gate not reached'
         queued = MessageEvent(text='MULTIPLEX_QUEUED', source=source, message_id='busy-2')
@@ -118,6 +128,7 @@ async def multiplex_probe(runner, authority, primary, state, mode, peer):
                 while not any(row['request_id'] == 'busy-2' for row in rows(entry.session_id)):
                     await asyncio.sleep(0.01)
             assert not adapter._pending_messages, 'callback wrapper restored adapter-local queue'
+            (state / '.env').write_text('TELEGRAM_ALLOWED_USERS=runtime-only\nOPENAI_API_KEY=runtime-fresh-key\n')
         finally:
             peer.release.set()
             await task
@@ -125,7 +136,7 @@ async def multiplex_probe(runner, authority, primary, state, mode, peer):
                 while adapter._active_sessions:
                     await asyncio.sleep(0.01)
         assert all(row['outcome'] == 'completed' for row in rows(entry.session_id))
-        assert worker_scopes == [(str(state), 'runtime-fixture-key')] * 3, worker_scopes
+        assert worker_scopes == [(str(state), 'runtime-fixture-key')] * 2 + [(str(state), 'runtime-fresh-key')], worker_scopes
     if mode == 'capture':
         # A queued storage fixture derived from the actual committed callback envelope.
         # This is restart reauthorization evidence, not a native post-ACK kill claim.
