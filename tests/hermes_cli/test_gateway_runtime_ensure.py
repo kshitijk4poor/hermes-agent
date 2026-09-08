@@ -65,13 +65,20 @@ def test_installed_service_start_is_nonmutating_and_failed_manager_never_spawns(
     original = unit.read_bytes()
     calls = tmp_path / "calls.jsonl"
     helper = tmp_path / "inert-supervisor"
+    from hermes_cli.gateway_runtime_service_identity import SYSTEMD_IDENTITY_PROPERTIES
+    identity = {key: "" for key in SYSTEMD_IDENTITY_PROPERTIES}
+    identity.update(User=str(os.getuid()), DynamicUser="no",
+                    Environment=f'"HERMES_HOME={home}"',
+                    ExecStart=f'{{ path={sys.executable} ; argv[]={sys.executable} -m hermes_cli.main gateway run ; ignore_errors=no ; }}')
+    effective = "\n".join(f"{key}={value}" for key, value in identity.items())
     helper.write_text('#!' + sys.executable + '\nimport json,sys,time\nfrom pathlib import Path\n'
                       + f'p=Path({str(calls)!r})\n'
                       + 'with p.open("a") as f: f.write(json.dumps(sys.argv[1:])+"\\n")\n'
                       + 'if (p.parent/"stall").exists(): time.sleep(5)\n'
                       + 'if (p.parent/"fail").exists(): print("private-supervisor-token"); sys.exit(3)\n'
                       + 'if "show" in sys.argv and "system" in sys.argv and (p.parent/"single").exists():\n print("LoadState=not-found")\n'
-                      + 'elif "show" in sys.argv:\n print("LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=enabled")\n'
+                      + 'elif "show-environment" in sys.argv: print("")\n'
+                      + 'elif "show" in sys.argv:\n print("LoadState=loaded\\nActiveState=inactive\\nSubState=dead\\nUnitFileState=enabled"); print(' + repr(effective) + ')\n'
                       + 'elif "start" in sys.argv: sys.exit(0)\n'
                       + 'else: sys.exit(91)\n', encoding="utf-8")
     helper.chmod(0o700)
@@ -81,7 +88,7 @@ def test_installed_service_start_is_nonmutating_and_failed_manager_never_spawns(
     assert result.state == "conflict"
     assert unit.read_bytes() == original
     assert not (home / "logs").exists()
-    assert all("show" in json.loads(line) for line in calls.read_text().splitlines())
+    assert all(any(arg in {"show", "show-environment"} for arg in json.loads(line)) for line in calls.read_text().splitlines())
     (tmp_path / "single").touch()
     result = runtime.ensure_gateway_runtime(home, timeout=0.5)
     assert result.state == "starting" and result.reason_code == "deadline"

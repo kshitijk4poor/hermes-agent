@@ -67,6 +67,7 @@ def _exists(path: Path) -> bool:
 def _systemd(home: Path, deadline: float) -> ExistingService | None:
     from hermes_cli import gateway as gw
     from hermes_cli.service_manager import _s6_running
+    from hermes_cli.gateway_runtime_service_identity import SYSTEMD_IDENTITY_PROPERTIES, verify_systemd
     if _s6_running():
         raise RuntimeStartError("external_supervisor")
     suffix = service_suffix(home)
@@ -82,7 +83,7 @@ def _systemd(home: Path, deadline: float) -> ExistingService | None:
     for system in (False, True):
         command = gw._systemctl_cmd(system)
         result = _run([*command, "show", unit, "--no-pager",
-                       "--property=LoadState,ActiveState,SubState,UnitFileState"], deadline)
+                       "--property=LoadState,ActiveState,SubState,UnitFileState," + ",".join(SYSTEMD_IDENTITY_PROPERTIES)], deadline)
         props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         if props.get("LoadState") == "not-found" and not _exists(paths[int(system)]):
             continue
@@ -97,6 +98,16 @@ def _systemd(home: Path, deadline: float) -> ExistingService | None:
             raise RuntimeStartError("service_state_unknown")
         if state == "failed":
             raise RuntimeStartError("service_failed")
+        environment = _run([*command, "show-environment"], deadline)
+        if environment.returncode:
+            raise RuntimeStartError("service_identity_unverified")
+        try:
+            verify_systemd(props, environment.stdout, home, system=system)
+        except ValueError as exc:
+            reason = str(exc)
+            raise RuntimeStartError(reason if reason in {
+                "profile_mismatch", "service_account_mismatch"
+            } else "service_identity_unverified") from None
         found.append(ExistingService("systemd", tuple([*command, "--no-ask-password", "start", unit]),
                                      state != "inactive"))
     if len(found) > 1:
