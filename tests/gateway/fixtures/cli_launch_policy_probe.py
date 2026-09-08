@@ -31,7 +31,12 @@ class Model(BaseHTTPRequestHandler):
         if first:
             self.server.barrier.wait(timeout=30)
         message = {'role': 'assistant', 'content': 'LAUNCH_POLICY_OK'}
-        choice = {'index': 0, 'message': message, 'finish_reason': 'stop'}
+        budget = any('BUDGET' in str(m.get('content', '')) for m in body['messages'] if m['role'] == 'user')
+        if budget and body.get('tools'):
+            message = {'role': 'assistant', 'content': None, 'tool_calls': [{
+                'index': 0, 'id': 'budget-' + str(len(body['messages'])), 'type': 'function',
+                'function': {'name': 'terminal', 'arguments': json.dumps({'command': 'printf budget'})}}]}
+        choice = {'index': 0, 'message': message, 'finish_reason': 'tool_calls' if 'tool_calls' in message else 'stop'}
         kind = 'application/json'
         payload = json.dumps({'id': 'local', 'choices': [choice], 'model': body['model'],
                               'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}}).encode()
@@ -68,17 +73,17 @@ def probe(tmp_path):
     sessions, pids = {}, []
     keys = {'left': 'private-left-launch-token', 'right': 'private-right-launch-token'}
 
-    def cli(side, resume=None):
+    def cli(side, resume=None, budget=False):
         cwd = tmp_path / side
         cwd.mkdir(exist_ok=True)
         (cwd / 'AGENTS.md').write_text('PROJECT_LAUNCH_MARKER_' + side)
-        args = dict(query='POLICY_' + side, quiet=True)
+        args = dict(query=('BUDGET_' if budget else 'POLICY_') + side, quiet=True)
         if resume:
             args['resume'] = resume
         else:
             args.update(provider='custom', model='gpt-5-' + side, api_key=keys[side],
                         base_url=origin + '/' + side + '/v1', reasoning='high' if side == 'left' else 'low',
-                        max_turns=1 if side == 'left' else 3, ignore_rules=side == 'left', toolsets='')
+                        max_turns=1 if side == 'left' else 3, ignore_rules=side == 'left', toolsets='terminal')
         result = subprocess.run([sys.executable, '-c', 'import cli; cli.main(**' + repr(args) + ')'],
             cwd=cwd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=70)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -127,6 +132,11 @@ def probe(tmp_path):
                 text = json.dumps(systems[0])
                 assert ('PROJECT_LAUNCH_MARKER_' + side in text) == (side == 'right'), text
                 assert ('SOUL_LAUNCH_MARKER' in text) == (side == 'right'), text
+            for side, expected in [('left', 1), ('right', 3)]:
+                start = len(peer.requests)
+                cli(side, sessions[side], budget=True)
+                rounds = peer.requests[start:]
+                assert sum(bool(x['body'].get('tools')) for x in rounds) == expected, rounds
         count = len(peer.requests)
         with daemon(root, home, env, barrier=False) as (proc, desc):
             pids.append(proc.pid)
