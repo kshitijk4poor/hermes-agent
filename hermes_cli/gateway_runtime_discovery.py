@@ -35,7 +35,9 @@ def _socket_path(home: Path) -> Path:
         _private_node(direct, kind="socket")
         return direct
     pointer = home / "gateway.sock.path"
-    with os.fdopen(os.open(pointer, os.O_RDONLY | os.O_NOFOLLOW), "rb") as stream:  # windows-footgun: ok — binary POSIX descriptor
+    # Reject non-regular metadata before a FIFO can wait for a writer.
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK  # windows-footgun: ok — POSIX socket discovery only
+    with os.fdopen(os.open(pointer, flags), "rb") as stream:  # windows-footgun: ok — binary POSIX descriptor
         metadata = os.fstat(stream.fileno())
         if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid()  # windows-footgun: ok — POSIX pointer only
                 or stat.S_IMODE(metadata.st_mode) & 0o077):

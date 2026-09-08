@@ -75,6 +75,33 @@ def test_live_discovery_does_not_treat_an_unusable_owner_as_absent(tmp_path):
     asyncio.run(probe())
 
 
+@pytest.mark.linux_only
+def test_fifo_control_pointer_is_rejected_without_a_writer(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    home = tmp_path / 'fifo-profile'
+    home.mkdir(mode=0o700)
+    os.mkfifo(home / 'gateway.sock.path', 0o600)
+    code = (
+        'import sys; from pathlib import Path; '
+        'from hermes_cli.gateway_runtime import discover_gateway_endpoint; '
+        'r = discover_gateway_endpoint(Path(sys.argv[1]), timeout=0.1); '
+        'print(r.state, r.reason_code)'
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, '-c', code, str(home)],
+            cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=3,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail('discovery blocked on a FIFO instead of rejecting its file type')
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'inaccessible unsafe_control_pointer'
+
+
 def test_start_decisions_do_not_turn_uncertainty_into_another_owner():
     from gateway.runtime_contract import RuntimeObservation, next_start_action
 
