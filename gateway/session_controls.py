@@ -33,6 +33,7 @@ class AuthorityConnection:
         ref = SessionRef(self.actor.profile_id, params.get('session_id', ''))
         handlers = {'session.create': self.create, 'ping': self.ping, 'runtime.describe': self.describe,
                     'commands.catalog': self.command_catalog, 'complete.slash': self.slash_completions,
+                    'slash.exec': self.slash_exec, 'command.dispatch': self.command_dispatch,
                     'session.list': self.list_sessions, 'session.info': self.info,
                     'session.mutate': self.mutate,
                     'setup.status': self.setup_status, 'setup.runtime_check': self.setup_runtime_check,
@@ -51,6 +52,14 @@ class AuthorityConnection:
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+
+    async def slash_exec(self, ref, params):
+        from gateway.session_commands import execute_command
+        return await execute_command(self, ref, params)
+
+    async def command_dispatch(self, ref, params):
+        from gateway.session_commands import execute_command
+        return await execute_command(self, ref, params, dispatch=True)
 
     async def command_catalog(self, ref, params):
         from gateway.session_discovery import discover_commands

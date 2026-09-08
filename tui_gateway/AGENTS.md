@@ -139,6 +139,32 @@ legacy session or execution runtime. Catalog warnings, categories, aliases, desk
 skill usage/origin, and completion replacement offsets retain their legacy shapes. Discovery is
 not an assertion that every listed slash execution command is implemented by the canonical RPCs.
 
+## Canonical local slash execution
+
+`gateway/session_commands.py` adapts both `slash.exec({session_id, command})` and
+`command.dispatch({session_id, name, arg})` without loading the legacy server or
+slash worker. Optional `profile` must name the authority's exact profile. Only
+server-registered local sources belonging to the authenticated actor may dispatch;
+caller-supplied source, routing, credentials, or platform fields are rejected.
+
+Reviewed gateway handlers: `help`, `commands`, `status`, `context`, `version`,
+`whoami` require `session:read`; `title` requires `session:control` (including its
+query form). Registry aliases are accepted. Existing registry busy rejection and
+mid-turn dispatch policies apply. Results are `{type: "exec", output}`.
+
+Profile skills and configured quick-command aliases to these commands/skills are
+supported. Skill resolution requires `session:submit` and returns the existing
+`{type: "skill", name, message, display}` directive. Desktop and Ink already submit
+that message through `prompt.submit`, retaining their own durable input identity.
+Resolution itself does not start a turn or change the cached system prompt; the
+normal durable admission path owns FIFO, retries, approvals, and execution.
+
+All other commands return `unsupported_command`, including shell quick commands,
+plugin execution, bundles, runtime/config mutation, approval/secret slash shortcuts,
+and lifecycle commands. Use the existing generation-bound control RPCs where
+available. Catalog presence alone does not imply execution support. No legacy
+fallback is installed on the canonical transport.
+
 ## Dev commands
 
 ```bash
