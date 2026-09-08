@@ -834,6 +834,9 @@ class ProcessRegistry(ProcessCheckpointMixin):
     def _watch_event_base(session: ProcessSession) -> dict:
         """Session identity + watcher routing fields shared by every watch event."""
         return {
+            "event_id": uuid.uuid4().hex,
+            "started_at": session.started_at,
+            "parent_session_id": session.parent_session_id,
             "session_id": session.id,
             "session_key": session.session_key,
             "task_id": session.task_id,

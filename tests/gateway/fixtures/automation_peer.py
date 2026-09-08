@@ -36,7 +36,8 @@ class Model(BaseHTTPRequestHandler):
             command = shlex.join([sys.executable, '-c', code])
             message = {'role': 'assistant', 'content': None, 'tool_calls': [{'id': 'terminal-spawn',
                 'type': 'function', 'function': {'name': 'terminal', 'arguments': json.dumps({
-                    'command': command, 'background': True, 'notify_on_complete': True, 'check_interval': 1})}}]}
+                    'command': command, 'background': True, 'notify_on_complete': not getattr(self.server, 'watch', False),
+                    **({'watch_patterns': ['REAL_TERMINAL_COMPLETION']} if getattr(self.server, 'watch', False) else {})})}}]}
         finish = 'tool_calls' if message.get('tool_calls') else 'stop'
         payload = json.dumps({'id': 'local', 'choices': [{'index': 0, 'message': message, 'finish_reason': finish}],
             'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}}).encode()

@@ -14,12 +14,14 @@ from local_recovery_probe import daemon, websocket, rpc
 
 def probe(base, source):
     restart = source == 'restart'
-    source = 'gui' if restart else source
+    watch = source == 'watch'
+    source = 'gui' if restart or watch else source
     root = Path(__file__).resolve().parents[3]
     home, user = base / 'state', base / 'user'
     home.mkdir(); user.mkdir()
     model = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     model.requests = []
+    model.watch = watch
     model.blocked, model.release = threading.Event(), threading.Event()
     model.gate = home / 'terminal-gate'
     threading.Thread(target=model.serve_forever, daemon=True).start()
@@ -70,6 +72,8 @@ def probe(base, source):
         automatic = [r for r in ledger if r['principal_id'].startswith('automation:')]
         assert automatic, {'missing_automation': ledger}
         assert len(automatic) == 1 and automatic[0]['status'] == 'queued', automatic
+        if watch:
+            assert json.loads(automatic[0]['request_id'])[0] == 'watch_match', automatic
         assert next(r for r in ledger if r['request_id'] == 'held')['status'] == 'started'
         assert automatic[0]['seq'] > next(r for r in ledger if r['request_id'] == 'follower')['seq']
         model.release.set()

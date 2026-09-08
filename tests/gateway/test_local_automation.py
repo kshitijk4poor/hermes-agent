@@ -18,7 +18,7 @@ def _probe(tmp_path, source):
     print(result.stdout)
 
 
-@pytest.mark.parametrize('source', ['cli', 'tui', 'gui'])
+@pytest.mark.parametrize('source', ['cli', 'tui', 'gui', 'watch'])
 def test_local_completion_joins_fifo_without_an_observer(tmp_path, source):
     _probe(tmp_path, source)
 

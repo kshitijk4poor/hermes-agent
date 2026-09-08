@@ -1372,6 +1372,8 @@ class GatewayNotificationsMixin:
                 task_idx = ((evt.get("results") or [{}])[0] or {}).get("task_index", "")
                 return (evt_type, producer_id, f"task_failure:{task_idx}")
             return (evt_type, producer_id, "")
+        if evt_type in {"watch_match", "watch_disabled"} and evt.get("event_id"):
+            return (evt_type, str(evt["session_id"]), str(evt["event_id"]))
         if evt_type == "completion":
             producer_id = str(evt.get("session_id") or "")
             started_at = evt.get("started_at")
