@@ -32,8 +32,13 @@ class DiscordAuthorizationMixin:
             member = await asyncio.wait_for(guild.fetch_member(uid), timeout=10)
         except (HTTPException, TimeoutError, OSError):
             return False
-        # Neither a replaced client nor a policy edit may reuse the old lookup.
-        if self._client is not client or policy() != (roles, guild_id):
+        # The entry-time ContextVar contains a secret snapshot. Reload the same
+        # transport home after SDK I/O so an intervening .env edit is visible too.
+        from gateway.run import _profile_runtime_scope
+        from hermes_constants import get_hermes_home
+        with _profile_runtime_scope(get_hermes_home()):
+            current_policy = policy()
+        if self._client is not client or current_policy != (roles, guild_id):
             return False
         return (member.id == uid and member.guild.id == int(guild_id)
                 and any(role.id in roles for role in member.roles))

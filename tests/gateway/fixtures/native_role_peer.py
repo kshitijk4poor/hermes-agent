@@ -109,6 +109,24 @@ async def probe(peer):
     await send(event('wrong-guild', scope='999'))
     assert len(list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False)) == 1
     assert len(peer.requests) == 1
+    if sys.argv[1] == 'multiplex':
+        guild.roles = [SimpleNamespace(id=700)]
+        # Hot policy edits during SDK I/O must not reuse the entry-time secret scope.
+        def revoke_policy():
+            guild.hook = None
+            (transport / '.env').write_text('DISCORD_ALLOWED_ROLES=999\n')
+        guild.hook = revoke_policy
+        from gateway.session_ingress_context import native_callback
+        from hermes_state_runtime import RuntimeStoreError
+        ev = event('policy-revoked-during-fetch')
+        with native_callback(runner, ev, transport, 'transport'):
+            try:
+                await authority.admit_native(ev)
+            except RuntimeStoreError as exc:
+                assert exc.reason == 'permission_denied'
+            else:
+                raise AssertionError('revoked transport role policy was durably accepted')
+        assert len(peer.requests) == 1
     if sys.argv[1] == 'positive':
         # Independent user/pairing grants survive membership revocation.
         calls = guild.calls
