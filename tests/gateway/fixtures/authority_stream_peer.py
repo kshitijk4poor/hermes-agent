@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import shlex
+import queue
+import socket
 import threading
 import traceback
 
@@ -38,6 +40,9 @@ class ModelPeer(BaseHTTPRequestHandler):
                 'index': 0, 'id': 'owned-tool', 'type': 'function', 'function': {
                     'name': 'terminal', 'arguments': json.dumps({'command': self.server.command})}}]}]
         else:
+            if self.server.blocked:
+                # Incompressible data and healthy-reader pacing fill ONLY the stalled peer.
+                deltas += [{'content': f'CHUNK_{i:04d}_' + os.urandom(2048).hex()} for i in range(330)]
             deltas += [{'content': 'STREAM_'}, {'content': 'FINISHED'}]
         for delta in deltas + [{}]:
             frame = {'id': 'local-stream', 'object': 'chat.completion.chunk', 'created': 1,
@@ -45,13 +50,16 @@ class ModelPeer(BaseHTTPRequestHandler):
                      'finish_reason': None if delta else ('tool_calls' if tool else 'stop')}]}
             self.wfile.write(('data: ' + json.dumps(frame) + '\n\n').encode())
             self.wfile.flush()
+            if delta.get('content', '').startswith('CHUNK_'):
+                assert self.server.acks.get(timeout=15) == delta['content'][:11]
         self.wfile.write(b'data: [DONE]\n\n')
         self.wfile.flush()
 
 
 class Observer:
-    def __init__(self, ws, sid):
-        self.ws, self.sid = ws, sid
+    def __init__(self, ws, sid, peer):
+        self.ws, self.sid, self.peer = ws, sid, peer
+        self.healthy = False
         self.events, self.waiters = [], {}
         self.complete = asyncio.Event()
         self.task = asyncio.create_task(self.read())
@@ -64,6 +72,9 @@ class Observer:
                 self.waiters.pop(frame['id']).set_result(frame)
             elif frame.get('params', {}).get('session_id') == self.sid:
                 self.events.append(frame['params'])
+                text = frame['params'].get('payload', {}).get('text') or ''
+                if self.healthy and frame['params']['type'] == 'message.delta' and text.startswith('CHUNK_'):
+                    self.peer.acks.put(text[:11])
                 if frame['params']['type'] == 'message.complete':
                     self.complete.set()
 
@@ -124,8 +135,8 @@ async def probe(peer, target):
     observers = []
 
     async def connect():
-        ws = await websockets.connect(uri + '?token=' + web_server._SESSION_TOKEN, compression=None)
-        observer = Observer(ws, ref.session_id)
+        ws = await websockets.connect(uri + '?token=' + web_server._SESSION_TOKEN, compression=None, max_size=8 * 1024 * 1024)
+        observer = Observer(ws, ref.session_id, peer)
         observers.append(observer)
         return observer
 
@@ -138,32 +149,69 @@ async def probe(peer, target):
         a, b = await connect(), await connect()
         snapshot = await a.rpc('session.resume')
         await b.rpc('session.resume')
-        receipt = await a.rpc('prompt.submit', input_id='stream-first', text='Write the owned fixture')
-        await asyncio.wait_for(a.complete.wait(), 30)
-        await asyncio.wait_for(b.complete.wait(), 10)
+        b.healthy = True
+        blocked_bytes = 0
+        kernel_queued = 0
+        if peer.blocked:
+            import fcntl
+            import struct
+            slow_port = a.ws.local_address[1]
+            protocol = next(p for p in api.server.server_state.connections if p.client[1] == slow_port)
+            server_transport = protocol.transport
+            server_socket = server_transport.get_extra_info('socket')
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            a.ws.transport.get_extra_info('socket').setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+            a.ws.transport.pause_reading()
+            slow_transport = next(t for t in authority.events.values() if t._ws.client.port == slow_port)
+
+            async def witness_blockage():
+                nonlocal blocked_bytes, kernel_queued
+                while not b.complete.is_set():
+                    buffered = server_transport.get_write_buffer_size()
+                    if buffered > server_transport.get_write_buffer_limits()[1]:
+                        blocked_bytes = max(blocked_bytes, buffered)
+                        queued = struct.unpack('I', fcntl.ioctl(server_socket.fileno(), 0x5411, struct.pack('I', 0)))[0]
+                        kernel_queued = max(kernel_queued, queued)
+                    await asyncio.sleep(.005)
+            witness = asyncio.create_task(witness_blockage())
+        receipt = await b.rpc('prompt.submit', input_id='stream-first', text='Write the owned fixture')
+        await asyncio.wait_for(b.complete.wait(), 45)
+        if not peer.blocked:
+            await asyncio.wait_for(a.complete.wait(), 10)
         await asyncio.wait_for(authority.sessions[ref.session_id].task, 10)
         assert target.read_text() == 'owned-effect'
         agent = authority.agent(ref)
         assert isinstance(agent, AIAgent)
         rows = list_session_admissions(authority.db, session_id=ref.session_id, pending_only=False)
         assert len(rows) == 1 and rows[0]['outcome'] == 'completed', rows
+        if peer.blocked:
+            await witness
+            assert blocked_bytes > 0 and kernel_queued > 0, 'no real OS socket blockage witnessed'
+            fanout = authority.sessions[ref.session_id].event_stream.fanout
+            assert not fanout.contains(slow_transport), 'OS-blocked observer not excluded at mailbox bound'
+            assert not a.complete.is_set(), 'slow reader was released before producer completed'
+            # The execution and healthy terminal have already completed while OS reads remain paused.
+            a.ws.transport.resume_reading()
         expected = {'message.start', 'message.delta', 'tool.start', 'tool.complete', 'agent.step'}
-        assert expected <= {e['type'] for e in a.events}, 'real execution omitted canonical start/delta/tool/progress events'
-        assert a.events == b.events, 'observers saw competing event ordering/stamps'
-        assert [e['seq'] for e in a.events] == list(range(snapshot['last_sequence'] + 1, a.events[-1]['seq'] + 1))
-        for event in a.events:
+        assert expected <= {e['type'] for e in b.events}, 'real execution omitted canonical start/delta/tool/progress events'
+        if not peer.blocked:
+            assert a.events == b.events, 'observers saw competing event ordering/stamps'
+        events = b.events
+        assert [e['seq'] for e in events] == list(range(snapshot['last_sequence'] + 1, events[-1]['seq'] + 1))
+        for event in events:
             assert event['session_id'] == ref.session_id
             assert event['execution_generation'] == rows[0]['generation']
             assert event['authority_epoch'] == authority.epoch
             assert event['admission_id'] == receipt['admission_id']
             assert event['replay_epoch'] == snapshot['replay_epoch']
-        tools = [e for e in a.events if e['type'].startswith('tool.')]
+        assert all(isinstance(e['payload']['text'], str) for e in events if e['type'] == 'message.delta'), 'native segment sentinel leaked as text delta'
+        tools = [e for e in events if e['type'].startswith('tool.')]
         assert [e['type'] for e in tools] == ['tool.start', 'tool.complete']
         assert all(e['payload']['tool_call_id'] == 'owned-tool' for e in tools)
-        assert 'PRIVATE_REASONING_NOT_PUBLIC' not in json.dumps(a.events)
+        assert 'PRIVATE_REASONING_NOT_PUBLIC' not in json.dumps(events)
         assert str(target) not in json.dumps(tools), 'tool args leaked into public stream'
         assert adapter.sent, 'native delivery lane was lost'
-        last = a.events[-1]['seq']
+        last = events[-1]['seq']
         # Same generation is still recorded after settlement; late callbacks must be inert.
         agent.stream_delta_callback('LATE_CALLBACK_NOT_PUBLIC')
         agent.tool_start_callback('late', 'terminal', {'command': 'PRIVATE_ARGS'})
@@ -171,20 +219,23 @@ async def probe(peer, target):
         agent.step_callback(999, [{'name': 'PRIVATE_PREVIOUS_TOOL', 'result': 'SECRET'}])
         replay = await b.rpc('session.events.since', replay_epoch=snapshot['replay_epoch'], last_sequence=0)
         assert replay['last_sequence'] == last, 'settled worker published late callbacks'
-        assert replay['events'] == a.events
-        cursor = a.events[-2]['seq']
+        assert replay['events'] == events
+        cursor = events[-2]['seq']
         await a.close()
         observers.remove(a)
         c = await connect()
         await c.rpc('session.resume')
         tail = await c.rpc('session.events.since', replay_epoch=snapshot['replay_epoch'], last_sequence=cursor)
-        assert tail['events'] == [a.events[-1]], 'detach/reconnect replay lost terminal tail'
+        assert tail['events'] == [events[-1]], 'detach/reconnect replay lost terminal tail'
         Path(os.environ['HERMES_HOME'], 'receipt.json').write_text(json.dumps({
             'real_terminal_effect': True, 'authenticated_observers': 2, 'same_stamps': True,
             'stale_callback_inert': True, 'reconnect_replay': True, 'model_calls': len(peer.requests),
-            'event_types': [e['type'] for e in a.events], 'event_count': len(a.events)}))
+            'os_buffer_blocked_bytes': blocked_bytes, 'kernel_send_queued_bytes': kernel_queued,
+            'producer_and_healthy_completed_before_release': peer.blocked,
+            'event_types': [e['type'] for e in events], 'event_count': len(events)}))
     finally:
         for observer in observers:
+            observer.ws.transport.resume_reading()
             await observer.close()
         await stop_gateway_api(api)
 
@@ -193,6 +244,8 @@ def main():
     target = Path(os.environ['HERMES_HOME'], 'owned-effect.txt')
     peer = ThreadingHTTPServer(('127.0.0.1', 0), ModelPeer)
     peer.requests = []
+    peer.blocked = os.environ.get('STREAM_PROBE_MODE') == 'blocked'
+    peer.acks = queue.Queue()
     peer.command = 'printf owned-effect > ' + shlex.quote(str(target))
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{peer.server_port}/v1'

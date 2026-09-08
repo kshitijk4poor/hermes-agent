@@ -160,7 +160,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         if delta_sinks or self._approval_owner is not None:
             def stream_delta_cb(text: str) -> None:
                 if ctx._run_still_current():
-                    self._publish_execution("message.delta", {"text": text})
+                    if text is not None:  # None closes only the native stream segment.
+                        self._publish_execution("message.delta", {"text": text})
                     for sink in delta_sinks:
                         sink.on_delta(text)
 
