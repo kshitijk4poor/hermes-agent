@@ -69,9 +69,7 @@ def snapshot_native(runner, event):
                 'route': runner.session_store._generate_session_key(event.source),
                 'event': deepcopy({name: getattr(event, name) for name in _EVENT_FIELDS}),
                 'timestamp': event.timestamp.isoformat()}
-    # Single-profile homes are necessarily the owned primary. Keep its existing
-    # wire identity so retrying a pre-provenance admission cannot become a conflict.
-    if provenance is not None and getattr(runner.config, 'multiplex_profiles', False):
+    if provenance is not None:
         envelope['provenance'] = provenance
     # Omit new defaults so an identical retry of an older text admission retains
     # its fingerprint. Explicit context (including an empty skill list) is exact.
@@ -85,7 +83,20 @@ def snapshot_native(runner, event):
                                  media_text_inlined=list(event.media_text_inlined))
     # Keep the private dispatch key so previously committed text-only rows recover
     # under the same authority; optional media/context fields extend that envelope.
-    return {'text': event.text, 'native_text_v1': envelope}
+    payload = {'text': event.text, 'native_text_v1': envelope}
+    # Only an exact persisted legacy retry retains its old fingerprint. New
+    # ordinary admissions must bind homes too, including execution after restart.
+    if provenance is not None and not getattr(runner.config, 'multiplex_profiles', False):
+        from hermes_state_runtime import list_session_admissions
+        authority = runner.session_authority
+        entry = runner.session_store.lookup_by_session_key(envelope['route'])
+        if entry is not None:
+            legacy = deepcopy(payload)
+            legacy['native_text_v1'].pop('provenance')
+            for row in list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False):
+                if row['request_id'] == event.message_id and row['payload'] == legacy:
+                    return legacy
+    return payload
 
 
 def restore_native(payload, runner=None):

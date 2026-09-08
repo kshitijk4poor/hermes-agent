@@ -104,6 +104,15 @@ async def probe(mode, peer):
     assert rows[0]['payload'] == payload, rows
     assert len(peer.requests) == 1, peer.requests
     assert any('LOCAL_ACK_MESSAGING_WARM' in d['content'] for d in adapter.deliveries), adapter.deliveries
+    fresh = MessageEvent(text='FRESH_CALLBACK_INPUT', source=adapter.build_source(
+        chat_id='trust-chat', chat_type='dm', user_id='fixture-user'), message_id='trust-2')
+    await adapter.handle_message(fresh)
+    async with asyncio.timeout(10):
+        while adapter._active_sessions:
+            await asyncio.sleep(0.01)
+    rows = list_session_admissions(authority.db, session_id=entry.session_id, pending_only=False)
+    assert len(rows) == 2 and 'provenance' in rows[1]['payload']['native_text_v1'], rows
+    assert all(row['outcome'] == 'completed' for row in rows) and len(peer.requests) == 2
     print(json.dumps({'rows': rows, 'deliveries': adapter.deliveries, 'model_calls': len(peer.requests)}))
 
 
