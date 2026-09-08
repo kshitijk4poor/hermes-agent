@@ -35,7 +35,14 @@ export function canonicalResult(method: string, value: any, request: Record<stri
     return { ...value, input_id: request.input_id, target_profile_home: value.ref.profile_id, target_session_id: value.ref.session_id }
   }
   if (['session.create', 'session.resume', 'session.activate'].includes(method)) {
-    return { ...value, info: { ...value.info, stored_session_id: value.stored_session_id,
+    // Canonical snapshots contain stored conversation rows (`content`), not
+    // the legacy TUI's display rows (`text`). Without this translation only
+    // live events render, making reconnect depend on catching the final delta.
+    const messages = Array.isArray(value.messages) ? value.messages.map((row: any) =>
+      row && typeof row === 'object'
+        ? { ...row, text: row.content, name: row.tool_name }
+        : row) : value.messages
+    return { ...value, messages, info: { ...value.info, stored_session_id: value.stored_session_id,
       execution_epoch: String(value.authority_epoch), execution_generation: value.execution_generation,
       running: value.running } }
   }
