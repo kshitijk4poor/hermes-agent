@@ -184,12 +184,8 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
         _text(value)
     if type(expected_revision) is not int or expected_revision < 0:
         raise RuntimeStoreError('invalid_params')
-    fields = {'rename': ('title', str), 'archive': ('archived', bool)}
-    if not isinstance(operation, str) or operation not in fields or not isinstance(payload, dict):
-        raise RuntimeStoreError('invalid_params')
-    field, value_type = fields[operation]
-    if set(payload) != {field} or type(payload[field]) is not value_type:
-        raise RuntimeStoreError('invalid_params')
+    from hermes_state_mutations import validate_action, apply_action
+    validate_action(operation, payload)
     # Snapshot caller data before waiting for the writer lock.
     payload = json.loads(_json(payload))
     key = 'gateway.mutation.v1.' + admission_fingerprint(
@@ -208,19 +204,12 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
         session = _session(conn, session_id)
         if session['runtime_revision'] != expected_revision:
             raise RuntimeStoreError('revision_conflict')
-        if operation == 'rename':
-            affected = db._set_session_title_in_transaction(
-                conn, session_id, payload['title'], source=db.TITLE_SOURCE_USER)
-        else:
-            affected = db._set_lineage_column_in_transaction(
-                conn, 'archived', session_id, int(payload['archived']))
+        affected, projection = apply_action(db, conn, session_id, operation, payload)
         conn.executemany('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?',
                          [(target,) for target in affected])
         updated = _session(conn, session_id)
         result = {'session_id': session_id, 'revision': updated['runtime_revision'],
-                  'operation': operation, field: updated[field]}
-        if operation == 'archive':
-            result[field] = bool(result[field])
+                  'operation': operation, **projection}
         conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?)',
                      (key, _json({'digest': digest, 'result': result})))
         return result
