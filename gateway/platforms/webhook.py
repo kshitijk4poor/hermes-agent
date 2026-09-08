@@ -21,6 +21,7 @@ import re
 import subprocess
 import time
 from collections import deque
+from datetime import datetime, timezone
 from contextlib import nullcontext, suppress
 from typing import Any, Deque, Dict, List, Optional
 
@@ -193,6 +194,12 @@ class WebhookAdapter(BasePlatformAdapter):
         self._route_processor = WebhookRouteProcessor(script_timeout_seconds=self._script_timeout_seconds)
         # Opt-in per-route debounce of rapid same-entity events (route ``coalesce`` block). #92066
         self._coalescer = WebhookCoalescer(dispatch=self._spawn_agent_run, render=self._render_prompt)
+
+    @property
+    def token(self):
+        # Bind native replay to the currently configured signing credentials.
+        return json.dumps([self._global_secret, {name: route.get("secret", self._global_secret)
+                           for name, route in self._routes.items()}], sort_keys=True)
 
     # --- Lifecycle ---
 
@@ -618,36 +625,19 @@ class WebhookAdapter(BasePlatformAdapter):
         delivery_id = headers.get("X-GitHub-Delivery", headers.get("svix-id", headers.get(
             "webhook-id", headers.get("X-Request-ID", str(int(time.time() * 1000))))))
         now = time.time()  # idempotency: skip duplicate deliveries (webhook retries)
-        if not self._record_delivery_id(delivery_id, now):
+        if route_config.get("deliver_only") and not self._record_delivery_id(delivery_id, now):
             logger.info("[webhook] Skipping duplicate delivery %s", delivery_id)
             return web.json_response({"status": "duplicate", "delivery_id": delivery_id}, status=200)
         if route_config.get("cron_job"):
             return self._handle_cron_trigger(prompt, route_config, route_name, event_type, delivery_id, profile)
         if route_config.get("deliver_only"):
-            return await self._handle_deliver_only(prompt, payload, route_config, route_name, event_type, delivery_id,
-                                                   profile)
-        coalesce = route_config.get("coalesce")
-        if isinstance(coalesce, dict) and self._coalescer.enqueue(
-                route_name=route_name, coalesce=coalesce, payload=payload, event_type=event_type, prompt=prompt,
-                delivery_id=delivery_id, now=now, route_config=route_config, profile=profile):
-            return web.json_response({"status": "coalesced", "route": route_name, "event": event_type,
-                                      "delivery_id": delivery_id}, status=202)
-        return self._dispatch_agent_run(request, route_config, route_name, profile, payload, prompt, event_type,
+            return await self._handle_deliver_only(prompt, payload, route_config, route_name, event_type, delivery_id)
+        return await self._dispatch_agent_run(request, route_config, route_name, profile, payload, prompt, event_type,
                                         delivery_id, now)
 
-    def _dispatch_agent_run(self, request, route_config: dict, route_name: str, profile, payload: Any, prompt: str,
+    async def _dispatch_agent_run(self, request, route_config: dict, route_name: str, profile, payload: Any, prompt: str,
                             event_type: str, delivery_id: str, now: float) -> "web.Response":
-        """Spawn the agent run for one POST and return 202 immediately."""
-        logger.info("[webhook] %s event=%s route=%s prompt_len=%d delivery=%s", request.method, event_type, route_name,
-                    len(prompt), delivery_id)
-        self._spawn_agent_run(payload, prompt, delivery_id, now, route_config=route_config, route_name=route_name,
-                              profile=profile, event_type=event_type)
-        return web.json_response({"status": "accepted", "route": route_name, "event": event_type,
-                                  "delivery_id": delivery_id}, status=202)
-
-    def _spawn_agent_run(self, payload: Any, prompt: str, delivery_id: str, now: float, *, route_config: dict,
-                         route_name: str, profile, event_type: str) -> "asyncio.Task":
-        """Record delivery info and fire the agent run (shared by the immediate and coalesced paths)."""
+        """Acknowledge only after the authority commits the immutable delivery."""
         # delivery_id in the session key → concurrent webhooks on one route get independent runs.
         session_chat_id = f"webhook:{route_name}:{delivery_id}"
         # ``profile`` rides along so the reply leg (``send`` → ``_deliver_cross_platform``) egresses through
@@ -665,13 +655,17 @@ class WebhookAdapter(BasePlatformAdapter):
         if profile and isinstance(profile, str):
             source.profile = profile
         event = MessageEvent(text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload,
-                             message_id=delivery_id)
-        # The per-delivery session is closed by ``on_processing_complete`` once the run finishes
-        # (``handle_message`` is fire-and-forget, so nothing can be closed here).
-        task = asyncio.create_task(self.handle_message(event))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-        return task
+                             message_id=delivery_id, timestamp=datetime.fromtimestamp(0, timezone.utc))
+        logger.info("[webhook] %s event=%s route=%s prompt_len=%d delivery=%s", request.method, event_type, route_name,
+                    len(prompt), delivery_id)
+        from gateway.platforms.webhook_ingress import admit_producer
+        try:
+            await admit_producer(self, event)
+        except Exception:
+            logger.exception("[webhook] Durable admission failed for %s", delivery_id)
+            return _json_error("Admission unavailable; retry this delivery", 503)
+        return web.json_response({"status": "accepted", "route": route_name, "event": event_type,
+                                  "delivery_id": delivery_id}, status=202)
 
     async def on_processing_complete(self, event: "MessageEvent", outcome: Any) -> None:
         """Close the one-shot per-delivery session: ``prune_sessions`` only reaps rows with ``ended_at`` set, so
