@@ -77,7 +77,9 @@ def probe(tmp_path):
                 snapshot = await rpc(ws, 'session.resume', session_id=sessions[name])
                 assert 'result' in snapshot, snapshot
                 history = json.dumps(snapshot['result']['messages'])
-                assert 'RECOVERY_ACK_RECOVER_' + name.upper() in history, history
+                assert any(m['role'] == 'assistant' and m.get('content', '').startswith('RECOVERY_ACK_')
+                           and m['content'].endswith('RECOVER_' + name.upper())
+                           for m in snapshot['result']['messages']), history
                 assert ('RECOVERY_ACK_WARM_HISTORY' in history) == (name == 'safe'), history
                 assert 'RESET_OLD' not in history, history
                 same = await rpc(ws, 'session.create', **params[name])
@@ -115,10 +117,18 @@ def probe(tmp_path):
             # A same-origin fork and a copied receipt do not gain the root's authority.
             sessions['fork'] = 'unrelated-fork'
             db.execute("""INSERT INTO sessions(id,source,parent_session_id,model_config,chat_id,user_id,session_key,started_at)
-                SELECT ?,source,id,'{"_branch":true}',chat_id,user_id,session_key,started_at FROM sessions WHERE id=?""",
+                SELECT ?,source,id,'{"_branched_from":"fixture-parent"}',chat_id,user_id,session_key,started_at FROM sessions WHERE id=?""",
                 (sessions['fork'], targets['safe']))
             db.execute('INSERT INTO state_meta(key,value) SELECT ?,value FROM state_meta WHERE key=?',
                        ('gateway.local_policy.v1:' + sessions['fork'], 'gateway.local_policy.v1:' + sessions['safe']))
+            from gateway.session_admission import admission_fingerprint
+            payload = {'text': 'FORK_QUEUE'}
+            digest = admission_fingerprint(canonical_target=sessions['fork'], payload={'input': payload, 'intent': 'queue'})
+            db.execute('''INSERT INTO session_admissions(admission_id,request_id,principal_id,target_session_id,
+                lineage_json,payload_json,payload_digest,intent,status,owner_epoch)
+                SELECT 'fork-admission','fork',principal_id,?,?,?,?,intent,'queued',owner_epoch
+                FROM session_admissions WHERE request_id='safe' ''',
+                (sessions['fork'], json.dumps([sessions['fork']]), json.dumps(payload), digest))
         cfg['model']['default'] = 'changed-default'
         cfg['platform_toolsets']['cli'] = ['terminal']
         (home / 'config.yaml').write_text(json.dumps(cfg))
@@ -127,17 +137,19 @@ def probe(tmp_path):
                 pids.append(proc.pid); epochs.append(desc['authority_epoch'])
                 asyncio.run(recovered(desc))
                 assert db_rows() == {'warm-safe': 'terminal', 'warm-reset': 'terminal', 'started': 'unknown',
-                                     'follower': 'queued', 'reset': 'terminal', 'foreign': 'queued', 'safe': 'terminal'}
+                                     'follower': 'queued', 'reset': 'terminal', 'foreign': 'queued', 'fork': 'queued', 'safe': 'terminal'}
         assert all(route_targets[name] == targets[name] for name in ('safe', 'reset', 'unknown')), route_targets
         assert all(targets[name] != sessions[name] for name in ('safe', 'reset', 'unknown')), targets
-        texts = [next((m.get('content') for m in reversed(r['messages']) if m['role'] == 'user'), '') for r in peer.requests]
+        raw_texts = [next((m.get('content') for m in reversed(r['messages']) if m['role'] == 'user'), '') for r in peer.requests]
+        # The production restart note may precede the newly admitted text; retain it in the receipt.
+        texts = [text.rsplit('\n\n', 1)[-1] for text in raw_texts]
         assert sorted(texts) == sorted(['WARM_HISTORY', 'RESET_OLD', 'BLOCK_STARTED', 'RECOVER_SAFE', 'RECOVER_RESET']), texts
         for name in ('safe', 'reset'):
-            request = next(r for r in peer.requests if any(m.get('content') == 'RECOVER_' + name.upper() for m in r['messages']))
+            request = next(r for r in peer.requests if any(isinstance(m.get('content'), str) and m['content'].endswith('RECOVER_' + name.upper()) for m in r['messages']))
             assert request['model'] == params[name]['model'] and not request.get('tools')
             assert params[name]['cwd'] in json.dumps(request['messages']), request['messages']
         return {'pids': pids, 'epochs': epochs, 'logical_ids': sessions, 'physical_targets': targets,
-                'inference_texts': texts, 'stable_receipts': True, 'policy_cwd_history_retained': True,
+                'inference_texts': texts, 'raw_inference_texts': raw_texts, 'stable_receipts': True, 'policy_cwd_history_retained': True,
                 'unknown_not_replayed': True, 'foreign_and_fork_refused': True}
     finally:
         peer.release.set()

@@ -107,8 +107,11 @@ async def test_local_lineage_transitions_preserve_owner_or_roll_back(tmp_path, m
     foreign = Principal('foreign', 'fixture', actor.capabilities, 'foreign')
     with pytest.raises(RuntimeStoreError, match='permission_denied'):
         await restarted.attach(foreign, ref)
+    wrong_profile = Principal('owner', 'other-profile', actor.capabilities, 'other-profile')
+    with pytest.raises(RuntimeStoreError, match='profile_mismatch'):
+        await restarted.attach(wrong_profile, ref)
     db.create_session('unrelated-fork', source='gui', parent_session_id='compressed-again',
-                      model_config={'_branch': True}, chat_id=live.source.chat_id,
+                      model_config={'_branched_from': 'compressed-again'}, chat_id=live.source.chat_id,
                       user_id=actor.subject, session_key=live.route)
     with pytest.raises(RuntimeStoreError, match='storage_unavailable'):
         await restarted.attach(actor, SessionRef('fixture', 'unrelated-fork'))

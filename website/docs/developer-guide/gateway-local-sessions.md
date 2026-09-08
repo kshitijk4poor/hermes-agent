@@ -12,7 +12,9 @@ A server-authenticated identity with `session:create` can call:
 
 The result preserves `session_id`, `stored_session_id`, `messages`, `message_count`, and
 `info`, and includes the authority's normal resume snapshot fields. Both session IDs are
-the same persisted ID. Creation is lazy with respect to the agent, but reserves the real
+the same stable persisted **logical** ID. Compression and reset may rotate the private
+physical transcript target without changing either client ID. Creation is lazy with respect
+to the agent, but reserves the real
 SessionDB/SessionStore identity before returning. One canonical SQLite transaction commits
 the session row, route, and private `gateway.local_policy.v1:<stored-id>` creation receipt.
 Repeating the request ID for the same principal and profile reuses that identity and frozen
@@ -63,9 +65,21 @@ pending approval alive. A new viewer can resume the same identity and answer thr
 - Never-started queued local inputs resume through the same authority FIFO after bootstrap
   readiness. Interrupted started inputs become `unknown`, are never replayed, and pause
   their followers. Reattachment can inspect the unknown snapshot without running it.
-- Reset/compression identity migration remains separate integration work. A creation receipt
-  cannot authorize a different compression successor; recovery currently pauses that route
-  instead of silently selecting a different stored session or inheriting a default policy.
+- Compression publication atomically advances the receipt's private `entry.session_id` and
+  route alongside the child transcript. The receipt retains its creation `session_id`, policy,
+  principal/profile binding, and explicit approved `lineage`. Recovery validates compression
+  steps with the existing canonical child selector and reset steps with the existing
+  `_reset_from` boundary; it never adopts arbitrary forks or copied foreign receipts.
+- The canonical SessionStore local reset commits the new row, old-row closure, receipt and
+  route before changing the in-memory entry. Reset deliberately starts empty history while
+  preserving the frozen launch policy and queued admission owner. It does not replay an
+  interrupted execution or cancel later accepted inputs. Creating an independent conversation
+  still uses `session.create` with a new request ID; this is not a new revision-fenced reset RPC
+  or a change to the multi-view `/new` contract.
+- Admission targets, digests, claim generations, subscriber identity and uncertain outcomes
+  remain on the stable logical row. Thus lost-ACK retries keep their existing receipts after
+  either transition, and shared controls/stream callbacks keep the same execution owner.
+  Clients continue resuming the creation ID, not an internal physical continuation ID.
 
 ## Verification
 
@@ -95,3 +109,14 @@ held after its real claim. Fresh daemons execute only the authorized queued inpu
 history/source/model/toolsets despite changed defaults, and refuse unknown, foreign,
 missing and corrupt policy cases. A further restart executes nothing twice. All inference
 is loopback-only; this is not native launcher or compression-transfer evidence.
+
+`tests/gateway/test_local_session_lineage.py` adds rollback and isolation invariants, plus
+three separate ordinary daemon processes. Its first-process fixture invokes the production
+agent rotation publication on the real cached AIAgent and the production SessionStore reset,
+then kills the daemon after a durable queued admission. Cold unmodified daemons preserve
+compressed history, reset's empty-history boundary, policy/cwd, admission identities and
+unknown-state blocking. Unrelated fork work and foreign receipts stay unclaimed. The model
+peer verifies recovered cwd in the actual prompt and frozen model/toolsets; this fixture does
+not execute a post-restart cwd tool effect, generate a compression summary, or exercise a
+native launcher. It proves the production publication/recovery boundary, not those separate
+surfaces.
