@@ -337,7 +337,8 @@ class TestWebServerEndpoints:
         assert self.client.get("/api/sessions?limit=1&offset=0").status_code == 500
 
 
-    def test_get_sessions_auto_archive_uses_maintenance_writer(self):
+    def test_get_sessions_leaves_auto_archive_to_owner(self):
+        from hermes_cli import web_server
         from hermes_cli.config import load_config, save_config
         from hermes_constants import get_hermes_home
         from hermes_state import SessionDB
@@ -368,25 +369,28 @@ class TestWebServerEndpoints:
         response = self.client.get("/api/sessions?limit=50&offset=0")
 
         assert response.status_code == 200
-        assert [row["id"] for row in response.json()["sessions"]] == ["fresh"]
+        assert {row["id"] for row in response.json()["sessions"]} == {"fresh", "stale"}
         verify = SessionDB(db_path=db_path, read_only=True)
         try:
-            assert verify.get_session("stale")["archived"] == 1
-            assert verify.get_meta("last_auto_archive")
+            assert verify.get_session("stale")["archived"] == 0
+            assert not verify.get_meta("last_auto_archive")
         finally:
             verify.close()
 
-    def test_get_sessions_fresh_store_returns_empty_list(self):
+    def test_get_sessions_missing_store_is_unavailable_without_creation(self):
+        from hermes_constants import get_hermes_home
+
+        before = set(get_hermes_home().glob("state.db*"))
         response = self.client.get("/api/sessions?limit=50&offset=0")
 
-        assert response.status_code == 200
-        assert response.json()["sessions"] == []
-        assert response.json()["total"] == 0
+        assert response.status_code == 503
+        assert "not initialized" in response.json()["detail"]
+        assert set(get_hermes_home().glob("state.db*")) == before
 
     @pytest.mark.parametrize(
         "missing_column", ["archived", "pinned", "last_activity_at"]
     )
-    def test_get_sessions_heals_stale_schema_store(self, missing_column):
+    def test_get_sessions_reports_stale_schema_without_healing(self, missing_column):
         import sqlite3
 
         from hermes_constants import get_hermes_home
@@ -409,12 +413,12 @@ class TestWebServerEndpoints:
         finally:
             legacy.close()
 
+        before = db_path.read_bytes()
         response = self.client.get("/api/sessions?limit=50&offset=0")
 
-        assert response.status_code == 200
-        assert [row["id"] for row in response.json()["sessions"]] == [
-            "stale-schema"
-        ]
+        assert response.status_code == 503
+        assert "schema" in response.json()["detail"]
+        assert db_path.read_bytes() == before
         healed = sqlite3.connect(str(db_path))
         try:
             columns = {
@@ -422,17 +426,10 @@ class TestWebServerEndpoints:
             }
         finally:
             healed.close()
-        assert missing_column in columns
+        assert missing_column not in columns
 
-    def test_profiles_sidebar_heals_stale_schema_store(self):
-        """The desktop's batched sidebar route must heal a stale store too.
-
-        The shipped regression (#72424 aftermath): a store predating
-        ``sessions.last_activity_at`` made every per-profile read raise
-        "no such column", which this endpoint swallowed into its ``errors``
-        array — the desktop rendered "No sessions yet" after `hermes update`
-        until the user's first message forced a writable open elsewhere.
-        """
+    def test_profiles_sidebar_reports_stale_schema_store(self):
+        """Aggregation reports unavailable profiles instead of healing their DBs."""
         import sqlite3
 
         from hermes_constants import get_hermes_home
@@ -460,10 +457,9 @@ class TestWebServerEndpoints:
 
         assert response.status_code == 200
         payload = response.json()
-        assert payload["errors"] == []
-        assert [row["id"] for row in payload["recents"]["sessions"]] == [
-            "sidebar-stale"
-        ]
+        assert payload["errors"]
+        assert "schema" in payload["errors"][0]["error"]
+        assert payload["recents"]["sessions"] == []
 
     def test_startup_eager_reconcile_heals_stale_store(self):
         """The lifespan's eager reconcile brings a stale store current.
@@ -550,70 +546,27 @@ class TestWebServerEndpoints:
             raise sqlite3_module.OperationalError("database is locked")
 
         monkeypatch.setattr(hermes_state, "SessionDB", boom)
-        # Must swallow — reads fall back to the per-poll probe heal.
+        # Must swallow — reads report unavailable until owner recovery.
         _web_server_lifecycle._eager_reconcile_own_session_db()
 
-    def test_heal_gives_up_when_reconcile_cannot_fix_the_store(self, monkeypatch):
-        """A probe failure reconciliation can't cure must not retry forever.
-
-        The writable heal is a full SessionDB init against a possibly-live
-        DB. If the store is STILL behind the probe afterwards (schema problem
-        ADD COLUMN can't express), retrying that init on every sidebar poll
-        would hammer the DB for nothing: serve reads probe-less instead, warn
-        once, and never pay the writable open for that store again.
-        """
+    def test_failed_schema_probes_never_escalate_reads(self, monkeypatch):
+        from fastapi import HTTPException
         from hermes_constants import get_hermes_home
         from hermes_state import SessionDB
 
         db_path = get_hermes_home() / "state.db"
         seed = SessionDB(db_path=db_path)
-        try:
-            seed.create_session("unfixable", source="cli")
-        finally:
-            seed.close()
-
-        # A column no SCHEMA_SQL declares: the heal's writable reconcile
-        # cannot add it, so the re-probe keeps failing.
+        seed.create_session("unfixable", source="cli")
+        seed.close()
         monkeypatch.setattr(
-            _web_server_sessions,
-            "_session_db_read_probe_statements",
-            lambda: ('SELECT "sessions"."not_a_real_column" FROM "sessions" LIMIT 0',),
-        )
-        monkeypatch.setattr(_web_server_sessions, "_session_db_heal_exhausted", set())
-        monkeypatch.setattr(_web_server_sessions, "_session_db_heal_warned", set())
-
-        writable_opens = []
-
-        import hermes_state
-
-        original_init = hermes_state.SessionDB.__init__
-
-        def counting_init(self, *args, **kwargs):
-            if not kwargs.get("read_only", False):
-                writable_opens.append(1)
-            return original_init(self, *args, **kwargs)
-
-        # web_server imports SessionDB inside the function body, so patching
-        # the class on hermes_state covers every open the helper makes.
-        monkeypatch.setattr(hermes_state.SessionDB, "__init__", counting_init)
-
-        # First open: probe fails -> one writable heal -> re-probe fails ->
-        # exhausted. Still returns a usable read-only handle.
-        db = _web_server_sessions._open_session_db_for_profile(None, read_only=True)
-        try:
-            assert db.list_sessions_rich(limit=10, compact_rows=True)
-        finally:
-            db.close()
-        assert len(writable_opens) == 1
-        assert str(db_path) in _web_server_sessions._session_db_heal_exhausted
-
-        # Second open: probe skipped, NO further writable opens.
-        db = _web_server_sessions._open_session_db_for_profile(None, read_only=True)
-        try:
-            assert db.list_sessions_rich(limit=10, compact_rows=True)
-        finally:
-            db.close()
-        assert len(writable_opens) == 1
+            _web_server_sessions, "_session_db_read_probe_statements",
+            lambda: ('SELECT "sessions"."not_a_real_column" FROM "sessions" LIMIT 0',))
+        before = db_path.read_bytes()
+        for _ in range(2):
+            with pytest.raises(HTTPException, match="schema") as caught:
+                _web_server_sessions._open_session_db_for_profile(None, read_only=True)
+            assert caught.value.status_code == 503
+            assert db_path.read_bytes() == before
 
     def test_generic_corruption_does_not_trigger_writable_heal(
         self, tmp_path, monkeypatch
@@ -633,41 +586,30 @@ class TestWebServerEndpoints:
 
         monkeypatch.setattr(hermes_state, "SessionDB", corrupt_open)
 
-        with pytest.raises(sqlite3.DatabaseError, match="disk image is malformed"):
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException, match="corrupt"):
             _web_server_sessions._open_session_db_at_path(db_path, read_only=True)
 
         assert opens == [True]
 
-    def test_decode_error_triggers_writable_heal(self, tmp_path, monkeypatch):
-        """UnicodeDecodeError — pysqlite failing to decode SQLite's own error
-        message over corrupt file bytes (#98924) — must route through the
-        same one-writable-open heal as malformed schema."""
+    def test_decode_error_never_triggers_writable_heal(self, tmp_path, monkeypatch):
         import hermes_state
+        from fastapi import HTTPException
 
         db_path = tmp_path / "state.db"
         db_path.write_bytes(b"not-empty")
         opens = []
 
-        class _OkDB:
-            _conn = None
-
-            def close(self):
-                pass
-
-        def scripted_open(*_args, **kwargs):
+        def corrupt_open(*_args, **kwargs):
             opens.append(kwargs.get("read_only", False))
-            if opens == [True]:
-                raise UnicodeDecodeError("utf-8", b"\x81", 0, 1, "invalid start byte")
-            return _OkDB()
+            raise UnicodeDecodeError("utf-8", b"\x81", 0, 1, "invalid start byte")
 
-        monkeypatch.setattr(hermes_state, "SessionDB", scripted_open)
+        monkeypatch.setattr(hermes_state, "SessionDB", corrupt_open)
+        with pytest.raises(HTTPException, match="corrupt"):
+            _web_server_sessions._open_session_db_at_path(db_path, read_only=True)
+        assert opens == [True]
 
-        db = _web_server_sessions._open_session_db_at_path(db_path, read_only=True)
-
-        assert isinstance(db, _OkDB)
-        assert opens == [True, False, True]
-
-    def test_get_sessions_zero_byte_store_returns_empty_list(self):
+    def test_get_sessions_zero_byte_store_is_not_quarantined(self):
         from hermes_constants import get_hermes_home
 
         db_path = get_hermes_home() / "state.db"
@@ -676,11 +618,11 @@ class TestWebServerEndpoints:
 
         response = self.client.get("/api/sessions?limit=50&offset=0")
 
-        assert response.status_code == 200
-        assert response.json()["sessions"] == []
-        assert response.json()["total"] == 0
+        assert response.status_code == 503
+        assert db_path.read_bytes() == b""
+        assert set(db_path.parent.glob("state.db*")) == {db_path}
 
-    def test_concurrent_first_load_reads_all_succeed_on_fresh_store(self):
+    def test_concurrent_first_load_reads_report_uninitialized_store(self):
         from concurrent.futures import ThreadPoolExecutor
 
         paths = [
@@ -692,9 +634,7 @@ class TestWebServerEndpoints:
         with ThreadPoolExecutor(max_workers=8) as pool:
             responses = list(pool.map(self.client.get, paths))
 
-        assert [response.status_code for response in responses] == [
-            200
-        ] * len(paths)
+        assert [response.status_code for response in responses] == [503] * len(paths)
 
 
     def test_messaging_platforms_profile_scopes_gateway_reads(self, monkeypatch):

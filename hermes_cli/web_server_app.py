@@ -31,7 +31,7 @@ async def standalone_lifespan(app: "FastAPI"):
 
     # Bring state.db schema current BEFORE the first session-list poll
     # (#79531/#80037): a store left behind by `hermes update` otherwise 500s
-    # every poll while the read-probe heal loses to sibling lock contention.
+    # every poll until its owner completes schema reconciliation.
     # Daemon thread so a locked store never delays the socket (Desktop
     # ready-probe times out at 10s, GH-73083).
     threading.Thread(
