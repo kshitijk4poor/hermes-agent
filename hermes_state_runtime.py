@@ -192,7 +192,7 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
         raise RuntimeStoreError('invalid_params')
     # Snapshot caller data before waiting for the writer lock.
     payload = json.loads(_json(payload))
-    key = 'gateway.session_mutation.v1.' + admission_fingerprint(
+    key = 'gateway.mutation.v1.' + admission_fingerprint(
         canonical_target=session_id, payload={'principal': principal_id, 'request': request_id})
     digest = admission_fingerprint(canonical_target=session_id, payload={
         'operation': operation, 'payload': payload, 'expected_revision': expected_revision})
@@ -207,7 +207,7 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
             return receipt['result']
         session = _session(conn, session_id)
         if session['runtime_revision'] != expected_revision:
-            raise RuntimeStoreError('stale_revision')
+            raise RuntimeStoreError('revision_conflict')
         if operation == 'rename':
             affected = db._set_session_title_in_transaction(
                 conn, session_id, payload['title'], source=db.TITLE_SOURCE_USER)

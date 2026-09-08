@@ -22,11 +22,11 @@ def test_mutation_receipt_fences_replay_revision_and_epoch(tmp_path, operation, 
         assert db.get_session('s')['runtime_revision'] == 1
         with pytest.raises(rt.RuntimeStoreError, match='admission_conflict'):
             mutate(db, **{**args, 'expected_revision': 1})
-        with pytest.raises(rt.RuntimeStoreError, match='stale_revision'):
+        with pytest.raises(rt.RuntimeStoreError, match='revision_conflict'):
             mutate(db, **{**args, 'request_id': 'other'})
         peer = SessionDB(db_path=tmp_path / 'state.db')
         try:
-            with pytest.raises(rt.RuntimeStoreError, match='stale_revision'):
+            with pytest.raises(rt.RuntimeStoreError, match='revision_conflict'):
                 mutate(peer, **{**args, 'request_id': 'peer'})
             later = mutate(peer, **{**args, 'request_id': 'peer', 'expected_revision': 1})
             assert later['revision'] == 2
@@ -56,7 +56,7 @@ def test_mutation_rules_and_receipt_failure_are_atomic(tmp_path, operation, payl
         assert callable(mutate), 'revision-fenced mutation operation missing'
         args = dict(epoch=epoch, principal_id='human', session_id='s', request_id='edit', expected_revision=0, operation=operation, payload=payload)
         before = db.get_session('s')
-        db._execute_write(lambda c: c.execute("CREATE TRIGGER refuse_receipt BEFORE INSERT ON state_meta WHEN NEW.key LIKE 'gateway.session_mutation.%' BEGIN SELECT RAISE(ABORT, 'receipt refused'); END"))
+        db._execute_write(lambda c: c.execute("CREATE TRIGGER refuse_receipt BEFORE INSERT ON state_meta WHEN NEW.key LIKE 'gateway.mutation.%' BEGIN SELECT RAISE(ABORT, 'receipt refused'); END"))
         with pytest.raises(sqlite3.IntegrityError, match='receipt refused'):
             mutate(db, **args)
         assert db.get_session('s') == before
