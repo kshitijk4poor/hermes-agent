@@ -327,6 +327,7 @@ def resolve_unknown_session_input(db, *, epoch: int, admission_id: str, generati
         row = _admission(conn, admission_id)
         if type(generation) is not int or row['status'] != 'unknown' or row['generation'] != generation:
             raise RuntimeStoreError('stale_generation')
+        conn.execute("UPDATE worker_executions SET status='terminal' WHERE session_id=? AND generation=? AND owner_epoch=?", (row['target_session_id'], generation, row['owner_epoch']))
         conn.execute("UPDATE session_admissions SET status='terminal',outcome='interrupted' WHERE admission_id=?", (admission_id,))
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
         return _row(_admission(conn, admission_id))
