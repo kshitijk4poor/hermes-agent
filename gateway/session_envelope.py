@@ -4,7 +4,7 @@ Ordinary context and local media are retained without serializing delegated trus
 Multiplex callbacks bind current connector ownership; roles require fresh preflight.
 Upstream-relay delegation remains unsupported.
 """
-from copy import deepcopy
+from copy import copy, deepcopy
 from datetime import datetime
 
 from gateway.platforms.event import MessageEvent, MessageType
@@ -73,7 +73,9 @@ async def prepare_native(runner, event):
     from gateway.session_ingress_context import capture_provenance, reauthorize_roles
     provenance = capture_provenance(runner, event)
     # Freeze caller-owned identity and content before the first network yield.
-    frozen = replace(event, source=replace(event.source))
+    # Preserve dynamic trust fields too: validation must reject forged ones,
+    # not silently discard them while freezing the caller's source identity.
+    frozen = replace(event, source=copy(event.source))
     fresh_roles = await reauthorize_roles(runner, frozen.source, provenance)
     return _snapshot_native(runner, frozen, provenance, fresh_roles)
 
