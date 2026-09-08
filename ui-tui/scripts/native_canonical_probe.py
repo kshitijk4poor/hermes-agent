@@ -191,6 +191,21 @@ def run():
             second[0].terminate()
             first[0].wait(timeout=5)
             second[0].wait(timeout=5)
+            # A reconnect must recover committed history, not win a race with
+            # the last live delta. Wait on the real authority's settled snapshot.
+            async def settled_snapshot():
+                g = grant()
+                async with connect(g['url'], subprotocols=g['protocols']) as ws:
+                    async with asyncio.timeout(15):
+                        while True:
+                            snapshot = await rpc(ws, 'session.resume', session_id=sid)
+                            if not snapshot['running']:
+                                return snapshot
+                            await asyncio.sleep(.05)
+            snapshot = asyncio.run(settled_snapshot())
+            (Path(sys.argv[1]) / 'settled-snapshot.json').write_text(json.dumps(snapshot, indent=2))
+            receipts['settled_history_has_reply'] = expected.decode() in json.dumps(snapshot['messages'])
+            assert receipts['settled_history_has_reply']
             third = launch('reconnected', sid)
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline and expected not in third[2]:
