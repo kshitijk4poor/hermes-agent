@@ -359,9 +359,9 @@ async def loop_heartbeat_forever(
     # loopback transport when AF_UNIX is unavailable or the encoded address will not fit;
     # consumers already discover this port in the heartbeat, independent of their TMPDIR.
     from gateway.control_socket import _fits_sun_path
-    unix_path = get_loop_tick_socket_path(home) if os.name == "posix" else None
     tick_server = tick_socket_path = tick_tcp_port = None
     try:
+        unix_path = get_loop_tick_socket_path(home) if os.name == "posix" else None
         if unix_path is not None and _fits_sun_path(unix_path):
             tick_socket_path = unix_path
             tick_socket_path.parent.mkdir(parents=True, exist_ok=True)

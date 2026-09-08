@@ -87,7 +87,13 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
 
     # A normal-path control, not a substitute for the deliberately long cases.
     with tempfile.TemporaryDirectory(prefix='hgw-') as short:
-        home = Path(short) if layout == 'normal' else tmp_path / ('界' * 60 if layout == 'unicode' else 'x' * 120)
+        if layout == 'normal':
+            home = Path(short)
+        elif layout == 'unicode':
+            # The character count fits even though the encoded tick address does not.
+            home = Path(short) / ('界' * 20)
+        else:
+            home = tmp_path / ('x' * 120)
         home.mkdir(mode=0o700, exist_ok=True)
         user = tmp_path / 'user'
         user.mkdir()
@@ -124,6 +130,7 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
                 assert descriptor.get('state') == 'ready', (descriptor, log.read())
                 assert descriptor['pid'] == process.pid
                 control_path = resolve_client_socket_path(home)
+                assert control_path is not None
                 assert control_path.stat().st_mode & 0o077 == 0
                 if control_path.parent != home:
                     assert control_path.parent.stat().st_mode & 0o077 == 0
@@ -132,7 +139,9 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
                 while not heartbeat.exists() and time.monotonic() < deadline:
                     time.sleep(.05)
                 payload = json.loads(heartbeat.read_text())
+                tick_path = get_loop_tick_socket_path(home, process.pid)
                 receipt = {'layout': layout, 'home_bytes': len(os.fsencode(home)),
+                           'tick_chars': len(str(tick_path)), 'tick_bytes': len(os.fsencode(tick_path)),
                            'control': str(control_path), 'created_session': sid,
                            'loop_tick_socket': payload['loop_tick_socket'],
                            'loop_tick_tcp_port': payload['loop_tick_tcp_port']}
@@ -155,7 +164,7 @@ def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
                         peer.settimeout(2)
                         assert peer.connect_ex(address) != 0
                 else:
-                    assert not Path(address).exists()
+                    assert not get_loop_tick_socket_path(home, process.pid).exists()
             finally:
                 if process.poll() is None:
                     process.terminate()
