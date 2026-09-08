@@ -321,11 +321,9 @@ class SessionCompressionMixin:
                 "WHERE id = ? AND ended_at IS NULL", (time.time(), parent_session_id))
             if updated.rowcount != 1:
                 raise RuntimeError(f"Compression parent changed during publication: {parent_session_id}")
-            if parent["archived"]:
-                # A live continuation under an idle-sweep archive re-activates the chat; after the
-                # closure above the child is linked into the lineage walk (#117713).
-                self._unarchive_auto_archived_lineage(conn, child_session_id)
-        self._execute_transcript_write(_do, messages)
+            from hermes_state_local_lineage import advance_local_target
+            advance_local_target(conn, parent_session_id, child_session_id)
+        self._execute_write(_do)
 
     def _write_sql_logged(self, op: str, session_id: str, sql: str, params) -> None:
         """``_write_sql`` that logs (never raises) on ``sqlite3.Error``."""

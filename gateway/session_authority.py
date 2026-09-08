@@ -95,6 +95,7 @@ class SessionAuthority:
     async def attach(self, actor, ref):
         self.authorize(actor, ref, 'session:read')
         live = self.sessions[ref.session_id]
+        from gateway.session_local_recovery import local_history
         with live.event_stream.lock:
             subscription = next((key for key, member in live.subscribers.items()
                                  if member == actor), None) or uuid.uuid4().hex
@@ -107,7 +108,7 @@ class SessionAuthority:
             prompts = live.controls.snapshot(ref.session_id, active_generation)
             epoch, sequence = live.event_stream.watermark()
             return SubscriptionSnapshot(subscription, handle, epoch,
-                                        sequence, tuple(self.db.get_messages_as_conversation(ref.session_id)),
+                                        sequence, tuple(local_history(self, ref)),
                                         tuple(self._pending_receipt(r) for r in list_session_admissions(
                                             self.db, session_id=ref.session_id)), prompts)
 
@@ -352,6 +353,7 @@ async def initialize_session_authority(runner, *, profile_id, instance_id):
     recover_session_inputs(db, epoch=epoch)
     authority = SessionAuthority(runner, profile_id=profile_id, instance_id=instance_id, db=db, epoch=epoch)
     runner.session_authority = authority
+    runner.session_store._local_authority_epoch = epoch
     from gateway.session_local_recovery import recover_local_sessions
     recover_local_sessions(authority)
     return authority

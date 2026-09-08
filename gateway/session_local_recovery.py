@@ -34,15 +34,16 @@ def restore_local_session(authority, sid):
             raise ValueError('route mismatch')
         policy = restore_policy(receipt['policy'])
         entry = SessionEntry.from_dict(receipt['entry'])
-        if (entry.session_id != sid or entry.session_key != route
+        target = entry.session_id
+        if (entry.session_key != route
                 or entry.origin.to_dict() != source.to_dict()):
             raise ValueError('entry mismatch')
-        row = authority.db.get_session(sid)
+        row = authority.db.get_session(target)
         if row is None or (row['session_key'], row['chat_id'], row['user_id']) != (route, chat_id, source.user_id):
             raise ValueError('stored identity mismatch')
-        if authority.db.get_compression_chain(sid)[-1] != sid:
-            # A creation receipt cannot authorize a different execution target.
-            raise RuntimeStoreError('storage_unavailable')
+        from hermes_state_local_lineage import validate_local_lineage
+        with authority.db._read_ctx() as conn:
+            validate_local_lineage(conn, receipt)
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         if isinstance(exc, RuntimeStoreError):
             raise
@@ -58,7 +59,7 @@ def restore_local_session(authority, sid):
         with store._lock:
             store._ensure_loaded_locked()
             current = store._entries.get(route)
-            if current is not None and current.session_id != sid:
+            if current is not None and current.session_id != target:
                 raise RuntimeStoreError('admission_conflict')
             entry.origin = source
             store._entries[route] = entry
@@ -69,7 +70,34 @@ def restore_local_session(authority, sid):
           or live.source.to_dict() != source.to_dict()
           or adapter.policies.get(chat_id) != policy):
         raise RuntimeStoreError('storage_unavailable')
+    else:
+        with store._lock:
+            current = store._entry_locked(route)
+            if current is None or current.session_id not in receipt.get('lineage', [sid]):
+                raise RuntimeStoreError('admission_conflict')
+            current.session_id = target
     return SessionRef(authority.profile_id, sid)
+
+
+def local_history(authority, ref):
+    live = authority.sessions[ref.session_id]
+    target = ref.session_id
+    if live.source is not None and live.source.platform == Platform.LOCAL:
+        restore_local_session(authority, ref.session_id)
+        target = local_receipt(authority.db, ref.session_id)['entry']['session_id']
+    return authority.db.get_messages_as_conversation(target)
+
+
+def reset_local_session(store, old_entry, session_id, now, display_name):
+    from hermes_state_local_lineage import reset_local_target
+    entry = SessionEntry(old_entry.session_key, session_id, now, now,
+        origin=old_entry.origin, platform=old_entry.platform, chat_type=old_entry.chat_type,
+        display_name=display_name if display_name is not None else old_entry.display_name,
+        is_fresh_reset=True)
+    reset_local_target(store._db_for_key(old_entry.session_key), epoch=store._local_authority_epoch,
+                       parent_session_id=old_entry.session_id, entry=entry.to_dict())
+    store._entries[old_entry.session_key] = entry
+    return entry
 
 
 def recover_local_sessions(authority, *, schedule=False):
