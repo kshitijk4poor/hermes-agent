@@ -32,12 +32,19 @@ before = path.read_bytes() if path.exists() else None
 assert _resolve_last_session(source='tui') == ('reader-fixture' if populated else None)
 assert _resolve_session_by_name_or_id('reader-fixture') == ('reader-fixture' if populated else None)
 _print_tui_exit_summary('reader-fixture')
+from hermes_cli.main_agent_cmds import cmd_insights
+from types import SimpleNamespace
+cmd_insights(SimpleNamespace(days=30, source='tui'))
 after = path.read_bytes() if path.exists() else None
 assert after == before, 'launch reader created or mutated state.db'
 '''.replace('POPULATED', repr(populated))
     result = subprocess.run([sys.executable, "-c", code], cwd=repo, env=env,
                             stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert 'Error generating insights:' not in result.stdout
     if populated:
+        assert 'Hermes Insights' in result.stdout
         assert 'Resume this session with:' in result.stdout
         assert 'Reader fixture' in result.stdout
+    else:
+        assert 'No sessions found in the last 30 days (source: tui).' in result.stdout
