@@ -22,7 +22,6 @@ import pytest
 def test_ensure_checks_effective_service_binding_before_start(tmp_path, monkeypatch, case, reason):
     from hermes_cli import gateway_runtime as runtime
     from hermes_cli.gateway_runtime_service import service_suffix
-    import pwd
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     home = tmp_path / (".hermes" if case == "default" else "custom root")
@@ -38,6 +37,13 @@ def test_ensure_checks_effective_service_binding_before_start(tmp_path, monkeypa
     configured = home
     if case in {"wrong_home", "dropin_home"}:
         configured = tmp_path / "unrequested"
+    if case == "wrong_home":
+        unit.write_text(f'[Service]\nEnvironment="HERMES_HOME={configured}"\n', encoding="utf-8")
+        original = unit.read_bytes()
+    if case == "dropin_home":
+        override = unit.parent / (unit.name + '.d') / 'override.conf'
+        override.parent.mkdir()
+        override.write_text(f'[Service]\nEnvironment="HERMES_HOME={configured}"\n', encoding="utf-8")
     if case == "alias":
         configured = tmp_path / "alias"
         configured.symlink_to(home, target_is_directory=True)
@@ -72,10 +78,8 @@ def test_ensure_checks_effective_service_binding_before_start(tmp_path, monkeypa
         # An older default install may rely on the user manager's HOME.
         props['Environment'] = 'HERMES_SUPERVISED_CHILD=1'
         manager_env = f'HOME={tmp_path}\n'
-    if case == "system":
-        props['User'] = pwd.getpwuid(os.getuid()).pw_name
     definition = tmp_path / "effective.json"
-    definition.write_text(json.dumps({'props': props, 'system': case == 'system', 'env': manager_env}), encoding="utf-8")
+    definition.write_text(json.dumps({'props': props, 'system': False, 'env': manager_env}), encoding="utf-8")
     calls = tmp_path / 'calls.jsonl'
     executable = tmp_path / 'inert-supervisor'
     executable.write_text('#!' + sys.executable + '\nimport json,sys\nfrom pathlib import Path\n'
@@ -96,8 +100,7 @@ def test_ensure_checks_effective_service_binding_before_start(tmp_path, monkeypa
     starts = [cmd for cmd in commands if 'start' in cmd]
     assert len(starts) == (1 if reason == 'deadline' else 0)
     assert all('--no-ask-password' in cmd for cmd in starts)
-    if case != 'system':
-        assert unit.read_bytes() == original
+    assert unit.read_bytes() == original
     assert not (home / 'logs').exists()
 
 

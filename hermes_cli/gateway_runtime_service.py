@@ -15,6 +15,7 @@ import plistlib
 import subprocess
 import sys
 import time
+from xml.parsers.expat import ExpatError
 
 from gateway.runtime_contract import RuntimeState
 from hermes_cli._subprocess_compat import windows_hide_flags
@@ -61,10 +62,10 @@ def _run(argv: list[str] | tuple[str, ...], deadline: float, *, encoding: str | 
                           creationflags=windows_hide_flags(), timeout=remaining(deadline))
 
 
-def _verify_binding(verify, *args, **kwargs) -> None:
+def _verify_binding(verify, *args, **kwargs):
     try:
-        verify(*args, **kwargs)
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+        return verify(*args, **kwargs)
+    except (ValueError, TypeError, KeyError, AttributeError, ExpatError) as exc:
         reason = str(exc)
         raise RuntimeStartError(reason if reason in {
             "profile_mismatch", "service_account_mismatch", "service_disabled"
@@ -158,7 +159,7 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
         _verify_binding(verify_launchd_loaded, loaded[0], home, uid=os.getuid(), username=account.pw_name)  # windows-footgun: ok — native launchd only
         return found[0]
     if installed:
-        definition = plistlib.loads(read_definition(plist))
+        definition = _verify_binding(plistlib.loads, read_definition(plist))
         _verify_binding(verify_launchd_plist, definition, label, home)
         # Load ONLY the existing file, never bootout/rewrite or kickstart -k.
         return ExistingService("launchd", ("launchctl", "bootstrap", domains[0], str(plist)))

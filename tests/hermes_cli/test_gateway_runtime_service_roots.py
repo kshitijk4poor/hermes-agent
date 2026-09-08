@@ -27,3 +27,12 @@ def test_service_start_does_not_decode_irrelevant_supervisor_output():
     from hermes_cli.gateway_runtime_service import ExistingService, start_existing_gateway_service
     service = ExistingService('systemd', (sys.executable, '-c', 'import sys; sys.stdout.buffer.write(bytes([255]))'))
     start_existing_gateway_service(service, deadline=time.monotonic() + 5)
+
+
+def test_malformed_installed_plist_has_a_bounded_refusal():
+    import plistlib
+    from hermes_cli.gateway_runtime_service import _verify_binding, RuntimeStartError
+    with pytest.raises(RuntimeStartError, match='service_identity_unverified'):
+        _verify_binding(plistlib.loads, b'<?xml version="1.0"?><plist><dict>')
+    definition = {'Label': 'ai.hermes.gateway'}
+    assert _verify_binding(plistlib.loads, plistlib.dumps(definition)) == definition
