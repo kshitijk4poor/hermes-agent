@@ -1205,6 +1205,7 @@ def cmd_sessions(args, sessions_parser=None):
         from hermes_constants import get_hermes_home
         path = get_hermes_home() / "state.db"
         empty_messages = {
+            "export": "No sessions found.",
             "list": "No sessions found.",
             "stats": "Total sessions: 0\nTotal messages: 0",
             "pinned": "[]" if getattr(args, "json", False) else

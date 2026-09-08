@@ -26,10 +26,11 @@ if POPULATED:
         db.create_session('observation-fixture', source='cli')
         db.append_message('observation-fixture', role='user', content='fixture')
 before = path.read_bytes() if path.exists() else None
-for action in ('list', 'stats', 'pinned'):
+for action in ('list', 'stats', 'pinned', 'export'):
     output = io.StringIO()
     with redirect_stdout(output):
-        result = cmd_sessions(SimpleNamespace(sessions_action=action, source=None, limit=20, json=True))
+        result = cmd_sessions(SimpleNamespace(sessions_action=action, source=None, limit=20, json=True,
+            session_id=None, redact=False, format='jsonl', output='-', dry_run=False))
     text = output.getvalue()
     assert result in (None, 0), text
     assert 'Error:' not in text, text
@@ -39,6 +40,8 @@ for action in ('list', 'stats', 'pinned'):
         assert ('Total sessions: 1' if POPULATED else 'Total sessions: 0') in text, text
     if action == 'pinned':
         assert text.strip() == '[]', text
+    if action == 'export':
+        assert ('observation-fixture' if POPULATED else 'No sessions found.') in text, text
     after = path.read_bytes() if path.exists() else None
     assert after == before, action + ' created or mutated state.db'
 '''.replace('POPULATED', repr(populated))
