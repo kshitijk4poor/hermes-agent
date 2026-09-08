@@ -350,7 +350,8 @@ def setup_gateway(config: dict):
     # mode (cron keeps running; adapters come up once tokens are added via `hermes import` /
     # `hermes setup gateway`). Gating it on messaging config left install-then-import machines
     # with cron jobs and bot tokens but no process to serve them.
-    from hermes_cli.gateway import _is_service_running, supports_systemd_services, ensure_gateway_service
+    from hermes_cli.gateway import _is_service_running, supports_systemd_services
+    from hermes_cli.gateway_setup_service import ensure_gateway_service
     supports_systemd = supports_systemd_services()
     print()
     if _is_service_running():

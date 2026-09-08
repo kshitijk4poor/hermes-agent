@@ -645,7 +645,7 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
             return
         # A skipped (migrated) gateway section still needs its service so imported platforms
         # and cron jobs become active.
-        from hermes_cli.gateway import ensure_gateway_service
+        from hermes_cli.gateway_setup_service import ensure_gateway_service
         ensure_gateway_service(context="setup")
 
     def _step(key: str, label: str, run) -> tuple:

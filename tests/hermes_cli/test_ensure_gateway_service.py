@@ -11,6 +11,7 @@ The helper's contract:
 """
 
 import hermes_cli.gateway as gateway_mod
+from hermes_cli.gateway_setup_service import ensure_gateway_service
 
 
 def _patch_host(monkeypatch, *, container=False, systemd=True, macos=False, windows=False):
@@ -26,14 +27,14 @@ class TestEnsureGatewayService:
         called = []
         monkeypatch.setattr(gateway_mod, "systemd_install", lambda **kw: called.append("install"))
 
-        assert gateway_mod.ensure_gateway_service() is False
+        assert ensure_gateway_service() is False
         assert not called
         out = capsys.readouterr().out
         assert "restart policy" in out
 
     def test_no_service_manager_is_noop(self, monkeypatch, capsys):
         _patch_host(monkeypatch, systemd=False)
-        assert gateway_mod.ensure_gateway_service() is False
+        assert ensure_gateway_service() is False
         out = capsys.readouterr().out
         assert "hermes gateway" in out
 
@@ -44,7 +45,7 @@ class TestEnsureGatewayService:
         monkeypatch.setattr(gateway_mod, "systemd_install", lambda **kw: called.append("install"))
         monkeypatch.setattr(gateway_mod, "systemd_start", lambda **kw: called.append("start"))
 
-        assert gateway_mod.ensure_gateway_service() is True
+        assert ensure_gateway_service() is True
         assert not called
 
     def test_fresh_host_installs_and_starts_user_scope(self, monkeypatch):
@@ -61,7 +62,7 @@ class TestEnsureGatewayService:
         )
         monkeypatch.setattr(gateway_mod, "systemd_start", lambda **kw: calls.append(("start", kw)))
 
-        assert gateway_mod.ensure_gateway_service() is True
+        assert ensure_gateway_service() is True
         assert calls[0][0] == "install"
         # user scope: no system=True ever passed from this path
         assert "system" not in calls[0][3] or not calls[0][3]["system"]
@@ -77,7 +78,7 @@ class TestEnsureGatewayService:
         monkeypatch.setattr(gateway_mod, "systemd_install", lambda **kw: calls.append("install"))
         monkeypatch.setattr(gateway_mod, "systemd_start", lambda **kw: calls.append("start"))
 
-        assert gateway_mod.ensure_gateway_service() is True
+        assert ensure_gateway_service() is True
         assert calls == ["start"]
 
     def test_conflicting_units_block_install(self, monkeypatch):
@@ -92,9 +93,19 @@ class TestEnsureGatewayService:
         calls = []
         monkeypatch.setattr(gateway_mod, "systemd_install", lambda **kw: calls.append("install"))
 
-        assert gateway_mod.ensure_gateway_service() is False
+        assert ensure_gateway_service() is False
         assert warned and not calls
 
+    def test_macos_uses_launchd(self, monkeypatch):
+        _patch_host(monkeypatch, systemd=False, macos=True)
+        monkeypatch.setattr(gateway_mod, "_is_service_running", lambda: False)
+        monkeypatch.setattr(gateway_mod, "_is_service_installed", lambda: False)
+        calls = []
+        monkeypatch.setattr(gateway_mod, "launchd_install", lambda force=False: calls.append("install"))
+        monkeypatch.setattr(gateway_mod, "launchd_start", lambda: calls.append("start"))
+
+        assert ensure_gateway_service() is True
+        assert calls == ["install", "start"]
 
     def test_never_raises_on_install_failure(self, monkeypatch, capsys):
         _patch_host(monkeypatch)
@@ -107,7 +118,7 @@ class TestEnsureGatewayService:
 
         monkeypatch.setattr(gateway_mod, "systemd_install", boom)
 
-        assert gateway_mod.ensure_gateway_service() is False
+        assert ensure_gateway_service() is False
         out = capsys.readouterr().out
         assert "hermes gateway install" in out
 
@@ -123,7 +134,7 @@ class TestEnsureGatewayService:
 
         monkeypatch.setattr(gateway_mod, "systemd_install", bail)
 
-        assert gateway_mod.ensure_gateway_service() is False
+        assert ensure_gateway_service() is False
         out = capsys.readouterr().out
         assert "hermes gateway install" in out
 
@@ -137,6 +148,6 @@ class TestEnsureGatewayService:
 
         monkeypatch.setattr(gateway_mod, "systemd_start", unreachable)
 
-        assert gateway_mod.ensure_gateway_service() is False
+        assert ensure_gateway_service() is False
         out = capsys.readouterr().out
         assert "enable linger" in out

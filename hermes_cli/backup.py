@@ -1047,6 +1047,65 @@ def run_import(args) -> Optional[int]:
             return 1
         print("Done. Your Hermes configuration has been restored.")
 
+def _restore_profile_wrappers(hermes_root: Path) -> List[str]:
+    """Re-create shell wrapper scripts for restored named profiles; return the profile names seen."""
+    profiles_dir = hermes_root / "profiles"
+    restored_profiles: list[tuple[str, bool]] = []
+    if not profiles_dir.is_dir():
+        return []
+    try:
+        from hermes_cli.profiles import (
+            create_wrapper_script, check_alias_collision, _is_wrapper_dir_in_path, _get_wrapper_dir)
+        for entry in sorted(profiles_dir.iterdir()):
+            if not entry.is_dir() or not any((entry / m).exists() for m in ("config.yaml", ".env")):
+                continue  # only profiles with config get wrappers
+            profile_name = entry.name
+            collision = check_alias_collision(profile_name)
+            if collision:
+                print(f"  Skipped alias '{profile_name}': {collision}")
+            restored_profiles.append(
+                (profile_name, not collision and create_wrapper_script(profile_name) is not None))
+        if restored_profiles:
+            created = [n for n, ok in restored_profiles if ok]
+            skipped = [n for n, ok in restored_profiles if not ok]
+            if created:
+                print(f"\n  Profile aliases restored: {', '.join(created)}")
+            if skipped:
+                print(f"  Profile aliases skipped:  {', '.join(skipped)}")
+            if not _is_wrapper_dir_in_path():
+                print(f"\n  Note: {_get_wrapper_dir()} is not in your PATH.\n"
+                      "  Add to your shell config (~/.bashrc or ~/.zshrc):\n"
+                      '    export PATH="$HOME/.local/bin:$PATH"')
+    except ImportError:  # hermes_cli.profiles unavailable (fresh install)
+        if any(profiles_dir.iterdir()):
+            print("\n  Profiles detected but aliases could not be created.\n"
+                  "  Run: hermes profile list  (after installing hermes)")
+    return [n for n, _ in restored_profiles]
+
+
+def _revive_gateway_after_import(hermes_root: Path) -> None:
+    """Install/start the gateway service after a restore, best-effort and prompt-free.
+
+    Bot tokens and cron jobs are inert without a gateway (a platform-less gateway is supported, so
+    this is safe for any backup); failures print a manual fallback, never fail the import. Only
+    revived when the restore landed in the default home or no other install exists: a sandbox or
+    profile restore must not install a second gateway on the default service name.
+    """
+    native_default = _get_platform_default_hermes_home()
+    if hermes_root != native_default and any(
+            (native_default / marker).exists() for marker in ("config.yaml", ".env", "state.db")):
+        print("\nRestored into a non-default home; leaving the gateway service alone to avoid clashing "
+              f"with the install at {native_default}.\n"
+              "To start a gateway for this home, run:  hermes gateway install")
+        return
+    try:
+        from hermes_cli.gateway import _is_service_running
+        from hermes_cli.gateway_setup_service import ensure_gateway_service
+        if not _is_service_running():
+            print()
+            ensure_gateway_service(context="import")
+    except Exception:
+        print("\nStart the gateway to activate cron jobs and messaging:\n  hermes gateway install")
 
 
 # --- Quick state snapshots (used by /snapshot slash command and hermes backup --quick) ---

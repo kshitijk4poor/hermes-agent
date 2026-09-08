@@ -126,7 +126,7 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     else:
         # Messaging skipped — still install/start the gateway service so cron jobs run and
         # platforms come alive as soon as tokens are added later (e.g. via `hermes import`).
-        from hermes_cli.gateway import ensure_gateway_service
+        from hermes_cli.gateway_setup_service import ensure_gateway_service
         ensure_gateway_service(context="setup")
     print()
     print_success("Setup complete! You're ready to go.")
