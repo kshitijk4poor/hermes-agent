@@ -46,9 +46,12 @@ def _socket_path(home: Path) -> Path:
     target = Path(data.decode("utf-8").strip())
     if not target.is_absolute():
         raise DiscoveryError("invalid_control_pointer")
-    from gateway.control_socket import _home_hash
-    if target.name != f"hermes-gw-{_home_hash(home)}.sock":
+    from gateway.control_socket import _fallback_socket_path
+    if target != _fallback_socket_path(home):
         raise DiscoveryError("invalid_control_pointer")
+    directory = _private_node(target.parent, kind="directory")
+    if directory.st_mode & 0o077:
+        raise DiscoveryError("unsafe_control_permissions")
     _private_node(target, kind="socket")
     return target
 
