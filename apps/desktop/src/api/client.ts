@@ -43,9 +43,16 @@ export class HermesGateway extends JsonRpcGatewayClient {
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
     if (!this.canonical) { return super.request<T>(method, params, timeoutMs, signal) }
     const prepared = this.protocol.prepare(method, params)
-    const result = await super.request<T>(method, prepared, timeoutMs, signal)
+    const wireMethod = method === 'session.title' || method === 'session.archive' ? 'session.mutate' : method
 
-    return this.protocol.result(method, prepared, result) as T
+    try {
+      const result = await super.request<T>(wireMethod, prepared, timeoutMs, signal)
+
+      return this.protocol.result(method, prepared, result) as T
+    } catch (error) {
+      this.protocol.failure(prepared, error)
+      throw error
+    }
   }
 
   constructor() {

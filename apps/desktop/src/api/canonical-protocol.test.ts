@@ -2,6 +2,21 @@ import { expect, test } from 'vitest'
 
 import { CanonicalDesktopProtocol } from './canonical-protocol'
 
+test('metadata writes retain the original CAS revision and request identity until acknowledgement', () => {
+  const protocol = new CanonicalDesktopProtocol()
+  protocol.result('session.resume', { session_id: 's' }, { session_id: 's', revision: 7 })
+  const first = protocol.prepare('session.title', { session_id: 's', title: 'new title' })
+  expect(first).toEqual({ session_id: 's', request_id: expect.any(String), expected_revision: 7, operation: 'rename', payload: { title: 'new title' } })
+  protocol.result('session.resume', { session_id: 's' }, { session_id: 's', revision: 8 })
+  expect(protocol.prepare('session.title', { session_id: 's', title: 'new title' })).toEqual(first)
+  protocol.failure(first, { data: { reason: 'revision_conflict' } })
+  const retry = protocol.prepare('session.title', { session_id: 's', title: 'new title' })
+  expect(retry.expected_revision).toBe(8)
+  expect(retry.request_id).not.toBe(first.request_id)
+  protocol.result('session.title', first, { session_id: 's', revision: 8, title: 'new title' })
+  expect(protocol.prepare('session.archive', { session_id: 's', archived: true })).toMatchObject({ expected_revision: 8, operation: 'archive', payload: { archived: true } })
+})
+
 test('canonical create retries retain identity and reject unsupported explicit intent', () => {
   const protocol = new CanonicalDesktopProtocol()
   const params = { source: 'desktop', profile: 'default', cols: 96, fast: false, cwd: '/tmp' }
