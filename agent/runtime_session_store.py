@@ -144,7 +144,11 @@ class RuntimeSessionStore:
             candidate = json.loads(json.dumps(self.journal))
             candidate['pending'].append(json.loads(json.dumps(entry, allow_nan=False)))
             candidate['next_sequence'] += 1
-            self._save(candidate)
+            try:
+                self._save(candidate)
+            except Exception as exc:
+                self.failure = str(exc)
+                raise
             self.journal = candidate
             return self.retry_pending()[0]
 
@@ -187,6 +191,17 @@ class RuntimeSessionStore:
     def try_acquire_session_turn_lease(self, session_id, holder, *, ttl_seconds=300.0, patience_s=None):
         self._session(session_id)
         return self._apply('turn.acquire', {'holder': holder, 'ttl_seconds': ttl_seconds})['value']
+
+    def acquire_session_turn_lease(self, session_id, holder, *, ttl_seconds=300.0,
+            wait_seconds=1800.0, poll_interval_seconds=1.0, on_wait=None,
+            wait_notice_interval_seconds=15.0, should_abort=None, acquire_patience_s=0.5):
+        # Reuse only the local polling orchestrator, not the SQLite mixin surface.
+        from hermes_state_compression import SessionCompressionMixin
+        return SessionCompressionMixin.acquire_session_turn_lease(self, session_id, holder,
+            ttl_seconds=ttl_seconds, wait_seconds=wait_seconds,
+            poll_interval_seconds=poll_interval_seconds, on_wait=on_wait,
+            wait_notice_interval_seconds=wait_notice_interval_seconds,
+            should_abort=should_abort, acquire_patience_s=acquire_patience_s)
 
     def refresh_session_turn_lease(self, session_id, holder, *, ttl_seconds=300.0):
         self._session(session_id)
