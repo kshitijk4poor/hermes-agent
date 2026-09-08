@@ -8,6 +8,15 @@ description: "How the messaging gateway boots, authorizes users, routes sessions
 
 The messaging gateway is the long-running process that connects Hermes to 20+ external messaging platforms through a unified architecture.
 
+## Shared authority setup readiness
+
+Authenticated local clients can call `setup.status` and `setup.runtime_check` before
+creating a session. Both require `session:create` and run against the daemon's owned
+profile; a selector for another profile is rejected. Runtime readiness reuses the
+existing provider resolver off the event loop and does not create a legacy session
+runtime. Missing provider credentials remain a failed readiness result, not a bypass
+of onboarding.
+
 ## Shared authority clarification protocol
 
 When the HTTP/WebSocket surface is bound to a `SessionAuthority`, attached authorized

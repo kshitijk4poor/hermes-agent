@@ -34,6 +34,7 @@ class AuthorityConnection:
         handlers = {'session.create': self.create, 'ping': self.ping, 'runtime.describe': self.describe,
                     'session.list': self.list_sessions, 'session.info': self.info,
                     'session.mutate': self.mutate,
+                    'setup.status': self.setup_status, 'setup.runtime_check': self.setup_runtime_check,
                     'session.resume': self.resume, 'prompt.submit': self.submit,
                     'prompt.receipt': self.receipt, 'prompt.cancel': self.cancel,
                     'session.interrupt': self.interrupt, 'session.events.since': self.events_since,
@@ -49,6 +50,14 @@ class AuthorityConnection:
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+
+    async def setup_status(self, ref, params):
+        from gateway.session_readiness import readiness
+        return await readiness(self.authority, self.actor, params, runtime=False)
+
+    async def setup_runtime_check(self, ref, params):
+        from gateway.session_readiness import readiness
+        return await readiness(self.authority, self.actor, params, runtime=True)
 
     async def create(self, ref, params):
         from gateway.session_local import create_local_session, local_session_info

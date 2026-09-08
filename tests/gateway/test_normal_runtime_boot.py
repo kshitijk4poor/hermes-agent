@@ -75,6 +75,12 @@ async def handshake(home, descriptor):
                         assert 'result' in result, result
                         return result['result']
 
+        status = await rpc(ws, 'setup.status')
+        assert status['provider_configured'] is True, status
+        readiness = await rpc(ws, 'setup.runtime_check', provider='custom')
+        assert readiness['ok'] is True and readiness['provider'] == 'custom', readiness
+        for method in ('setup.status', 'setup.runtime_check'):
+            await rpc(ws, method, expected_error='profile_mismatch', profile='foreign-profile')
         created = await rpc(ws, 'session.create', request_id='ordinary-launch', source='cli')
         sid = created['session_id']
         assert sid == created['stored_session_id']
