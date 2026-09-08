@@ -3572,19 +3572,21 @@ def _parse_cli_args(parser, subparsers, argv):
         subparsers.required = False
         return parser.parse_args(_processed_argv)
 
+    from contextlib import redirect_stderr, redirect_stdout
+
     subparsers.required = True
-    _saved_stderr = sys.stderr
+    speculative_stdout = _io.StringIO()
     try:
-        sys.stderr = _io.StringIO()
-        args = parser.parse_args(_processed_argv)
-        sys.stderr = _saved_stderr
+        with redirect_stderr(_io.StringIO()), redirect_stdout(speculative_stdout):
+            args = parser.parse_args(_processed_argv)
     except SystemExit as exc:
-        sys.stderr = _saved_stderr
-        if exc.code == 0:  # help/version already printed; don't print twice
+        if exc.code == 0:
+            print(speculative_stdout.getvalue(), end="")
             raise
-        # Subcommand consumed as a flag value (e.g. -c model): normal parse.
+        # Discard speculative diagnostics, including structured errors on stdout.
         subparsers.required = False
-        args = parser.parse_args(_processed_argv)
+        return parser.parse_args(_processed_argv)
+    print(speculative_stdout.getvalue(), end="")
     return args
 
 
