@@ -1,16 +1,13 @@
 import { JsonRpcGatewayError } from '@hermes/shared'
 import { QueryClient } from '@tanstack/react-query'
-
-import { useMessageStream } from '../use-message-stream'
-import type { ClientSessionState } from '@/app/types'
-import type { RpcEvent } from '@/types/hermes'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
 import type { MutableRefObject } from 'react'
 import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { getLatestSessionMessages, getSession } from '@/hermes'
-import { textPart, toChatMessages } from '@/lib/chat-messages'
+import type { ClientSessionState } from '@/app/types'
+import { getSession } from '@/hermes'
+import { textPart } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $compactingSessions, setSessionCompacting } from '@/store/compaction'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
@@ -34,7 +31,10 @@ import {
 } from '@/store/session'
 import { dropSessionState, publishSessionState } from '@/store/session-states'
 import { $wakeWord, resetWakeWordState } from '@/store/wake-word'
+import type { RpcEvent } from '@/types/hermes'
 import type { SessionInfo } from '@/types/hermes'
+
+import { useMessageStream } from '../use-message-stream'
 
 import { clearSingleFlightSessionResumeState } from './single-flight-resume'
 import { SESSION_COMPRESS_TIMEOUT_MS } from './slash'
@@ -203,6 +203,7 @@ function Harness({
 
   const sessionStates = useRef(new Map<string, ClientSessionState>())
   const queryClient = useRef(new QueryClient())
+
   const updateSessionState: Parameters<typeof useMessageStream>[0]['updateSessionState'] = (sessionId, updater, storedId) => {
     const next = updater(stateRef.current)
     stateRef.current = next as never
@@ -212,7 +213,8 @@ function Harness({
 
     return next
   }
-  const stream = useMessageStream({
+
+  const { handleGatewayEvent } = useMessageStream({
     activeSessionIdRef,
     sessionStateByRuntimeIdRef: sessionStates,
     queryClient: queryClient.current,
@@ -257,7 +259,7 @@ function Harness({
 
   useEffect(() => {
     onReady({
-      handleEvent: event => act(() => stream.handleGatewayEvent(event)),
+      handleEvent: event => act(() => handleGatewayEvent(event)),
       state: () => stateRef.current,
       activeSessionIdRef,
       cancelRun: (...args: Parameters<typeof actions.cancelRun>) =>
@@ -285,6 +287,7 @@ function Harness({
     actions.steerPrompt,
     actions.submitText,
     activeSessionIdRef,
+    handleGatewayEvent,
     onReady
   ])
 
@@ -342,17 +345,22 @@ describe('submit timeout admission fences', () => {
 
   it('does not replay an ambiguously accepted identityless send after timeout recovery', async () => {
     const submits: Record<string, unknown>[] = []
+
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method === 'session.resume') {return { session_id: RUNTIME_SESSION_ID } as never}
+
       if (method !== 'prompt.submit') {return {} as never}
       submits.push(params!)
+
       if (submits.length === 1) {throw Object.assign(new Error('capability refused'), { code: 4094 })}
+
       if (submits.length === 2) {throw new Error('request timed out: prompt.submit')}
 
       return { admission_id: params?.submission_id, status: 'started' } as never
     })
+
     let handle: HarnessHandle | null = null
-    await actRender(<Harness rawAdmissionReceipts onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    await actRender(<Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
     const accepted = await handle!.submitText('legacy accepted before ACK loss', { submission_id: 'legacy-timeout' })
     expect(submits.map(p => p.submission_id)).toEqual(['legacy-timeout', undefined])
     expect(accepted).toBe(false)
@@ -362,16 +370,20 @@ describe('submit timeout admission fences', () => {
 
   it('retries an identified timeout with the same admission identity after resume', async () => {
     const submits: Record<string, unknown>[] = []
+
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method === 'session.resume') {return { session_id: RUNTIME_SESSION_ID } as never}
+
       if (method !== 'prompt.submit') {return {} as never}
       submits.push(params!)
+
       if (submits.length === 1) {throw new Error('request timed out: prompt.submit')}
 
       return { admission_id: params?.submission_id, status: 'started' } as never
     })
+
     let handle: HarnessHandle | null = null
-    await actRender(<Harness rawAdmissionReceipts onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    await actRender(<Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
     expect(await handle!.submitText('safe identified retry', { submission_id: 'identified-timeout' })).toBe(true)
     expect(submits.map(p => p.submission_id)).toEqual(['identified-timeout', 'identified-timeout'])
     expect(requestGateway).toHaveBeenCalledWith('session.resume', expect.objectContaining({ session_id: RUNTIME_SESSION_ID }))
@@ -383,17 +395,26 @@ describe('terminal receipt settlement', () => {
 
   it('settles a retained terminal retry without waiting for another lifecycle event', async () => {
     let terminal = false
+
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method === 'session.resume') {return { session_id: 'rt-terminal-recovered' } as never}
+
       if (method !== 'prompt.submit') {return {} as never}
+
       if (!terminal) {throw new Error('connection closed')}
+
+      if (params?.session_id === RUNTIME_SESSION_ID) {throw new Error('session not found')}
 
       return { admission_id: params?.submission_id, status: 'terminal' } as never
     })
+
     let handle: HarnessHandle | null = null
-    await actRender(<Harness rawAdmissionReceipts onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    let updatedRuntime: string | undefined
+    await actRender(<Harness onReady={h => (handle = h)} onUpdateState={id => { updatedRuntime = id }} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
     expect(await handle!.submitText('already persisted', { submission_id: 'terminal-retry' })).toBe(false)
     terminal = true
     expect(await handle!.submitText('already persisted', { submission_id: 'terminal-retry' })).toBe(true)
+    expect(updatedRuntime).toBe('rt-terminal-recovered')
     expect(handle!.state()).toMatchObject({ busy: false, awaitingResponse: false, turnStartedAt: null })
     expect(handle!.state().messages.filter(m => m.id === 'user-terminal-retry')).toEqual([])
     expect($busy.get()).toBe(false)
@@ -401,10 +422,12 @@ describe('terminal receipt settlement', () => {
 
   it('does not settle a newer external generation when an older terminal receipt arrives', async () => {
     let finish!: (value: never) => void
+
     const requestGateway = vi.fn(async (method: string) => method === 'prompt.submit'
       ? new Promise<never>(resolve => { finish = resolve }) : {} as never)
+
     let handle: HarnessHandle | null = null
-    await actRender(<Harness rawAdmissionReceipts onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    await actRender(<Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
     let pending!: Promise<boolean>
     act(() => { pending = handle!.submitTextRaw('old retry', { submission_id: 'old-terminal' }) })
     await waitFor(() => expect(finish).toBeTypeOf('function'))
@@ -425,11 +448,14 @@ describe('Stop and shared-owner execution', () => {
   it.each([['owner-a', 5], ['owner-b', 1]])('retires Stop only for a newer execution: %s/%s', async (epoch, generation) => {
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) =>
       (method === 'prompt.submit' ? { admission_id: params?.submission_id, status: 'started' } : {}) as never)
+
     let handle: HarnessHandle | null = null
-    await actRender(<Harness rawAdmissionReceipts onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+    await actRender(<Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
     await handle!.submitText('first turn')
+
     const send = (type: string, execution_epoch = 'owner-a', execution_generation = 4, extra = {}) =>
       handle!.handleEvent({ type, session_id: RUNTIME_SESSION_ID, payload: { execution_epoch, execution_generation, ...extra } })
+
     send('message.start')
     expect(handle!.state().busy).toBe(true)
     await handle!.cancelRun()

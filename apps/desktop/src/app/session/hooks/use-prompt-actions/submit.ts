@@ -991,7 +991,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         try {
           const recoverStoredSessionId = targetStoredSessionId
 
-          const { result } = await withSessionNotFoundResume<{ admission_id?: string; status?: string }>(
+          const { result, sessionId: receiptSessionId } = await withSessionNotFoundResume<{ admission_id?: string; status?: string }>(
             sessionId,
             recoverStoredSessionId,
             liveId =>
@@ -1080,7 +1080,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
               // Deduplication does not start a turn or promise another terminal
               // event. Remove our duplicate bubble, but preserve any live turn
               // that an owner event established while the receipt was in flight.
-              const next = updateSessionState(liveSessionId, state => ({
+              const next = updateSessionState(receiptSessionId, state => ({
                 ...state,
                 messages: state.messages.filter(message => message.id !== optimisticId),
                 ...(!state.turnLive && !state.streamId && !state.sawAssistantPayload && {
