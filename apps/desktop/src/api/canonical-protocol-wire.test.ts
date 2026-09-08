@@ -1,15 +1,16 @@
 // @vitest-environment node
 import { expect, test } from 'vitest'
-import { WebSocketServer } from 'ws'
 
 import { HermesGateway } from './client'
 
 test('named canonical prompt listeners receive replay-safe IDs before answering on the wire', async () => {
+  const wsPackage = 'ws'
+  const { WebSocketServer } = await import(wsPackage)
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 })
   await new Promise<void>(resolve => server.once('listening', resolve))
   const sent: any[] = []
-  server.on('connection', socket => {
-    socket.on('message', bytes => {
+  server.on('connection', (socket: any) => {
+    socket.on('message', (bytes: Buffer) => {
       const frame = JSON.parse(bytes.toString())
       sent.push(frame)
       socket.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: { status: 'resolved' } }))

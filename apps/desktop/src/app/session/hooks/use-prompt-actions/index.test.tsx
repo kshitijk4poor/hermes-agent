@@ -300,7 +300,10 @@ describe('durable submit acknowledgement', () => {
     const os = await import('node:os')
     const path = await import('node:path')
     vi.doMock('electron', () => ({ app: {}, ipcMain: {} }))
-    const { preparedJournal } = await import('../../../../../electron/prepared-submissions')
+    // Exercise the native module at runtime without importing its separate,
+    // non-strict Electron project into the renderer's TypeScript project.
+    const nativeJournalModule = '../../../../../electron/prepared-submissions'
+    const { preparedJournal } = await import(nativeJournalModule)
     const home = fs.mkdtempSync(path.join(os.tmpdir(), 'desktop-retire-'))
     const journal = preparedJournal(home, 'http://native-fixture')
     const previous = window.hermesDesktop
