@@ -72,6 +72,16 @@ async def probe(mode, peer):
             else:
                 raise AssertionError('event trust was accepted: ' + field)
         assert not authority.sessions
+        foreign = state / 'profiles' / 'foreign'
+        foreign.mkdir(parents=True)
+        (foreign / 'config.yaml').write_text((state / 'config.yaml').read_text())
+        hostile = adapter.build_source(chat_id='forged-profile', chat_type='dm', user_id='fixture-user')
+        hostile.profile = 'foreign'
+        await adapter.handle_message(MessageEvent(text='FORGED_PROFILE', source=hostile, message_id='foreign-profile'))
+        async with asyncio.timeout(10):
+            while adapter._active_sessions:
+                await asyncio.sleep(0.01)
+        assert not authority.sessions, 'unrouted profile field became durable authority'
         print(json.dumps({'rejected': rejected}))
         return
     event = MessageEvent(text='TRUST_CALLBACK_INPUT', source=source, message_id='trust-1')

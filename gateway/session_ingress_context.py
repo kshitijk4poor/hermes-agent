@@ -42,6 +42,8 @@ def _binding(runner, source, profile):
         raise RuntimeStoreError('profile_mismatch')
     runtime_home = home
     multiplex = getattr(runner.config, 'multiplex_profiles', False)
+    if not multiplex and source.profile:
+        raise RuntimeStoreError('profile_mismatch')
     if multiplex:
         # Only the reservation-backed server registry proves a served home. Directory
         # discovery and _resolve_profile_home_for_source's primary fallback do not.
