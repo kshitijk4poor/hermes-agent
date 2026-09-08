@@ -537,7 +537,11 @@ def _worker_finish(db, conn, session_id, payload):
 def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
                             sequence, operation, payload):
     """One closed durable mutation and receipt; never call a self-committing API here."""
+    from hermes_state_worker_context import worker_context, worker_prompt, worker_sidecars
     handlers = {
+        'session.context': worker_context,
+        'session.prompt': worker_prompt,
+        'session.sidecars': worker_sidecars,
         'transcript.append': _worker_append,
         'execution.finish': _worker_finish,
         'usage.main': _worker_usage,

@@ -227,6 +227,22 @@ class RuntimeSessionStore:
                 raise WorkerPersistenceError('pending_receipt')
             return True
 
+    def get_session(self, session_id):
+        self._session(session_id)
+        return self._apply('session.context', {})['session']
+
+    def get_session_model_config_value(self, session_id, key, default=None):
+        from hermes_state_sessions import _parse_model_config
+        return _parse_model_config(self.get_session(session_id).get('model_config')).get(key, default)
+
+    def update_system_prompt(self, session_id, system_prompt):
+        self._session(session_id)
+        self._apply('session.prompt', {'system_prompt': system_prompt})
+
+    def patch_session_model_config(self, session_id, patch):
+        self._session(session_id)
+        self._apply('session.sidecars', {'patch': patch})
+
     def finish(self):
         return self._apply('execution.finish', {})
 
