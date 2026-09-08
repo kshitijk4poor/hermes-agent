@@ -1,0 +1,135 @@
+"""Classic terminal presentation of authority events and fenced controls."""
+import asyncio
+from contextlib import suppress
+import sys
+import uuid
+
+from hermes_cli.gateway_client import GatewayClientError
+
+
+class GatewayChatView:
+    def __init__(self, client, snapshot, *, quiet=False):
+        self.client = client
+        self.session_id = snapshot["stored_session_id"]
+        self.generation = snapshot.get("execution_generation", 0)
+        self.prompts = {p["prompt_id"]: p for p in snapshot.get("prompts", [])}
+        self.quiet = quiet
+        self.streams = {}
+        self.completions = {}
+        self.changed = asyncio.Event()
+        self.failure = None
+
+    def show_prompt(self, prompt):
+        print(f"\n{prompt.get('description') or prompt.get('question') or 'Approval required'}", file=sys.stderr)
+        if prompt.get("command"):
+            print(prompt["command"], file=sys.stderr)
+        command = "/approve" if prompt["kind"] == "approval" else "/answer"
+        print(f"{command} {prompt['prompt_id']} <{'|'.join(prompt.get('choices', [])) or 'answer'}>", file=sys.stderr)
+
+    async def render(self):
+        while True:
+            event = await self.client.events.get()
+            if isinstance(event, Exception):
+                self.failure = event
+                self.changed.set()
+                return
+            params = event.get("params", {})
+            if params.get("session_id") != self.session_id:
+                continue
+            kind, payload = params.get("type"), params.get("payload", {})
+            self.generation = params.get("execution_generation", self.generation)
+            admission = params.get("admission_id") or payload.get("admission_id")
+            if kind == "message.delta":
+                text = payload.get("text") or payload.get("delta") or payload.get("content") or ""
+                if isinstance(text, str):
+                    self.streams[admission] = self.streams.get(admission, "") + text
+                    if not self.quiet:
+                        print(text, end="", flush=True)
+            elif kind == "message.complete":
+                text = payload.get("text") or payload.get("content") or ""
+                streamed = self.streams.pop(admission, "")
+                if self.quiet or not streamed:
+                    print(text, flush=True)
+                elif text.startswith(streamed):
+                    print(text[len(streamed):], flush=True)
+                else:
+                    print("\n" + text, flush=True)
+                self.completions[admission] = payload.get("outcome")
+            elif kind in {"approval.request", "clarify.request"}:
+                self.prompts[payload["prompt_id"]] = payload
+                self.show_prompt(payload)
+            elif kind in {"approval.settled", "clarify.settled"}:
+                self.prompts.pop(payload["prompt_id"], None)
+            self.changed.set()
+
+    async def submit(self, text):
+        return await self.client.rpc("prompt.submit", session_id=self.session_id,
+                                     input_id=uuid.uuid4().hex, text=text)
+
+    async def command(self, text):
+        command, _, rest = text.partition(" ")
+        if command in {"/quit", "/exit", "/detach"}:
+            return False
+        if command == "/stop":
+            await self.client.rpc("session.interrupt", session_id=self.session_id,
+                                  execution_generation=self.generation)
+            return True
+        if command in {"/approve", "/answer"}:
+            prompt_id, _, answer = rest.partition(" ")
+            prompt = self.prompts.get(prompt_id)
+            expected = "approval" if command == "/approve" else "clarify"
+            if not prompt or prompt["kind"] != expected:
+                raise GatewayClientError("No matching pending control; resume to refresh")
+            await self.client.rpc(expected + ".respond", session_id=self.session_id,
+                execution_generation=prompt["execution_generation"], prompt_id=prompt_id,
+                **({"choice": answer} if expected == "approval" else {"answer": answer}))
+            return True
+        if command == "/help":
+            print("/stop, /approve <id> <choice>, /answer <id> <text>, /quit (detach). Other slash commands are not yet supported.")
+            return True
+        raise GatewayClientError("Unsupported gateway CLI command; use /help. No local command was run.")
+
+    async def run(self, query=None, *, oneshot=False):
+        for prompt in self.prompts.values():
+            self.show_prompt(prompt)
+        renderer = asyncio.create_task(self.render())
+        try:
+            receipt = await self.submit(query) if query else None
+            if oneshot:
+                if receipt is None:
+                    raise GatewayClientError("One-shot requires a query")
+                admission = receipt["admission_id"]
+                while admission not in self.completions:
+                    self.changed.clear()
+                    if self.failure:
+                        raise self.failure
+                    if self.prompts:
+                        print("Input required; detached without cancelling. Resume this session interactively.", file=sys.stderr)
+                        return 3
+                    await self.changed.wait()
+                return 0 if self.completions[admission] == "completed" else 1
+            from prompt_toolkit import PromptSession
+            from prompt_toolkit.patch_stdout import patch_stdout
+            prompt = PromptSession()
+            with patch_stdout():
+                while not self.failure:
+                    try:
+                        text = (await prompt.prompt_async("You> ")).strip()
+                        if not text:
+                            continue
+                        if text.startswith("/"):
+                            if not await self.command(text):
+                                return 0
+                        else:
+                            await self.submit(text)
+                    except KeyboardInterrupt:
+                        print("Use /stop to interrupt execution, /quit to detach.")
+                    except EOFError:
+                        return 0
+                    except GatewayClientError as exc:
+                        print(f"Error: {exc}", file=sys.stderr)
+                raise self.failure
+        finally:
+            renderer.cancel()
+            with suppress(asyncio.CancelledError):
+                await renderer
