@@ -357,6 +357,6 @@ def setup_gateway(config: dict):
     if _is_service_running():
         _restart_running_gateway(any_messaging, supports_systemd)
     else:
-        # Not running: install (if needed) and start, no questions asked.
-        ensure_gateway_service(context="setup")
+        # Existing services can start; a new service requires explicit consent.
+        ensure_gateway_service(context="setup", interactive=True, config=config)
     print_info(_RULE)
