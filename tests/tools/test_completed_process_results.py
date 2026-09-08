@@ -33,7 +33,7 @@ def test_retained_result_lookup_does_not_initialize_session_store(tmp_path, monk
     assert not db_path.exists(), "Reading retained results initialized canonical storage"
 
 
-def test_headless_terminal_result_survives_cli_exit(tmp_path):
+def test_headless_terminal_result_survives_cli_exit(tmp_path, request):
     """Real CLI, tool dispatch, shell child and fresh reader; only the LLM is local."""
     home = tmp_path / "profile"
     home.mkdir()
@@ -137,6 +137,12 @@ def test_headless_terminal_result_survives_cli_exit(tmp_path):
            "USERPROFILE": str(tmp_path), "TERMINAL_CWD": str(tmp_path),
            "OPENAI_BASE_URL": url, "OPENAI_API_KEY": "local-test-only",
            "PYTHONPATH": str(REPO_ROOT)}
+    # The canonical CLI detaches from a long-lived daemon. Own that daemon in
+    # the fixture so it cannot outlive the temporary profile/SQLite files.
+    from tests.gateway.fixtures.local_recovery_probe import daemon
+    owner = daemon(REPO_ROOT, home, env, barrier=False)
+    owner.__enter__()
+    request.addfinalizer(lambda: owner.__exit__(None, None, None))
     try:
         producer = subprocess.run([
             sys.executable, "-c",
