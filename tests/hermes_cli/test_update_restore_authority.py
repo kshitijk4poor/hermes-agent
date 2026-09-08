@@ -121,3 +121,61 @@ def test_corrupt_epoch_refuses_profile_sweep_with_separate_recovery(tmp_path, mo
         with closing(sqlite3.connect(home / 'recovered.db')) as db:
             assert db.execute('SELECT content FROM messages').fetchall() == [('snapshot transcript',)]
         assert (home / 'state.db').read_bytes() == originals[home][0]
+
+
+def test_update_restore_excludes_startup_until_publication(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from gateway.runtime_ownership import ProfileOwnership
+    from hermes_cli import backup
+    from hermes_cli.update_cmd_maint import _restore_state_db_from_snapshot
+
+    home = tmp_path / 'state'
+    home.mkdir()
+    source, destination = tmp_path / 'snapshot.db', home / 'state.db'
+    for path, value in ((source, 'snapshot'), (destination, 'current')):
+        with closing(sqlite3.connect(path)) as db:
+            db.execute('CREATE TABLE marker(value TEXT)')
+            db.execute('INSERT INTO marker VALUES(?)', (value,))
+            db.commit()
+    before = destination.read_bytes(), source.read_bytes()
+    owner = ProfileOwnership()
+    owner.reserve([home])
+    try:
+        assert not (home / 'gateway.pid').exists()
+        assert not _restore_state_db_from_snapshot(destination, source)
+        assert (destination.read_bytes(), source.read_bytes()) == before
+    finally:
+        owner.close()
+
+    # Pause only the actual database publication, with maintenance already held.
+    arrived, release = threading.Event(), threading.Event()
+    publish = backup._restore_db_pages
+    def barrier(*args):
+        arrived.set()
+        assert release.wait(30)
+        return publish(*args)
+    monkeypatch.setattr(backup, '_restore_db_pages', barrier)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(_restore_state_db_from_snapshot(destination, source)))
+    thread.start()
+    try:
+        assert arrived.wait(20)
+        root = Path(__file__).resolve().parents[2]
+        env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
+        env.update(HOME=str(tmp_path / 'user'), HERMES_HOME=str(home), PYTHONPATH=str(root))
+        contender = subprocess.run([sys.executable, '-c',
+            "import logging, runpy; logging.basicConfig(level=logging.INFO); runpy.run_module('gateway.run', run_name='__main__')"],
+            cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, encoding='utf-8', timeout=25)
+        assert 'already owns profile' in contender.stdout + contender.stderr, contender
+        assert (destination.read_bytes(), source.read_bytes()) == before
+    finally:
+        release.set()
+        thread.join(timeout=30)
+    assert not thread.is_alive() and results == [True]
+    with closing(sqlite3.connect(destination)) as db:
+        assert db.execute('SELECT value FROM marker').fetchall() == [('snapshot',)]
+    assert source.read_bytes() == before[1]
+    print(json.dumps({'startup_first_refused': True, 'maintenance_first_refused': True,
+                      'snapshot_unchanged': True}), flush=True)
