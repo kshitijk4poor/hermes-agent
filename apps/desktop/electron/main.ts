@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { ensureLocalGateway, runGatewayEnsure, mintLocalGatewayTicket, createLocalGatewayDials } from './local-gateway'
+
+import { createLocalGatewayDials, ensureLocalGateway, mintLocalGatewayTicket, runGatewayEnsure } from './local-gateway'
 const localGatewayDials = createLocalGatewayDials()
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -61,7 +62,6 @@ import { stopBackendChild as stopBackendChildImpl, waitForBackendExit } from './
 import {
   type BackendOutputTail,
   claimDecision,
-  createBackendOutputTail,
   execText,
   formatBackendExitLine,
   isPidOnlyStartMarker,
@@ -78,13 +78,19 @@ import { buildDesktopBackendEnv, profileBackendParentEnv } from './backend-env'
 import { createBackendExitRecoveryLatch } from './backend-exit-recovery'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import {
-  backendCommandMatches,
-  type BackendOwnershipEntry,
-  createBackendOwnership,
-  createBackendShutdownCoordinator
-} from './backend-ownership'
-import { canImportHermesCli, PROBE_TIMEOUT_MS, shouldTrustHermesOverride, verifyHermesCli } from './backend-probes'
-import { waitForDashboardPortAnnouncement } from './backend-ready'
+  isReauthRequiredError,
+  makeNousCloudBackendDownError,
+  makeUnsignedOauthError,
+  waitForHermesReady
+} from './backend-health'
+import { backendCommandMatches, createBackendOwnership, createBackendShutdownCoordinator } from './backend-ownership'
+import {
+  canImportHermesCli,
+  execProbeSync,
+  PROBE_TIMEOUT_MS,
+  shouldTrustHermesOverride,
+  verifyHermesCli
+} from './backend-probes'
 import { recycleOwnedBackend } from './backend-recycle'
 import { isPidAliveWindows, waitForBackendRelease } from './backend-release-gate'
 import { createInstalledRuntimeGate } from './backend-resolution'
@@ -391,6 +397,8 @@ import { registerNativeNotifications } from './notification-ipc'
 import { isExpectedOauthNavigationAbort } from './oauth-navigation'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
+import { createParentStartMarkerResolver } from './parent-process-identity'
+import { registerPetOverlayIpc } from './pet-overlay-ipc'
 import {
   canShowInteractiveOauthLogin,
   mintGatewayWsTicket as mintOauthGatewayWsTicket,
@@ -8357,6 +8365,7 @@ async function freshGatewayWsUrl(profile, webContentsId) {
 
   if (connection.gatewayEndpoint) {
     const ticket = await mintLocalGatewayTicket(connection.gatewayEndpoint)
+
     return localGatewayDials.prepare(connection.baseUrl, ticket, webContentsId)
   }
 
@@ -8995,7 +9004,11 @@ function installRemoteHeaderRulesOnSession(sess) {
   remoteHeaderRulesInstalled = true
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     const nativeHeaders = localGatewayDials.headers(details)
-    if (nativeHeaders) { callback({ requestHeaders: nativeHeaders }); return }
+
+    if (nativeHeaders) { callback({ requestHeaders: nativeHeaders });
+
+ return }
+
     applyRemoteRequestHeaders(details, callback, headersForRemoteRequest)
   })
 }
@@ -12389,6 +12402,7 @@ async function runPoolBackendStart(
   const backend = await ensureRuntime(resolveHermesBackend(['--profile', profile, 'gateway', 'ensure', '--json']))
   const connection = await ensureLocalGateway(() => runGatewayEnsure(backend, resolveHermesCwd(), HERMES_HOME))
   assertPoolEntryStillOwned(poolKey, entry)
+
   return { ...connection, profile, logs: hermesLog.slice(-80), ...getWindowState() }
 }
 
@@ -12698,12 +12712,15 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
     setWslBridgeProfileState(primaryProfile, true)
 
     const connection = await ensureLocalGateway(() => runGatewayEnsure(setup.backend, resolveHermesCwd(), HERMES_HOME))
+
     if (!backendConnectionState.isCurrentAttempt(connectionAttempt)) {
       throw new Error('Hermes backend start was superseded by a newer connection attempt.')
     }
+
     backendStartFailure = null
     updateBootProgress({ phase: 'backend.ready', message: 'Hermes gateway is ready', progress: 94, running: true, error: null })
     bootstrapRepairAttempt = 0
+
     return { ...connection, logs: hermesLog.slice(-80), ...getWindowState() }
   })().catch(async error => {
     releaseHostSpawnReservation()
@@ -15742,10 +15759,13 @@ const registryGatewayWsUrlHandler = createRegistryGatewayWsUrlHandler({
 ipcMain.handle('hermes:gateway:ws-url-for', async (_event, payload) => {
   return gatewayWsUrlIpcResult(async () => {
     const connection = await ensureRegistryBackend(payload?.connectionId, payload?.profile)
+
     if (connection.gatewayEndpoint) {
       const ticket = await mintLocalGatewayTicket(connection.gatewayEndpoint)
+
       return localGatewayDials.prepare(connection.baseUrl, ticket, _event.sender.id)
     }
+
     return registryGatewayWsUrlHandler(payload)
   })
 })
