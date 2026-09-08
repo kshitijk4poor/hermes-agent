@@ -1076,6 +1076,22 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
             if (result.status === 'queued') {
               dropOptimistic(sessionId)
+            } else if (result.status === 'terminal') {
+              // Deduplication does not start a turn or promise another terminal
+              // event. Remove our duplicate bubble, but preserve any live turn
+              // that an owner event established while the receipt was in flight.
+              const next = updateSessionState(liveSessionId, state => ({
+                ...state,
+                messages: state.messages.filter(message => message.id !== optimisticId),
+                ...(!state.turnLive && !state.streamId && !state.sawAssistantPayload && {
+                  busy: false,
+                  awaitingResponse: false,
+                  pendingBranchGroup: null,
+                  turnStartedAt: null
+                })
+              }), targetStoredSessionId)
+
+              if (!next.busy && !next.awaitingResponse) {releaseBusy()}
             }
           }
         } catch (firstErr) {
