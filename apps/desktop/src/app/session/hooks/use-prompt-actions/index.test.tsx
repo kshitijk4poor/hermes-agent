@@ -312,10 +312,13 @@ describe('durable submit acknowledgement', () => {
       update: async (key, entry) => { journal.update(key, entry === null ? null : JSON.parse(entry)) }
     } }
     let accepted = false
+
     const requestGateway = vi.fn(async (_method: string, params?: Record<string, unknown>) => {
       expect(Object.values(journal.read())).toHaveLength(1)
+
       return { admission_id: 'server-admission', submission_id: params?.submission_id, session_id: params?.session_id, status: accepted ? 'queued' : 'unknown' } as never
     })
+
     try {
       let handle: HarnessHandle | null = null
       await actRender(<Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
@@ -435,14 +438,18 @@ describe('terminal receipt settlement', () => {
 
   it('admits a native queued input without taking ownership of the running turn', async () => {
     let handle: HarnessHandle | null = null
+
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method !== 'prompt.submit') { return {} as never }
       expect(handle!.state()).toMatchObject({ busy: true, awaitingResponse: true, streamId: 'owner-stream', turnLive: true })
+
       return { admission_id: 'server-queue', submission_id: params?.submission_id, session_id: RUNTIME_SESSION_ID, status: 'queued' } as never
     })
+
     await actRender(<Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />)
     Object.assign(handle!.state(), { busy: true, awaitingResponse: true, streamId: 'owner-stream', turnLive: true })
     $connection.set({ wsUrl: 'ws://localhost/api/ws?native_dial=unminted', mode: 'local' } as never)
+
     try {
       expect(await handle!.submitText('next input', { fromQueue: true })).toBe(true)
       expect(handle!.state()).toMatchObject({ busy: true, awaitingResponse: true, streamId: 'owner-stream', turnLive: true })

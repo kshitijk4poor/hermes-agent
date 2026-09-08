@@ -1,6 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { HermesConnection } from '@/global'
 import {
   $parkedQueueSessions,
   $queuedPromptsBySession,
@@ -10,10 +11,7 @@ import {
   MAX_AUTO_DRAIN_ATTEMPTS,
   parkQueuedPrompts
 } from '@/store/composer-queue'
-import { setSessionsLoading } from '@/store/session'
-
 import { $connection } from '@/store/session'
-import type { HermesConnection } from '@/global'
 
 import type { QueueEditState } from '../composer-utils'
 import type { ChatBarProps } from '../types'
@@ -78,11 +76,13 @@ describe('useComposerQueue park integration', () => {
     const draftRef = { current: 'durable queue' }
     const clearDraft = vi.fn(() => { draftRef.current = '' })
     const onSubmit = vi.fn<ChatBarProps['onSubmit']>().mockResolvedValue(false)
+
     const hook = renderHook(({ busy }) => useComposerQueue({
       activeQueueSessionKey: SESSION_KEY, attachments: [], busy, clearDraft, draftRef,
       focusInput: () => undefined, loadIntoComposer: () => undefined, onCancel: vi.fn(), onSteer: undefined,
       onSubmit, queueEditRef: { current: null }, queueSessionKey: SESSION_KEY, sessionId: 'rt-session-queue-hook'
     }), { initialProps: { busy: true } })
+
     try {
       await act(async () => { await hook.result.current.queueCurrentDraft() })
       expect(onSubmit).toHaveBeenCalledWith('durable queue', expect.objectContaining({ fromQueue: true, storedSessionId: SESSION_KEY }))
@@ -102,11 +102,13 @@ describe('useComposerQueue park integration', () => {
     let accept!: (value: boolean) => void
     const clearDraft = vi.fn()
     const draftRef = { current: 'same text' }
+
     const hook = renderHook(({ key }) => useComposerQueue({
       activeQueueSessionKey: key, attachments: [], busy: true, clearDraft, draftRef,
       focusInput: () => undefined, loadIntoComposer: () => undefined, onCancel: vi.fn(), onSteer: undefined,
       onSubmit: () => new Promise<boolean>(resolve => { accept = resolve }), queueEditRef: { current: null }, queueSessionKey: key, sessionId: key
     }), { initialProps: { key: 'outgoing' } })
+
     try {
       let pending: boolean | Promise<boolean> = false
       act(() => { pending = hook.result.current.queueCurrentDraft() })
@@ -135,9 +137,11 @@ describe('useComposerQueue park integration', () => {
       }
 
       expect(onSubmit).toHaveBeenCalledTimes(MAX_AUTO_DRAIN_ATTEMPTS)
+
       for (const [, options] of onSubmit.mock.calls) {
         expect(options).toMatchObject({ submission_id: entry.id })
       }
+
       await act(async () => {
         await vi.advanceTimersByTimeAsync(300_000)
       })

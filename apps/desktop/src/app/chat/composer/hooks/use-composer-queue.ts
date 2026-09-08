@@ -18,8 +18,8 @@ import {
   promoteQueuedPrompt,
   type QueuedPromptEntry,
   removeQueuedPrompt,
-  shouldAutoDrain,
   serverOwnsComposerQueue,
+  shouldAutoDrain,
   unparkQueuedPrompts,
   updateQueuedPrompt,
   withQueueDrainClaim
@@ -199,10 +199,12 @@ export function useComposerQueue({
         sessionId: sessionId ?? null, storedSessionId: activeQueueSessionKey
       })).then(accepted => {
         if (accepted !== true) { return false }
+
         if (currentQueueKeyRef.current === activeQueueSessionKey && draftRef.current === text) {
           clearDraft()
           scope.attachments.removeOccurrences(attachments)
         }
+
         return true
       }).catch(() => false)
     }

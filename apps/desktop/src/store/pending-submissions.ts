@@ -26,6 +26,7 @@ export function reconcilePendingSubmissions(key: string, value: unknown): void {
   for (const raw of value) {
     if (!raw || typeof raw.admission_id !== 'string' || !['queued', 'started', 'unknown'].includes(raw.status)) { continue }
     const id = raw.admission_id
+
     if (typeof raw.input_id === 'string') { admissionByInput.set(raw.input_id, id) }
     receipts.set(id, { ...known[id], id, text: typeof raw.user === 'string' ? raw.user : known[id]?.text ?? '', status: raw.status })
   }

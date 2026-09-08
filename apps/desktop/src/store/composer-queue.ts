@@ -1,26 +1,24 @@
 import { SLASH_COMMAND_RE } from '@hermes/shared'
 import { atom } from 'nanostores'
 
-import { SLASH_COMMAND_RE } from '@/lib/chat-runtime'
+import { type ComposerAttachment, revokeAttachmentPreviewUrls, revokeDiscardedAttachmentPreviews } from './composer'
+
 import { $connection } from './session'
 import { knownOwnerForSession } from './session-states'
 
 /** Local owner routes use canonical admission; remote legacy queues stay local. */
 export function serverOwnsComposerQueue(sessionId: string | null | undefined): boolean {
   const owner = knownOwnerForSession(sessionId)
+
   if (owner && typeof owner === 'object' && owner.mode) { return owner.mode === 'local' }
   const connection = $connection.get()
+
   if (owner && typeof owner === 'object' && owner.connectionId !== connection?.connectionId) { return false }
+
   return Boolean(connection?.wsUrl && new URL(connection.wsUrl).searchParams.has('native_dial'))
 }
 
-export interface RemoveQueuedPromptOptions {
-  /**
-   * When true, leave blob: preview URLs alive because submit/optimistic now
-   * owns the snapshot (drain handoff). Default false = entry discarded.
-   */
-  retainPreviewUrls?: boolean
-}
+import type { ComposerAttachment } from './composer'
 
 export interface QueuedPromptEntry {
   id: string
