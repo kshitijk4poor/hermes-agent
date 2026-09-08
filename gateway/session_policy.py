@@ -27,9 +27,8 @@ class LocalSessionPolicy:
     def config(self, authority=None):
         config = json.loads(self.config_json)
         if self.config_secret_ref is not None and authority is not None:
-            secrets = getattr(authority, '_local_config_secrets', {}).get(self.config_secret_ref)
-            if secrets is None:
-                raise RuntimeStoreError('launch_credentials_unavailable')
+            from gateway.session_policy_credentials import recover_config_secrets
+            secrets = recover_config_secrets(authority, self)
             for path, value in secrets.items():
                 target = config
                 for key in path[:-1]:
@@ -169,14 +168,18 @@ def bind_launch_key(authority, session_id, policy, api_key, *, config_secrets=No
     configs = getattr(authority, '_local_config_secrets', None)
     if configs is None:
         configs = authority._local_config_secrets = {}
-    if ref in configs and configs[ref] != config_secrets:
+    config_ref = ref
+    if config_secrets and getattr(authority, 'db', None) is not None:
+        from gateway.session_policy_credentials import config_reference
+        config_ref = config_reference(authority, session_id, policy, config_secrets)
+    if config_ref in configs and configs[config_ref] != config_secrets:
         raise RuntimeStoreError('admission_conflict')
     if config_secrets:
-        configs[ref] = dict(config_secrets)
+        configs[config_ref] = dict(config_secrets)
     if api_key is not None:
         keys[ref] = api_key
     return replace(policy, credential_ref=ref if api_key is not None else None,
-                   config_secret_ref=ref if config_secrets else None)
+                   config_secret_ref=config_ref if config_secrets else None)
 
 
 def launch_key(authority, policy):
