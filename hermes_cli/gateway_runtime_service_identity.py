@@ -227,10 +227,13 @@ def _vbs_identity(script: str) -> tuple[str, list[str]]:
     return env.get("HERMES_HOME", ""), argv
 
 
-def verify_windows_task(xml: str, home: Path, account: str, sid: str) -> None:
+def verify_windows_task(xml: str | bytes, home: Path, account: str, sid: str) -> None:
     import xml.etree.ElementTree as ET
 
-    task = ET.fromstring(xml)
+    try:
+        task = ET.fromstring(xml)
+    except ET.ParseError:
+        _unverified()
     ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
     principals = task.findall("t:Principals/t:Principal", ns)
     actions = task.find("t:Actions", ns)

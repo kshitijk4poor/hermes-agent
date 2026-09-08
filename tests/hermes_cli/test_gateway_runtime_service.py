@@ -122,10 +122,10 @@ def test_loaded_launchd_identity_is_independent_of_disk(configured, command, rea
 
 
 @pytest.mark.parametrize("case,reason", [
-    ("bound", None), ("wrong_home", "profile_mismatch"),
+    ("bound", None), ("utf16", None), ("wrong_home", "profile_mismatch"),
     ("wrong_user", "service_account_mismatch"), ("missing_user", "service_identity_unverified"),
     ("extra_action", "service_identity_unverified"), ("disabled", "service_disabled"),
-    ("unknown_script", "service_identity_unverified"),
+    ("unknown_script", "service_identity_unverified"), ("malformed_xml", "service_identity_unverified"),
 ])
 def test_task_xml_binds_actual_action_and_principal(case, reason, tmp_path):
     from hermes_cli.gateway_runtime_service_identity import verify_windows_task
@@ -157,6 +157,10 @@ def test_task_xml_binds_actual_action_and_principal(case, reason, tmp_path):
         xml = xml.replace('</Actions>', '<Exec><Command>other.exe</Command></Exec></Actions>')
     if case == 'disabled':
         xml = xml.replace('<Enabled>true</Enabled>', '<Enabled>false</Enabled>')
+    if case == 'utf16':
+        xml = xml.encode('utf-16')
+    if case == 'malformed_xml':
+        xml = '<Task>'
     if case == 'unknown_script':
         script.write_text('MsgBox "not a gateway"', encoding='utf-8')
     if reason:
@@ -164,3 +168,91 @@ def test_task_xml_binds_actual_action_and_principal(case, reason, tmp_path):
             verify_windows_task(xml, home, user, 'S-1-5-21-123')
     else:
         verify_windows_task(xml, home, user, 'S-1-5-21-123')
+
+
+@pytest.mark.macos_only
+@pytest.mark.parametrize("case,reason", [("loaded_good_disk_wrong", None), ("loaded_wrong_disk_good", "profile_mismatch"), ("bootstrap", None)])
+def test_native_launchd_checks_loaded_job_before_disk(case, reason, tmp_path, monkeypatch):
+    import plistlib
+    import pwd
+    from types import SimpleNamespace
+    from hermes_cli import gateway_runtime_service as service
+    home = tmp_path / 'profile'
+    home.mkdir(mode=0o700)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    monkeypatch.setattr(pwd, 'getpwuid', lambda uid: SimpleNamespace(pw_dir=str(tmp_path)))
+    label = 'ai.hermes.gateway' + ('-' + service.service_suffix(home) if service.service_suffix(home) else '')
+    plist = tmp_path / 'Library/LaunchAgents' / (label + '.plist')
+    plist.parent.mkdir(parents=True)
+    argv = [sys.executable, '-m', 'hermes_cli.main', 'gateway', 'run']
+    disk_home = tmp_path / 'wrong' if case == 'loaded_good_disk_wrong' else home
+    plist.write_bytes(plistlib.dumps(dict(Label=label, ProgramArguments=argv,
+        EnvironmentVariables=dict(HERMES_HOME=str(disk_home), HERMES_SUPERVISED_CHILD='1'))))
+    original = plist.read_bytes()
+    loaded_home = tmp_path / 'wrong' if case == 'loaded_wrong_disk_good' else home
+    output = 'gui/' + str(os.getuid()) + '/' + label + ' = {\n\tstate = not running\n\tprogram = ' + argv[0] + '\n\targuments = {\n' + '\n'.join('\t\t' + arg for arg in argv) + '\n\t}\n\tenvironment = {\n\t\tHERMES_HOME => ' + str(loaded_home) + '\n\t\tHERMES_SUPERVISED_CHILD => 1\n\t}\n}'
+    peer = tmp_path / 'supervisor.py'
+    peer.write_text('import sys\n' + f'output={output!r}\nbootstrap={case == "bootstrap"!r}\n' +
+        'if "print" in sys.argv:\n sys.exit(113) if bootstrap or any(a.startswith("user/") for a in sys.argv) else print(output)\n', encoding='utf-8')
+    actual = subprocess.run
+    calls = []
+    def boundary(argv, **kw):
+        assert argv[0] == 'launchctl'
+        calls.append(argv)
+        return actual([sys.executable, str(peer), *argv[1:]], **kw)
+    monkeypatch.setattr(subprocess, 'run', boundary)
+    if reason:
+        with pytest.raises(service.RuntimeStartError, match=reason):
+            service.discover_existing_gateway_service(home, deadline=time.monotonic()+5)
+        assert all(a[1] == 'print' for a in calls)
+    else:
+        found = service.discover_existing_gateway_service(home, deadline=time.monotonic()+5)
+        assert found is not None
+        service.start_existing_gateway_service(found, deadline=time.monotonic()+5)
+        assert calls[-1][1] == ('bootstrap' if case == 'bootstrap' else 'kickstart')
+    assert plist.read_bytes() == original
+
+
+@pytest.mark.windows_only
+@pytest.mark.parametrize("wrong", [False, True])
+def test_native_task_query_uses_installed_xml_and_vendor_launcher(wrong, tmp_path, monkeypatch):
+    from hermes_cli import gateway_runtime_service as service
+    from hermes_cli.gateway_windows import _build_gateway_vbs_script, _build_scheduled_task_xml
+    home = tmp_path / 'profile'
+    home.mkdir()
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    script = home / 'gateway.vbs'
+    script.write_text(_build_gateway_vbs_script(sys.executable, str(home), str(home), ''), encoding='utf-8')
+    original = script.read_bytes()
+    # whoami is read-only native account evidence; no task-manager mutation.
+    identity = subprocess.run(['whoami.exe', '/USER', '/FO', 'CSV', '/NH'], stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
+    from hermes_cli.gateway_windows import _schtasks_encoding
+    import csv
+    account, sid = next(csv.reader(identity.stdout.decode(_schtasks_encoding()).splitlines()))
+    suffix = service.service_suffix(home)
+    name = 'Hermes_Gateway' + ('_' + suffix if suffix else '')
+    xml = _build_scheduled_task_xml(name, script, 'S-1-5-18' if wrong else sid)
+    peer = tmp_path / 'supervisor.py'
+    row = f'"\\{name}","N/A","Ready"'
+    peer.write_text('import sys\n' + f'xml={xml!r}\n' +
+        'if "/XML" in sys.argv: sys.stdout.buffer.write(xml.encode("utf-16"))\n'
+        + f'elif "/Query" in sys.argv: print({row!r})\n', encoding='utf-8')
+    actual = subprocess.run
+    calls = []
+    def boundary(argv, **kw):
+        if argv[0] == 'whoami.exe':
+            return actual(argv, **kw)
+        assert argv[0] == 'schtasks.exe'
+        calls.append(argv)
+        return actual([sys.executable, str(peer), *argv[1:]], **kw)
+    monkeypatch.setattr(subprocess, 'run', boundary)
+    if wrong:
+        with pytest.raises(service.RuntimeStartError, match='service_account_mismatch'):
+            service.discover_existing_gateway_service(home, deadline=time.monotonic()+5)
+        assert not any('/Run' in a for a in calls)
+    else:
+        found = service.discover_existing_gateway_service(home, deadline=time.monotonic()+5)
+        assert found is not None
+        service.start_existing_gateway_service(found, deadline=time.monotonic()+5)
+        assert sum('/Run' in a for a in calls) == 1
+    assert script.read_bytes() == original

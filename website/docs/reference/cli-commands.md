@@ -382,6 +382,30 @@ requested only when no service is found. This command never installs or rewrites
 service definitions, enables linger, elevates privileges, or clears update fences.
 Ambiguous or inaccessible ownership fails closed.
 
+Before requesting a service start, `ensure` checks its canonical profile directory
+and execution account, not just its unit/task name. Linux uses the manager's
+loaded command and environment (including effective drop-ins), macOS checks the
+loaded launchd job rather than assuming the on-disk plist is current, and Windows
+queries the actual task XML, principal, and installed launcher.
+
+- `profile_mismatch`: the installed service selects a different home or profile.
+  Inspect the selected service's `HERMES_HOME` and command-line profile selector;
+  use the matching profile or explicitly repair the service configuration.
+- `service_account_mismatch`: the service belongs to another account. Run the
+  client as that account, or explicitly configure a service for the intended user.
+- `service_identity_unverified`: the manager did not expose enough identity data,
+  or the definition uses unsupported dynamic configuration. Inspect it with
+  `systemctl [--user] show <unit> --all`, `launchctl print <domain>/<label>`, or
+  `schtasks /Query /TN <task> /XML`. Linux environment files, PAM/dynamic users,
+  start-time hooks and alternate root filesystems require operator review;
+  arbitrary shell launchers and modified Windows launcher scripts are not
+  interpreted by `ensure`. Restore an explicit supported definition through an
+  intentional service-management operation before retrying.
+
+These refusals do not start a service, rewrite configuration, or launch an
+unmanaged replacement. Standard explicitly bound default and custom-root installs
+remain eligible; a successful start request still must pass live readiness checks.
+
 On POSIX, local bootstrap requires an owner-only profile directory. Newly reserved
 homes are created with mode `0700`; existing permissions are never changed by
 `ensure`. An existing home readable by other users returns

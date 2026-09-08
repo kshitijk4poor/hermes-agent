@@ -50,9 +50,9 @@ class ExistingService:
     running: bool = False
 
 
-def _run(argv: list[str] | tuple[str, ...], deadline: float):
+def _run(argv: list[str] | tuple[str, ...], deadline: float, *, encoding: str | None = "utf-8"):
     return subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
-                          text=True, encoding="utf-8", errors="replace",
+                          text=encoding is not None, encoding=encoding, errors="strict" if encoding else None,
                           creationflags=windows_hide_flags(), timeout=remaining(deadline))
 
 
@@ -92,7 +92,7 @@ def _systemd(home: Path, deadline: float) -> ExistingService | None:
     found = []
     for system in (False, True):
         command = gw._systemctl_cmd(system)
-        result = _run([*command, "show", unit, "--no-pager",
+        result = _run([*command, "show", unit, "--no-pager", "--all",
                        "--property=LoadState,ActiveState,SubState,UnitFileState," + ",".join(SYSTEMD_IDENTITY_PROPERTIES)], deadline)
         props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         if props.get("LoadState") == "not-found" and not _exists(paths[int(system)]):
@@ -161,10 +161,10 @@ def _launchd(home: Path, deadline: float) -> ExistingService | None:
 
 
 def _windows(home: Path, deadline: float) -> ExistingService | None:
-    from hermes_cli.gateway_windows import _startup_dir
+    from hermes_cli.gateway_windows import _startup_dir, _schtasks_encoding
     suffix = service_suffix(home)
     name = f"Hermes_Gateway{'_' + suffix if suffix else ''}"
-    result = _run(["schtasks.exe", "/Query", "/FO", "CSV", "/NH"], deadline)
+    result = _run(["schtasks.exe", "/Query", "/FO", "CSV", "/NH"], deadline, encoding=_schtasks_encoding())
     if result.returncode:
         raise RuntimeStartError("service_manager_unavailable")
     rows = list(csv.reader(io.StringIO(result.stdout)))
@@ -172,8 +172,8 @@ def _windows(home: Path, deadline: float) -> ExistingService | None:
         raise RuntimeStartError("service_state_unknown")
     if any(row and row[0].lstrip("\\") == name for row in rows):
         from hermes_cli.gateway_runtime_service_identity import verify_windows_task
-        definition = _run(["schtasks.exe", "/Query", "/TN", name, "/XML"], deadline)
-        identity = _run(["whoami.exe", "/USER", "/FO", "CSV", "/NH"], deadline)
+        definition = _run(["schtasks.exe", "/Query", "/TN", name, "/XML"], deadline, encoding=None)
+        identity = _run(["whoami.exe", "/USER", "/FO", "CSV", "/NH"], deadline, encoding=_schtasks_encoding())
         if definition.returncode or identity.returncode:
             raise RuntimeStartError("service_identity_unverified")
         accounts = list(csv.reader(io.StringIO(identity.stdout)))
