@@ -22,7 +22,8 @@ def probe(tmp_path):
     thread.start()
     origin = f'http://127.0.0.1:{peer.server_port}'
     keys = {side: 'config-private-' + side for side in ('left', 'right')}
-    cfg = {'model': {'provider': 'custom', 'default': 'fixture'},
+    cfg = {'model': {'provider': 'custom', 'default': 'fixture', 'base_url': origin + '/default/v1',
+                     'api_key': 'unrelated-default-private-key'},
            'providers': {s: {'base_url': origin + '/' + s + '/v1', 'api_key': k} for s, k in keys.items()},
            'auxiliary': {'title_generation': {'enabled': False}}, 'platform_toolsets': {'cli': []}}
     config = home / 'config.yaml'
