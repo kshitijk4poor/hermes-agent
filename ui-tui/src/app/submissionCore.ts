@@ -111,7 +111,7 @@ export function submitPrompt(
       .then(r => {
         if (item) {
           const accepted =
-            r?.admission_id === item.submissionId &&
+            (r?.input_id ?? r?.admission_id) === item.submissionId &&
             Boolean(destination.storedSid) &&
             r?.target_session_id === destination.storedSid &&
             r?.target_profile_home === destination.profileHome &&

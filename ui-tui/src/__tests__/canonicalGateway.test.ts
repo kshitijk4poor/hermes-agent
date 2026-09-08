@@ -8,6 +8,6 @@ it('retains prepared identity and rejects unsupported TUI launch policy instead 
   expect(() => canonicalRequest('session.create', { skills: ['test'] }, contract)).toThrow('skills')
   expect(canonicalRequest('prompt.submit', { session_id: 'sid', submission_id: 'prepared-id', text: 'hello', queued: true }, contract).params).toEqual({ session_id: 'sid', input_id: 'prepared-id', text: 'hello', queued: true })
   expect(sharedControlParams({ sharedControl: { session_id: 'sid', execution_generation: 9, prompt_id: 'approval-9' } })).toEqual({ session_id: 'sid', execution_generation: 9, prompt_id: 'approval-9' })
-  const receipt = canonicalResult('prompt.submit', { admission_id: 'prepared-id', ref: { profile_id: '/tmp/profile', session_id: 'sid' }, status: 'queued' })
-  expect(receipt).toMatchObject({ admission_id: 'prepared-id', target_profile_home: '/tmp/profile', target_session_id: 'sid' })
+  const receipt = canonicalResult('prompt.submit', { admission_id: 'server-admission', ref: { profile_id: '/tmp/profile', session_id: 'sid' }, status: 'queued' }, { input_id: 'prepared-id' })
+  expect(receipt).toMatchObject({ admission_id: 'server-admission', input_id: 'prepared-id', target_profile_home: '/tmp/profile', target_session_id: 'sid' })
 })

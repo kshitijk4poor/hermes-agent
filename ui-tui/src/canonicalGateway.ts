@@ -27,10 +27,12 @@ export function canonicalRequest(method: string, original: Record<string, unknow
   return { method, params }
 }
 
-export function canonicalResult(method: string, value: any): any {
+export function canonicalResult(method: string, value: any, request: Record<string, unknown> = {}): any {
   if (!value || typeof value !== 'object') { return value }
+  // The JSON-RPC response correlates the prepared input; admission_id is a
+  // separate server-issued identity and must not be rewritten to that input ID.
   if (method === 'prompt.submit' && value.ref) {
-    return { ...value, target_profile_home: value.ref.profile_id, target_session_id: value.ref.session_id }
+    return { ...value, input_id: request.input_id, target_profile_home: value.ref.profile_id, target_session_id: value.ref.session_id }
   }
   if (['session.create', 'session.resume', 'session.activate'].includes(method)) {
     return { ...value, info: { ...value.info, stored_session_id: value.stored_session_id,

@@ -326,6 +326,7 @@ export interface SessionSteerResponse {
 // ── Prompt / submission ──────────────────────────────────────────────
 
 export interface PromptSubmitResponse {
+  input_id?: string
   status?: string
   admission_id?: string
   target_session_id?: string
