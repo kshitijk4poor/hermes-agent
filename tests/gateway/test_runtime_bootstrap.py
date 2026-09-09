@@ -111,7 +111,11 @@ def test_native_pipe_authenticated_peer_and_deadline(tmp_path):
     server = NativeControlServer(tmp_path, handler)
     server.start()
     try:
-        assert json.loads(query_runtime_control(tmp_path, b'hello', 5))['subject'].startswith('sid:')
+        # The pipe must survive its first client: CPython's _winapi has no DisconnectNamedPipe,
+        # so a server that reaches for it dies after one answer and every later query fails.
+        for _ in range(3):
+            assert json.loads(query_runtime_control(tmp_path, b'hello', 5))['subject'].startswith('sid:')
+        assert server._thread.is_alive() and server._error is None, server._error
         started = time.monotonic()
         with pytest.raises(TimeoutError):
             query_runtime_control(tmp_path, b'stall', 0.1)
