@@ -14,8 +14,8 @@ def validate_editor(source, editor):
             or editor.get('edit_approval_policy', 'ask') != 'ask'
             or not isinstance(editor.get('mcp_servers', []), list)):
         raise RuntimeStoreError('invalid_params')
-    if editor.get('mcp_servers'):
-        raise RuntimeStoreError('acp_mcp_policy_unavailable')
+    from gateway.session_local_mcp import validate_servers
+    validate_servers(editor.get('mcp_servers', []))
 
 
 def request_editor_edit(proposal):

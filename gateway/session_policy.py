@@ -23,6 +23,7 @@ class LocalSessionPolicy:
     terminal_json: str
     credential_ref: str | None = None
     config_secret_ref: str | None = None
+    editor_mcp_json: str | None = None
 
     def config(self, authority=None):
         config = json.loads(self.config_json)
@@ -131,6 +132,8 @@ def build_policy(params, config, *, private_secrets=None):
     terminal['TERMINAL_CWD'] = cwd
     request = {k: v for k, v in params.items() if k not in {'request_id', 'api_key'}}
     request.setdefault('source', 'cli')
+    from gateway.session_local_mcp import private_editor_request
+    private_editor_request(request, private_secrets)
     _extract_config_secrets(config, private_secrets)
     _extract_config_secrets(terminal, private_secrets, (None,))
     return LocalSessionPolicy(source, SURFACES[source], cwd, model, tuple(sorted(enabled)),
@@ -166,6 +169,9 @@ def bind_launch_key(authority, session_id, policy, api_key, *, config_secrets=No
     """
     from dataclasses import replace
     import hmac
+    from gateway.session_local_mcp import PRIVATE_KEY, bind_editor_mcp
+    config_secrets = dict(config_secrets or {})
+    policy = bind_editor_mcp(authority, session_id, policy, config_secrets.pop(PRIVATE_KEY, None))
     if api_key is None and not config_secrets:
         return policy
     keys = getattr(authority, '_local_launch_keys', None)
@@ -256,7 +262,8 @@ def policy_scope(policy, *, authority=None):
     terminal_token = set_terminal_scope(terminal)
     from gateway.session_local_editor import editor_scope
     try:
-        with editor_scope(policy):
+        from gateway.session_local_mcp import editor_mcp_scope
+        with editor_scope(policy), editor_mcp_scope(authority, policy):
             yield
     finally:
         reset_terminal_scope(terminal_token)
