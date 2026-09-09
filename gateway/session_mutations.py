@@ -7,7 +7,7 @@ branch/compress/model still require their own prepared runtime publication.
 from hermes_state_runtime import RuntimeStoreError, mutate_runtime_session
 
 _METADATA = frozenset({'rename', 'archive', 'sidebar'})
-_RUNTIME_ACTIONS = frozenset({'branch', 'compress', 'model'})
+_RUNTIME_ACTIONS = frozenset({'compress', 'model'})
 _FIELDS = frozenset({'session_id', 'request_id', 'expected_revision', 'operation', 'payload'})
 
 
@@ -45,6 +45,8 @@ async def mutate_session(authority, actor, ref, params):
                     cold_history = authorize_history(conn, actor, ref.session_id)
             if not cold_history:
                 authority.authorize(actor, ref, 'session:control')
+    if operation == 'branch' and 'session:create' not in actor.capabilities:
+        raise RuntimeStoreError('permission_denied')
     authority._require_admission_open()
     live = authority.sessions.get(ref.session_id)
 
@@ -83,6 +85,9 @@ async def mutate_session(authority, actor, ref, params):
         expected_revision=params['expected_revision'], expected_generation=params.get('expected_generation'),
         operation=operation, payload=params['payload'], _live_guard=live_guard,
         _authorize_write=authorize_write if cold_history or operation == 'import' else None)
+    if operation == 'branch':
+        from gateway.session_local_recovery import restore_local_session
+        restore_local_session(authority, result['branched_session_id'])
     if operation == 'reset' and applied:
         from gateway.session_local_recovery import restore_local_session
         restore_local_session(authority, ref.session_id)
