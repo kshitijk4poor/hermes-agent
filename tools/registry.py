@@ -15,12 +15,31 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
 from hermes_constants import hermes_home_key, normalize_scope
 
 logger = logging.getLogger(__name__)
+
+_session_tool_scope = ContextVar("session_tool_scope", default=None)
+
+
+@contextmanager
+def session_tool_scope(scope):
+    """Execution-owned overlay, additive to the existing profile registry."""
+    token = _session_tool_scope.set(scope)
+    try:
+        yield
+    finally:
+        _session_tool_scope.reset(token)
+
+
+def current_session_tool_scope():
+    return _session_tool_scope.get()
+
 
 # Cap on a tool error body; only trims runaway interpolated exceptions (static msgs are ~115 chars).
 _MAX_TOOL_ERROR_CHARS = 2048
@@ -470,7 +489,10 @@ class ToolRegistry:
 
     def _merged_tools(self, scope: Optional[str] = None) -> Dict[str, ToolEntry]:
         """Return global tools overlaid with one profile's plugin tools."""
-        return {**self._tools, **self._scoped_tools.get(hermes_home_key(scope), {})}
+        entries = {**self._tools, **self._scoped_tools.get(scope or self.current_scope_key(), {})}
+        if scope is None:
+            entries.update(self._scoped_tools.get(current_session_tool_scope(), {}))
+        return entries
 
     def _toolset_entries(self, toolset: str, scope: Optional[str]) -> List[ToolEntry]:
         return self._grouped(self._merged_tools(scope).values()).get(toolset, [])
