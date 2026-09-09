@@ -56,6 +56,7 @@ async def _webhook_retry(authority, event):
     row = get_session_admission(authority.db, admission_id=rows[0]['admission_id'])
     if len(rows) != 1 or row['payload'] != payload:
         raise RuntimeStoreError('admission_conflict')
+    event._webhook_duplicate = True
     return authority._receipt(row)
 
 

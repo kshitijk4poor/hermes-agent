@@ -653,6 +653,8 @@ class WebhookAdapter(BasePlatformAdapter):
         except Exception:
             logger.exception("[webhook] Durable admission failed for %s", delivery_id)
             return _json_error("Admission unavailable; retry this delivery", 503)
+        if getattr(event, '_webhook_duplicate', False):
+            return web.json_response({"status": "duplicate", "delivery_id": delivery_id}, status=200)
         authority = self._message_handler.__self__.session_authority
         task = asyncio.create_task(self._finalize_delivery(event, authority, receipt))
         self._background_tasks.add(task)
