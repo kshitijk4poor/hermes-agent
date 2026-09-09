@@ -358,6 +358,27 @@ def _insert_prefix_row(
     return _execute_insert(dest, table, dest_columns[: len(values)], values)
 
 
+def _sessions_prefix_columns(
+    columns: list[str], defaults: dict[int, Any], cells: tuple[Any, ...],
+) -> tuple[list[str], dict[int, Any]]:
+    """Positional fallback for a sessions record no history layout claimed.
+
+    The destination declares runtime_revision/runtime_generation right after ``id``; an
+    upgraded store appended them at the end instead. Which order produced the record is
+    read off the cells (where the source sits), so the prefix zip lands ``source`` on
+    ``source`` instead of shifting every field by two.
+    """
+    runtime_columns = ["runtime_revision", "runtime_generation"]
+    base_columns = [c for c in columns if c not in runtime_columns]
+    ordered = (
+        [base_columns[0], *runtime_columns, *base_columns[1:]]
+        if _session_source_index(cells) == 3
+        else [*base_columns, *runtime_columns]
+    )
+    named_defaults = {columns[i]: value for i, value in defaults.items()}
+    return ordered, {i: named_defaults[c] for i, c in enumerate(ordered) if c in named_defaults}
+
+
 def _declared_types(conn: sqlite3.Connection, table: str) -> dict[str, str]:
     return {str(row[1]): str(row[2] or "") for row in conn.execute(f'PRAGMA table_info("{table}")')}
 
@@ -795,6 +816,8 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                     values = list(cells[:len(columns)])
                     if kind == "messages":
                         values[0] = lf_rowid
+                    elif kind == "sessions":
+                        columns, defaults = _sessions_prefix_columns(columns, defaults, cells)
                     inserted = _insert_prefix_row(dest, kind, columns, values, defaults)
             except sqlite3.DatabaseError:
                 report["unmapped_rows"] += 1
