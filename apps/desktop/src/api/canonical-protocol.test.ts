@@ -73,3 +73,10 @@ test('composer branch and model switch become canonical prepared mutations with 
   expect(protocol.result('slash.exec', model, { session_id: 's', revision: 6, operation: 'model', model: 'switched', provider: 'custom' })).toMatchObject({ type: 'exec', output: expect.stringContaining('switched') })
   expect(protocol.wire('slash.exec', protocol.prepare('slash.exec', { session_id: 's', command: 'help' }))).toBe('slash.exec')
 })
+
+test('a session.info fanout after a turn refreshes the CAS revision the next mutation presents', () => {
+  const protocol = new CanonicalDesktopProtocol()
+  protocol.result('session.resume', { session_id: 's' }, { session_id: 's', revision: 2, execution_generation: 1 })
+  protocol.event({ type: 'session.info', session_id: 's', payload: { pending: [], running: false, execution_generation: 2, revision: 5 } })
+  expect(protocol.prepare('session.branch', { session_id: 's' })).toMatchObject({ expected_revision: 5, expected_generation: 2 })
+})

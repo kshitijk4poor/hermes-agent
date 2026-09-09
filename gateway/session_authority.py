@@ -149,10 +149,14 @@ class SessionAuthority:
             handle = self._handle(ref)
             pending = [asdict(self._pending_receipt(row)) for row in
                        list_session_admissions(self.db, session_id=ref.session_id)]
+            # Turns bump runtime_revision without any session.updated event, so
+            # this is the only place a viewer learns the CAS revision a later
+            # prepared mutation must present.
             live.event_stream.publish(ref.session_id, {
                 'stored_session_id': ref.session_id, 'pending': pending,
                 'running': handle.execution_state == 'running',
                 'execution_generation': handle.execution_generation,
+                'revision': handle.revision,
             }, event_type='session.info')
 
     def _schedule(self, ref):

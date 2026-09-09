@@ -142,6 +142,10 @@ export class CanonicalDesktopProtocol {
       this.generations.set(sid, payload.execution_generation)
     }
 
+    // Turns advance the CAS revision without a session.updated event; the
+    // pending fanout is where a viewer learns the value its next mutation must present.
+    if (event.type === 'session.info' && typeof payload.revision === 'number') { this.revisions.set(sid, payload.revision) }
+
     if (typeof payload.prompt_id === 'string') {
       if (event.type.endsWith('.settled')) { this.prompts.delete(payload.prompt_id);
 
