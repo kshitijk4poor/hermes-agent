@@ -76,6 +76,17 @@ def _peer_subject(handle, *, server: bool) -> str:
     return 'sid:' + sid
 
 
+def _disconnect_pipe(handle) -> None:
+    """``DisconnectNamedPipe`` via kernel32: CPython's ``_winapi`` does not export it, and the
+    server thread must outlive its first client (a dead pipe leaves the gateway stuck in
+    ``starting`` for every later ``identify``)."""
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    disconnect = _api(k, 'DisconnectNamedPipe', wintypes.BOOL, [wintypes.HANDLE])
+    if not disconnect(handle):
+        error = ctypes.get_last_error()
+        raise OSError(None, 'DisconnectNamedPipe failed', None, error)
+
+
 def _remaining_ms(deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 0:
@@ -221,7 +232,7 @@ class NativeControlServer:
                     pass
                 finally:
                     try:
-                        win.DisconnectNamedPipe(handle)
+                        _disconnect_pipe(handle)
                     except OSError as exc:
                         if exc.winerror != 233:  # ERROR_PIPE_NOT_CONNECTED after a cancelled accept
                             raise
