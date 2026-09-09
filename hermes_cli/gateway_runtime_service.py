@@ -35,18 +35,27 @@ def remaining(deadline: float) -> float:
 
 
 def service_suffix(home: Path) -> str:
+    """Host-service suffix for the REQUESTED home, never the initiating client's env.
+
+    Same rule as ``hermes_cli.gateway._profile_suffix``: only the platform-native
+    default home owns the bare unit name; ``<root>/profiles/<name>`` yields the
+    profile name; any other root (Docker, a temp harness) yields a path hash so a
+    custom root can never resolve to the production ``hermes-gateway`` unit.
+    """
     from hermes_constants import _get_platform_default_hermes_home
     from hermes_cli.gateway import _profile_name_from_home
     default = _get_platform_default_hermes_home().resolve()
     home = home.resolve()
-    # Mirror the installer's custom-root rule for the REQUESTED home, not the
-    # initiating client's environment. Two custom roots can share a unit name;
-    # effective binding validation, not a guessed hash, disambiguates them.
-    if not home.is_relative_to(default):
-        default = home.parent.parent if home.parent.name == "profiles" else home
     if home == default:
         return ""
-    return _profile_name_from_home(home, default) or hashlib.sha256(str(home).encode()).hexdigest()[:8]
+    root = default
+    if not home.is_relative_to(default):
+        root = home.parent.parent if home.parent.name == "profiles" else home
+    if home != root:
+        name = _profile_name_from_home(home, root)
+        if name:
+            return name
+    return hashlib.sha256(str(home).encode()).hexdigest()[:8]
 
 
 @dataclass(frozen=True)

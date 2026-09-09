@@ -174,6 +174,7 @@ def test_unmanaged_child_uses_explicit_home_and_survives_launcher_exit(tmp_path,
 
 
 @pytest.mark.linux_only
+@pytest.mark.spawns_gateway_lookalike  # stub interpreter records env then exits; reaped below
 def test_unmanaged_runtime_does_not_inherit_client_yolo(tmp_path, monkeypatch):
     from hermes_cli import gateway_runtime_start as start
 
