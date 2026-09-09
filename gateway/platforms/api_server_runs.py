@@ -1235,6 +1235,19 @@ async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "we
         self, request, _api_server=_api_server, permission=None, active_fallback=False)
     if err is not None:
         return err
+    if getattr(self.gateway_runner, 'session_authority', None) is not None:
+        from gateway.platforms.api_server_authority_runs import run_admission
+        from hermes_state_runtime import RuntimeStoreError
+        owned = run_admission(self, run_id)
+        agent = None
+        if owned is not None and run_id not in self._stopping_run_ids:
+            authority, row = owned
+            try:
+                authority.check_approval_generation(row['target_session_id'], row['generation'])
+                from gateway.session_contract import SessionRef
+                agent = authority.agent(SessionRef(authority.profile_id, row['target_session_id']))
+            except RuntimeStoreError:
+                pass
     # /stop keeps agent refs during cooperative shutdown, so the status gate (not the
     # agent ref) is what rejects stop-then-steer.
     if status.get("status") != "running" or not hasattr(agent, "steer"):

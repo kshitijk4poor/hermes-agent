@@ -99,6 +99,10 @@ async def probe(peer):
                             return (await response.json())['run_id']
                     blocking = await create_run('BLOCK_FIFO')
                     assert await asyncio.to_thread(peer.blocked.wait, 10)
+                    async with client.post(f'http://127.0.0.1:{api_port}/v1/runs/{blocking}/steer',
+                            json={'input': 'SAFE_STEER'}, headers=headers) as response:
+                        steered = await response.json()
+                        assert response.status == 200 and steered['accepted'], steered
                     queued = await create_run('CANCEL_ONLY_QUEUED')
                     async with client.post(f'http://127.0.0.1:{api_port}/v1/runs/{queued}/stop', headers=headers) as response:
                         stopped = await response.json()
