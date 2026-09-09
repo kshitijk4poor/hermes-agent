@@ -174,7 +174,7 @@ def recover_session_inputs(db, *, epoch: int) -> int:
 def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str,
                            request_id: str, expected_revision: int,
                            operation: str, payload: dict, expected_generation: int | None = None,
-                           _live_guard=None, _authorize_write=None) -> dict:
+                           _live_guard=None, _authorize_write=None, _prepare_only=False, _prepared=None) -> dict:
     """Commit a closed metadata edit and its retry receipt in the same transaction.
 
     Caller authorizes the principal and resolves the canonical session. These
@@ -189,7 +189,7 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
     validate_action(operation, payload)
     if expected_generation is not None and (type(expected_generation) is not int or expected_generation < 0):
         raise RuntimeStoreError('invalid_params')
-    if operation in {'delete', 'rewind', 'reset', 'branch'} and expected_generation is None:
+    if operation in {'delete', 'rewind', 'reset', 'branch', 'model', 'compress'} and expected_generation is None:
         raise RuntimeStoreError('invalid_params')
     # Snapshot caller data before waiting for the writer lock.
     payload = json.loads(_json(payload))
@@ -222,7 +222,10 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
             _live_guard(targets)
         if _authorize_write is not None:
             _authorize_write(conn)
-        affected, projection = apply_action(db, conn, session_id, operation, payload)
+        if _prepare_only:
+            from hermes_state_mutation_prepared import local_snapshot
+            return {'snapshot': local_snapshot(db, conn, session_id)}
+        affected, projection = apply_action(db, conn, session_id, operation, payload, prepared=_prepared)
         conn.executemany('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?',
                          [(target,) for target in affected])
         updated = conn.execute('SELECT * FROM sessions WHERE id=?', (session_id,)).fetchone()

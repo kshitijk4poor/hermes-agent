@@ -122,6 +122,15 @@ def create_local_session(authority, actor, params):
     return restore_local_session(authority, sid)
 
 
+def publish_local_policy(authority, session_id):
+    from hermes_state_local import local_receipt
+    from gateway.session_policy import restore_policy
+    live = authority.sessions[session_id]
+    adapter = authority.runner.adapters[Platform.LOCAL]
+    adapter.policies[live.source.chat_id] = restore_policy(local_receipt(authority.db, session_id)['policy'])
+    authority.runner._evict_cached_agent(live.route)
+
+
 def local_session_info(authority, ref):
     live = authority.sessions[ref.session_id]
     agent = authority.agent(ref)

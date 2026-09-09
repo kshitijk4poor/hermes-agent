@@ -7,7 +7,7 @@ branch/compress/model still require their own prepared runtime publication.
 from hermes_state_runtime import RuntimeStoreError, mutate_runtime_session
 
 _METADATA = frozenset({'rename', 'archive', 'sidebar'})
-_RUNTIME_ACTIONS = frozenset({'compress', 'model'})
+_RUNTIME_ACTIONS = frozenset({'compress'})
 _FIELDS = frozenset({'session_id', 'request_id', 'expected_revision', 'operation', 'payload'})
 
 
@@ -80,11 +80,25 @@ async def mutate_session(authority, actor, ref, params):
         if not authorize_history(conn, actor, ref.session_id, claim=True):
             raise RuntimeStoreError('permission_denied')
 
+    prepared = None
+    if operation == 'model':
+        prepared = mutate_runtime_session(authority.db, epoch=authority.epoch,
+            principal_id=actor.subject, session_id=ref.session_id, request_id=params['request_id'],
+            expected_revision=params['expected_revision'], expected_generation=params.get('expected_generation'),
+            operation=operation, payload=params['payload'], _live_guard=live_guard, _prepare_only=True)
+        if 'snapshot' not in prepared:
+            return prepared
+        from gateway.session_mutation_model import prepare_model
+        prepared = await prepare_model(authority, live, params['payload'], prepared)
+        applied = False
     result = mutate_runtime_session(authority.db, epoch=authority.epoch,
         principal_id=actor.subject, session_id=ref.session_id, request_id=params['request_id'],
         expected_revision=params['expected_revision'], expected_generation=params.get('expected_generation'),
-        operation=operation, payload=params['payload'], _live_guard=live_guard,
+        operation=operation, payload=params['payload'], _live_guard=live_guard, _prepared=prepared,
         _authorize_write=authorize_write if cold_history or operation == 'import' else None)
+    if operation == 'model' and applied:
+        from gateway.session_local import publish_local_policy
+        publish_local_policy(authority, ref.session_id)
     if operation == 'branch':
         from gateway.session_local_recovery import restore_local_session
         restore_local_session(authority, result['branched_session_id'])
