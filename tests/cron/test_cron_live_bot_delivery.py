@@ -1,5 +1,6 @@
 """Cron admission must not become a second writer or a completed-delivery claim."""
 from pathlib import Path
+import subprocess
 from unittest.mock import Mock
 
 from cron import scheduler_delivery as delivery
@@ -37,7 +38,7 @@ def test_live_delivery_retry_keeps_receipt_across_owner_loss(tmp_path, monkeypat
     source = tmp_path / "custom-home"
     monkeypatch.setenv("HERMES_HOME", str(source))
     subprocess_run = Mock(side_effect=AssertionError("live owner must not spawn CLI"))
-    monkeypatch.setattr(delivery, "_run_bot_chat_turn", subprocess_run)
+    monkeypatch.setattr(subprocess, "run", subprocess_run)
     from hermes_cli.profiles import get_profile_dir
 
     authority = _FakeAuthority()
@@ -82,7 +83,7 @@ def test_result_records_pending_until_terminal_receipt(tmp_path, monkeypatch):
     monkeypatch.setattr(mailbox, "authority_delivery", authority)
     monkeypatch.setattr(delivery._sched, "load_config", lambda: {})
     monkeypatch.setattr(config, "load_gateway_config", lambda: None)
-    monkeypatch.setattr(delivery, "_run_bot_chat_turn", Mock(side_effect=AssertionError("CLI")))
+    monkeypatch.setattr(subprocess, "run", Mock(side_effect=AssertionError("CLI")))
     updates = []
     monkeypatch.setattr(jobs, "update_job", lambda key, values: updates.append(values))
     job = dict(id="digest", execution_id="run", deliver="bot-chat")
