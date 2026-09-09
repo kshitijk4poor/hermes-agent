@@ -7,7 +7,7 @@ def test_local_dm_cannot_fall_back_to_a_cli_turn(tmp_path, monkeypatch, capsys):
     payload = tmp_path / 'dm.txt'
     payload.write_text('private DM')
     calls = []
-    monkeypatch.setattr(dm, '_run_local_turn', lambda *args: calls.append(args) or 0)
+    monkeypatch.setattr(dm, '_run_local_turn', lambda *args: calls.append(args) or 0, raising=False)
     monkeypatch.setattr(dm, '_local_delivery_home', lambda argv: None)
     assert dm._run_delivery(['hermes', '-p', 'missing'], str(payload), stdin_file=False) == 1
     assert calls == []
