@@ -38,6 +38,11 @@ def check_api_turn(authority, ref, payload):
         if set(data['settings']) - set(_SETTING_KEYS):
             raise RuntimeStoreError('invalid_params')
     settings = payload.get('api_turn_v1', {}).get('settings') or api_settings(authority, ref)
+    check_api_settings(adapter, settings)
+    return adapter
+
+
+def check_api_settings(adapter, settings):
     dispatch = settings.get('room_dispatch')
     if dispatch is not None:
         from gateway.hosted_room_peer import HostedMemberDispatch, GatewayRoomCatalog
@@ -75,7 +80,7 @@ def admit_api_turn(adapter, **kwargs):
     if adapter._ensure_session_db() is not authority.db:
         raise RuntimeStoreError('profile_mismatch')
     sid = kwargs.get('session_id') or uuid.uuid4().hex
-    ref = bind_api_session(authority, sid, hosted_dispatch=kwargs.get("room_dispatch"))
+    authority._require_admission_open()
     settings = {key: kwargs.get(key) for key in _SETTING_KEYS}
     # Route credentials remain in the server's configuration, never admission JSON.
     route = settings.get('route')
@@ -87,10 +92,18 @@ def admit_api_turn(adapter, **kwargs):
         settings['route'] = {k: v for k, v in route.items() if k != 'api_key'}
     payload = json.loads(_json({'text': kwargs['user_message'], 'api_turn_v1': {
         'history': None if kwargs.get('history_from_session') else kwargs['conversation_history'], 'settings': settings}}))
+    request_id = kwargs.get('request_id') or kwargs.get('active_run_id') or uuid.uuid4().hex
+    from hermes_state_terminal import retry_terminal_admission
+    row = retry_terminal_admission(authority.db, epoch=authority.epoch, principal_id='api',
+        session_id=sid, request_id=request_id, payload=payload)
+    if row is not None:
+        check_api_settings(adapter, settings)
+        from gateway.session_contract import SessionRef
+        return authority, SessionRef(authority.profile_id, sid), row
+    ref = bind_api_session(authority, sid, hosted_dispatch=kwargs.get("room_dispatch"))
     check_api_turn(authority, ref, payload)
     row = admit_session_input(authority.db, epoch=authority.epoch, principal_id='api',
-                              session_id=sid, request_id=kwargs.get('request_id') or kwargs.get('active_run_id') or uuid.uuid4().hex,
-                              payload=payload)
+                              session_id=sid, request_id=request_id, payload=payload)
     return authority, ref, row
 
 
