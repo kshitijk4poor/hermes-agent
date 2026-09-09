@@ -979,12 +979,6 @@ def _import_db_member_exclusive(
                     print(f"  {restored}/{file_count} files ...")
                 continue
 
-            # Strip prefix if detected
-            if prefix and member.startswith(prefix):
-                rel = member[len(prefix):]
-            else:
-                rel = member
-
 def _import_members(
     zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
 ) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
@@ -1009,6 +1003,9 @@ def _import_members_exclusive(
     zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
 ) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
     """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
+
+            if not rel:
+                continue
 
             try:
                 parts = tuple(normalize_archive_parts(rel))
