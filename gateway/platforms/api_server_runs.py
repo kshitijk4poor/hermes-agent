@@ -500,7 +500,7 @@ class _RunLaunch:
     request_profile: Any
     browser_control_principal: Any
     browser_control_transport_family: Any
-    turn_author: Optional[Dict[str, Any]] = None  # memory-attribution label only; grants nothing
+    admission: Any = None
 
     @property
     def approval_session_key(self) -> str:
@@ -737,8 +737,14 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
             **{k: agent_overrides.get(k) for k in ("requested_model", "requested_provider", "model_options")}),
         request_profile=_api_server._api_request_profile.get(),
         browser_control_principal=_api_server._api_request_browser_control_principal.get(),
-        browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get(),
-        turn_author=turn_author)
+        browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get())
+    if getattr(self.gateway_runner, 'session_authority', None) is not None:
+        from gateway.session_api_turn import admit_api_turn
+        with self._profile_scope(launch.request_profile):
+            launch.admission = admit_api_turn(self, user_message=launch.user_message,
+                conversation_history=launch.conversation_history, active_run_id=run_id,
+                history_from_session=bool(body.get('session_id')) and not previous_response_id,
+                **launch.agent_kwargs)
     self._activate_admitted_request()
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
@@ -957,16 +963,18 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
         if run_id in self._stopping_run_ids:
             _finish("cancelled")
             return
-        with self._profile_scope(run.request_profile):
-            agent = self._create_agent(
-                stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
-                interim_assistant_callback=_interim_cb, **run.agent_kwargs)
-        self._active_run_agents[run_id] = agent
-        approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
-        result, usage, served_runtime = await _submit_api_worker(
-            loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
-        # Publish request metrics (daily counters + latency) with each completed run (#52323).
-        self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
+        if run.admission is not None:
+            from gateway.session_api_turn import observe_api_turn
+            result, usage = await observe_api_turn(run.admission, stream_delta_callback=_text_cb)
+        else:
+            with self._profile_scope(run.request_profile):
+                agent = self._create_agent(
+                    stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
+                    **run.agent_kwargs)
+            self._active_run_agents[run_id] = agent
+            approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
+            result, usage = await loop.run_in_executor(
+                None, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
         if not isinstance(result, dict):
             result = {}
         status, fields = terminal_run_status(result)

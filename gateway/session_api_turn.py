@@ -1,6 +1,7 @@
 """Trusted API preparation and observation of the canonical durable FIFO."""
 import asyncio
 from contextvars import ContextVar
+from contextlib import contextmanager
 import json
 import uuid
 
@@ -13,7 +14,7 @@ api_execution: ContextVar[dict | None] = ContextVar('api_execution', default=Non
 _SETTINGS_PREFIX = 'gateway.api.settings.v1.'
 _SETTING_KEYS = ('ephemeral_system_prompt', 'requested_model', 'requested_provider',
                  'model_options', 'route', 'session_model', 'confirmed_runtime_lock',
-                 'requested_runtime', 'route_source')
+                 'requested_runtime', 'route_source', 'room_dispatch', 'room_execution_policy')
 
 
 def api_settings(authority, ref):
@@ -36,10 +37,40 @@ def check_api_turn(authority, ref, payload):
             raise RuntimeStoreError('invalid_params')
         if set(data['settings']) - set(_SETTING_KEYS):
             raise RuntimeStoreError('invalid_params')
+    settings = payload.get('api_turn_v1', {}).get('settings') or api_settings(authority, ref)
+    dispatch = settings.get('room_dispatch')
+    if dispatch is not None:
+        from gateway.hosted_room_peer import HostedMemberDispatch, GatewayRoomCatalog
+        from gateway.platforms.api_server_room_grants import _local_room_catalog
+        from gateway import hosted_rooms
+        bound = HostedMemberDispatch.from_mapping(dispatch)
+        if bound.target_install_id != hosted_rooms.local_authority_gateway_id():
+            raise RuntimeStoreError('permission_denied')
+        _, catalog = _local_room_catalog(adapter, bound.target_profile, bound.target_install_id)
+        current = GatewayRoomCatalog.from_mapping(catalog)
+        if (current.catalog_digest != bound.capability_digest
+                or current.execution_policy.as_mapping() != settings.get('room_execution_policy')):
+            raise RuntimeStoreError('permission_denied')
     return adapter
 
 
-async def run_api_turn(adapter, **kwargs):
+@contextmanager
+def api_policy_scope():
+    current = api_execution.get()
+    policy = current['settings'].get('room_execution_policy') if current else None
+    token = None
+    if policy is not None:
+        from gateway.hosted_room_execution_policy import RoomExecutionPolicy, bind_room_execution_policy
+        token = bind_room_execution_policy(RoomExecutionPolicy.from_mapping(policy))
+    try:
+        yield
+    finally:
+        if token is not None:
+            from gateway.hosted_room_execution_policy import reset_room_execution_policy
+            reset_room_execution_policy(token)
+
+
+def admit_api_turn(adapter, **kwargs):
     authority = adapter.gateway_runner.session_authority
     if adapter._ensure_session_db() is not authority.db:
         raise RuntimeStoreError('profile_mismatch')
@@ -60,6 +91,16 @@ async def run_api_turn(adapter, **kwargs):
     row = admit_session_input(authority.db, epoch=authority.epoch, principal_id='api',
                               session_id=sid, request_id=kwargs.get('request_id') or kwargs.get('active_run_id') or uuid.uuid4().hex,
                               payload=payload)
+    return authority, ref, row
+
+
+async def run_api_turn(adapter, **kwargs):
+    admitted = admit_api_turn(adapter, **kwargs)
+    return await observe_api_turn(admitted, **kwargs)
+
+
+async def observe_api_turn(admitted, **kwargs):
+    authority, ref, row = admitted
     if row['status'] == 'terminal':
         result = admission_result(authority.db, row['admission_id'])
         if result is None:

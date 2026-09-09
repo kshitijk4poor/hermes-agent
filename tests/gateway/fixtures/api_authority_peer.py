@@ -71,6 +71,42 @@ async def probe(peer):
                 assert len(rows) == 2 and all(r['status'] == 'terminal' for r in rows), rows
                 systems = [[m for m in req['messages'] if m['role'] in ('system', 'developer')] for req in peer.requests]
                 assert systems[0] == systems[1] and 'API_STABLE_SYSTEM' in json.dumps(systems[0]), systems
+                if os.environ.get('API_RUN'):
+                    async with client.post(f'http://127.0.0.1:{api_port}/v1/runs',
+                            json={'session_id': ref.session_id, 'input': 'RUN_ON_SHARED', 'instructions': 'API_STABLE_SYSTEM'},
+                            headers={**headers, 'Idempotency-Key': 'run-shared'}) as response:
+                        accepted = await response.json()
+                        assert response.status == 202, accepted
+                    run_id = accepted['run_id']
+                    admitted = list_session_admissions(authority.db, session_id=ref.session_id, pending_only=False)
+                    assert any(row['request_id'] == run_id for row in admitted), 'HTTP 202 preceded canonical admission'
+                    async with asyncio.timeout(20):
+                        while True:
+                            async with client.get(f'http://127.0.0.1:{api_port}/v1/runs/{run_id}', headers=headers) as response:
+                                status = await response.json()
+                            if status.get('status') in ('completed', 'failed', 'cancelled'):
+                                break
+                            await asyncio.sleep(.02)
+                    assert status['status'] == 'completed', status
+                    assert authority.agent(ref) is agent
+                    admitted = list_session_admissions(authority.db, session_id=ref.session_id, pending_only=False)
+                    assert len(admitted) == 3 and all(row['status'] == 'terminal' for row in admitted), admitted
+                if os.environ.get('API_RUN') == 'controls':
+                    async def create_run(text):
+                        async with client.post(f'http://127.0.0.1:{api_port}/v1/runs', json={
+                            'session_id': ref.session_id, 'input': text, 'instructions': 'API_STABLE_SYSTEM'}, headers=headers) as response:
+                            assert response.status == 202, await response.text()
+                            return (await response.json())['run_id']
+                    blocking = await create_run('BLOCK_FIFO')
+                    assert await asyncio.to_thread(peer.blocked.wait, 10)
+                    queued = await create_run('CANCEL_ONLY_QUEUED')
+                    async with client.post(f'http://127.0.0.1:{api_port}/v1/runs/{queued}/stop', headers=headers) as response:
+                        stopped = await response.json()
+                        assert response.status == 200 and stopped['status'] == 'cancelled', stopped
+                    pending_rows = list_session_admissions(authority.db, session_id=ref.session_id, pending_only=False)
+                    assert next(r for r in pending_rows if r['request_id'] == queued)['outcome'] == 'cancelled'
+                    assert next(r for r in pending_rows if r['request_id'] == blocking)['status'] == 'started'
+                    peer.release.set()
                 if os.environ.get('API_ADVANCED'):
                     await ws.send(json.dumps({'jsonrpc': '2.0', 'id': 3, 'method': 'prompt.submit', 'params': {'session_id': ref.session_id, 'input_id': 'ws-block', 'text': 'BLOCK_FIFO'}}))
                     await until(lambda f: f.get('id') == 3)

@@ -890,8 +890,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
 
     def run_sync(self):
         from gateway.session_policy import policy_for_source, policy_scope
+        from gateway.session_api_turn import api_policy_scope
         with policy_scope(policy_for_source(self._runner, self._ctx.source),
-                          authority=getattr(self._runner, "session_authority", None)):
+                          authority=getattr(self._runner, "session_authority", None)), api_policy_scope():
             result = self._run_sync_scoped()
             from gateway.session_results import execution_result
             captured = execution_result.get()
@@ -925,6 +926,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         platform_key = policy.platform if policy else ("cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value)
         combined_ephemeral = self._combined_ephemeral_prompt()
         max_iterations = policy.max_turns if policy else _current_max_iterations()
+        from gateway.hosted_room_execution_policy import current_room_execution_policy
+        room = current_room_execution_policy()
+        if room is not None:
+            max_iterations = room.max_iterations
+            ctx.enabled_toolsets = list(room.enabled_toolsets)
         try:
             model, runtime_kwargs = runner._resolve_session_agent_runtime(
                 source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
@@ -954,8 +960,18 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         pr = runner._provider_routing
         reasoning_config = (policy.reasoning_config if policy else
             runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))
-        runner._reasoning_config = reasoning_config
         runner._service_tier = runner._resolve_session_service_tier(source=ctx.source, session_key=ctx.session_key)
+        from gateway.session_api_turn import api_execution
+        api = api_execution.get()
+        if api is not None:
+            from gateway.platforms.api_server import _request_reasoning_config, _request_service_tier, _REQUEST_OPTION_MISSING
+            requested_reasoning = _request_reasoning_config(api['settings'].get('model_options'))
+            if requested_reasoning is not None:
+                reasoning_config = requested_reasoning
+            tier = _request_service_tier(api['settings'].get('model_options'))
+            if tier is not _REQUEST_OPTION_MISSING:
+                runner._service_tier = tier
+        runner._reasoning_config = reasoning_config
         stream_consumer, stream_delta_cb, interim_cb, want_interim = self._setup_stream_consumer(platform_key)
         turn_route = runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
         agent, reused_cached_agent = self._resolve_turn_agent(
