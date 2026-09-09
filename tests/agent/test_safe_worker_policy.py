@@ -219,3 +219,42 @@ def test_safe_worker_bypasses_rule_readers_even_without_cli_flags(tmp_path, mode
         assert "SUB_SENTINEL" in result["hints"]
         assert {"AGENTS.md", "SOUL.md", "SKILL.md", "MEMORY.md"} <= set(result["reads"])
         assert result["engines"] == ["sentinel"] and result["memory"]
+
+
+@pytest.mark.parametrize("mode", ["safe", "config", "ordinary"])
+def test_bare_agent_constructor_cannot_restore_safe_customizations(tmp_path, mode):
+    result = run_worker(tmp_path, r"""
+        import json, os, sys
+        from pathlib import Path
+        mode = os.environ["PROBE_MODE"]
+        home = Path(os.environ["HERMES_HOME"])
+        (home / "SOUL.md").write_text("IDENTITY_SENTINEL")
+        if mode != "ordinary":
+            from agent.safe_worker_policy import _bind_safe_worker_policy
+            _bind_safe_worker_policy(safe_mode=mode == "safe", ignore_user_config=True,
+                config={"agent": {"environment_probe": False}})
+        reads = []
+        def audit(event, args):
+            if event == "open" and str(args[0]).endswith("config.yaml") and args[1] != "w":
+                reads.append(str(args[0]))
+        sys.addaudithook(audit)
+        from run_agent import AIAgent
+        agent = AIAgent(model="safe-fixture", provider="custom", base_url="http://127.0.0.1:9/v1",
+            api_key="fixture", enabled_toolsets=[], quiet_mode=True, skip_context_files=False,
+            load_soul_identity=True, skip_background_review=False,
+            prefill_messages=[{"role": "user", "content": "PREFILL_SENTINEL"}],
+            save_trajectories=False)
+        from agent.background_review import load_background_review_settings
+        flags = [agent.skip_context_files, agent.load_soul_identity, agent.skip_background_review]
+        print(json.dumps({"flags": flags, "prefill": agent.prefill_messages,
+                          "review": load_background_review_settings()[0], "reads": reads}))
+    """, mode)
+    if mode == "safe":
+        assert result == {"flags": [True, False, True], "prefill": [], "review": False, "reads": []}
+    else:
+        assert result["flags"] == [False, True, False]
+        assert result["prefill"] and result["review"]
+        if mode == "ordinary":
+            assert result["reads"]
+        else:
+            assert result["reads"] == []
