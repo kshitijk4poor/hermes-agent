@@ -301,7 +301,7 @@ def enqueue_envelope(root: Path | str, *, target: dict, message: str, sender_pro
                                    "Try again once that machine reconnects to the Desktop.")
     base = _ensure_dirs(root)
     envelope = {
-        "id": uuid.uuid4().hex, "created_at": int(time.time()),
+        "id": uuid.uuid4().hex, "created_at": int(time.time()), "canonical_delivery_v1": True,
         "from_profile": sender_profile, "from_handle": sender_handle,
         "target_connection": target["connection_id"], "target_profile": target["profile"],
         "target_handle": target["handle"], "message": message,
@@ -364,59 +364,14 @@ def claim_pending_envelopes(root: Path | str) -> list[dict]:
         claimed = base / CLAIMED_DIR / path.name
         with contextlib.suppress(OSError, ValueError):
             os.replace(path, claimed)  # atomic claim
-            os.utime(claimed, (now, now))  # the re-offer window counts from the claim, not the enqueue
-            envelope = json.loads(claimed.read_text(encoding="utf-8-sig"))
-            if not isinstance(envelope, dict):
-                raise ValueError(f"expected a JSON object, got {type(envelope).__name__}")
-            out.append(envelope)
-    return out
-
-
-def _reoffer_unanswered(root: Path | str, base: Path, ttl: float, now: float) -> list[dict]:
-    """``claimed/`` envelopes unanswered ``REOFFER_AFTER_SECONDS`` after their claim, at most once each.
-
-    The claim is the Desktop's: one that disconnects between ``outbox.drain`` and ``bot_relay.deliver``
-    leaves the envelope here with no reply, silent until the waiter's deadline and then swept, while
-    the reconnected Desktop's drains see an empty outbox (#111021, #111207). Bounds, in check order:
-
-    * ``created_at + REPLY_WAIT_SECONDS`` passed with no reply — the waiter is gone (or about to be);
-      a ``delivery_timeout`` reply is written so it learns, and the envelope is never handed out again.
-    * already re-offered (``reoffered_at`` stamped on the envelope) — one extra delivery per message,
-      never a turn loop against a target nobody is listening for.
-    * ``bot_mode.envelope_ttl_seconds`` applies to the re-offer leg exactly as to the outbox: the
-      message is back in the queue from ``claim + REOFFER_AFTER_SECONDS``; a drain that comes ``ttl``
-      later than that refuses it with ``queued_expired``.
-    """
-    out: list[dict] = []
-    for path in sorted((base / CLAIMED_DIR).glob("*.json"), key=_queued_at):
-        if (base / REPLIES_DIR / path.name).exists():
-            continue
+            out.append(json.loads(claimed.read_text(encoding="utf-8")))
+    seen = {row['id'] for row in out}
+    for path in sorted((base / CLAIMED_DIR).glob('*.json')):
         with contextlib.suppress(OSError, ValueError):
-            claimed_at = path.stat().st_mtime
-            envelope = json.loads(path.read_text(encoding="utf-8-sig"))
-            if not isinstance(envelope, dict):
-                raise ValueError(f"expected a JSON object, got {type(envelope).__name__}")
-            env_id = str(envelope.get("id") or "")
-            label = f"@{envelope.get('target_handle') or '?'} on {envelope.get('target_connection') or '?'}"
-            created = float(envelope.get("created_at") or claimed_at)
-            if now - created > REPLY_WAIT_SECONDS:
-                write_reply(root, env_id, reason="delivery_timeout", error=(
-                    f"no reply from {label} within {REPLY_WAIT_SECONDS}s of sending — the Desktop picked "
-                    "the message up but never reported a delivery. It will not be retried; resend if it matters."))
-                continue
-            if envelope.get("reoffered_at"):
-                continue
-            queued_for = now - claimed_at - REOFFER_AFTER_SECONDS
-            if queued_for < 0:
-                continue
-            if ttl > 0 and queued_for > ttl:
-                write_reply(root, env_id, reason="queued_expired", error=(
-                    f"re-queued message to {label} expired after {ttl}s waiting for the Desktop to drain it "
-                    "again — it was NOT delivered. Resend once the Desktop reconnects."))
-                continue
-            envelope["reoffered_at"] = int(now)
-            _atomic_write_json(path, envelope)
-            out.append(envelope)
+            envelope = json.loads(path.read_text(encoding='utf-8'))
+            if (envelope.get('canonical_delivery_v1') is True and envelope['id'] not in seen
+                    and not (base / REPLIES_DIR / path.name).exists()):
+                out.append(envelope)
     return out
 
 
