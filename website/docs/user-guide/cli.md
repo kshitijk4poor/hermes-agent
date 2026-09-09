@@ -45,8 +45,10 @@ hermes --tui -s hermes-agent-dev,github-auth
 
 # Resume previous sessions
 hermes --resume <session_id>  # Resume a specific session by ID (-r)
-hermes --tui --continue       # Resume the most recent session (-c) — TUI only
-hermes --tui --resume latest  # Same as -c; classic `hermes chat` refuses `latest`/`--continue`
+hermes --resume "my thread"   # Resume by title (latest "#N" continuation in the lineage)
+hermes -c "my thread" --create-if-missing  # Resume that titled session, creating it if absent
+hermes --tui --continue       # Resume the most recent session (bare -c) — TUI only
+hermes --tui --resume latest  # Same as bare -c; classic `hermes chat` refuses `latest` and bare `-c`
 hermes --tui --resume latest --in ./dir  # Resume ./dir's latest session, staying in ./dir
 
 # Verbose mode (debug output)
@@ -141,7 +143,7 @@ for the exact supported subset and trust boundary.
 ## Interface Layout
 
 :::info The classic CLI is a gateway client
-`hermes chat` (and the bare `hermes` prompt when `display.interface` is `cli`) no longer runs the agent inside your terminal process. It discovers or starts the profile's gateway (`hermes gateway ensure`), creates or resumes the session there, and attaches over the gateway's local WebSocket — the same session a Desktop window, the TUI, or a Telegram topic can open at the same time. Closing the terminal detaches (`Detached; accepted work continues at the gateway.`); it does not cancel the turn. Your working directory, `--model`, `--provider`, `--reasoning`, `--toolsets`, `--max-turns`, `--ignore-rules`, `--base-url`/`--api-key`, and `--safe-mode`/`--ignore-user-config` are frozen into the session at creation and cannot be changed by `--resume`. Options that only make sense for an in-process agent — `--image`, `--skills`, `--worktree`, `--checkpoints`, `--yolo`, `--pass-session-id`, `--continue`, `--create-if-missing`, `--run-budget`, `--verbose`, `--compact`, `--list-tools`, `--list-toolsets`, and `--resume latest` — are refused up front (`Unsupported gateway CLI options: …`, exit 2); nothing falls back to a local agent. In this mode the slash surface is `/stop`, `/approve <id> <choice>`, `/answer <id> <text>`, `/discard <admission_id>`, `/branch [title]`, `/model <model> [--provider name]`, `/compress [focus]`, `/help` and `/quit`; other slash commands print `Unsupported gateway CLI command; use /help.` Use the TUI (`hermes --tui`) for the full slash registry.
+`hermes chat` (and the bare `hermes` prompt when `display.interface` is `cli`) no longer runs the agent inside your terminal process. It discovers or starts the profile's gateway (`hermes gateway ensure`), creates or resumes the session there, and attaches over the gateway's local WebSocket — the same session a Desktop window, the TUI, or a Telegram topic can open at the same time. Closing the terminal detaches (`Detached; accepted work continues at the gateway.`); it does not cancel the turn. Your working directory, `--model`, `--provider`, `--reasoning`, `--toolsets`, `--max-turns`, `--ignore-rules`, `--base-url`/`--api-key`, and `--safe-mode`/`--ignore-user-config` are frozen into the session at creation and cannot be changed by `--resume`. `--resume <id-or-title>` and `-c <title>` name the session; the gateway resolves the title (exact id first, then the latest `"<title> #N"` continuation, followed to its live tip) among the sessions you may read, and reports `No session found matching '…'` (exit 1) otherwise. `-c <title> --create-if-missing` creates a session with that title when none exists and resumes it when one does, so programmatic callers (Bot Mode's `Bot Chat` turns) get a deterministic thread. Options that only make sense for an in-process agent — `--image`, `--skills`, `--worktree`, `--checkpoints`, `--yolo`, `--pass-session-id`, bare `--continue` (no name), `--create-if-missing` without `-c <name>`, `--run-budget`, `--verbose`, `--compact`, `--list-tools`, `--list-toolsets`, and `--resume latest` — are refused up front (`Unsupported gateway CLI options: …`, exit 2); nothing falls back to a local agent. In this mode the slash surface is `/stop`, `/approve <id> <choice>`, `/answer <id> <text>`, `/discard <admission_id>`, `/branch [title]`, `/model <model> [--provider name]`, `/compress [focus]`, `/help` and `/quit`; other slash commands print `Unsupported gateway CLI command; use /help.` Use the TUI (`hermes --tui`) for the full slash registry.
 :::
 
 <img className="docs-terminal-figure" src="/docs/img/docs/cli-layout.svg" alt="Stylized preview of the Hermes CLI layout showing the banner, conversation area, and fixed input prompt." />
@@ -496,6 +498,7 @@ Resume options:
 hermes --continue                          # Resume the most recent CLI session
 hermes -c                                  # Short form
 hermes -c "my project"                     # Resume a named session (latest in lineage)
+hermes -c "my project" --create-if-missing # Same, creating the titled session if none exists
 hermes --resume 20260225_143052_a1b2c3     # Resume a specific session by ID
 hermes --resume "refactoring auth"         # Resume by title
 hermes --resume latest                     # Resume the most recent session (same as -c)
