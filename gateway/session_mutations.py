@@ -30,24 +30,26 @@ async def mutate_session(authority, actor, ref, params):
 
     applied = False
 
-    def live_guard():
+    def live_guard(targets):
         nonlocal applied
         applied = True
         if operation in _METADATA or operation == 'import':
             return
-        if live is not None and live.task is not None and not live.task.done():
-            raise RuntimeStoreError('session_busy')
+        for sid in targets:
+            candidate = authority.sessions.get(sid)
+            if candidate is not None and candidate.task is not None and not candidate.task.done():
+                raise RuntimeStoreError('session_busy')
         if operation == 'delete':
             # Route retirement must commit with deletion, not recreate the same
             # physical ID on the next native message. Do not fake that handoff.
             store = getattr(authority.runner, 'session_store', None)
-            if store is not None and store.lookup_by_session_id(ref.session_id) is not None:
+            if store is not None and any(store.lookup_by_session_id(sid) is not None for sid in targets):
                 raise RuntimeStoreError('runtime_coordination_required')
         if operation == 'rewind' and not callable(getattr(authority.runner, '_evict_cached_agent', None)):
             raise RuntimeStoreError('runtime_coordination_required')
 
     if operation in _RUNTIME_ACTIONS:
-        live_guard()
+        live_guard([ref.session_id])
         raise RuntimeStoreError('runtime_coordination_required')
     result = mutate_runtime_session(authority.db, epoch=authority.epoch,
         principal_id=actor.subject, session_id=ref.session_id, request_id=params['request_id'],
