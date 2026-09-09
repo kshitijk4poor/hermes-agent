@@ -39,25 +39,25 @@ Hermes runs with a curated `hermes-acp` toolset designed for editor workflows. I
 
 It intentionally excludes things that do not fit typical editor UX, such as messaging delivery and cronjob management.
 
-The toolset resolves the same way as on the messaging gateway for the same
-platform config. That includes the extras the gateway adds on top of the
-list, such as enabled plugin toolsets, so ACP sessions get those too.
-`platform_toolsets.acp` replaces the `hermes-acp` default, and
-`agent.disabled_toolsets` removes toolsets from every ACP session. MCP
-servers from `mcp_servers` follow the same rules too. By default ACP gets
-every enabled server. If you list server names in `platform_toolsets.acp`,
-only those servers are included, and `no_mcp` drops them all. `hermes tools`
-has no ACP entry, so edit `config.yaml` directly:
+## Editor-provided MCP servers
 
-```yaml
-platform_toolsets:
-  acp: [file, web, skills, github]   # only the github MCP server
-agent:
-  disabled_toolsets: [code_execution]
-```
+On gateways advertising `acp-session-mcp-v1`, editor `mcpServers` belong to the
+canonical session, not the ACP viewer process. The gateway uses separate registry
+namespaces even when two editors supply the same server name. Closing an editor
+does not cancel another session's MCP execution.
 
-MCP servers that the editor sends with `session/new` are separate. The
-client asks for them per session, and they are always added.
+Discovery is eager and bounded before the first model turn. The selected tool
+schemas remain frozen for the conversation; server tool-list changes require a
+new session. MCP transports are released after each execution, without stopping
+sibling sessions or the shared MCP loop.
+
+The gateway keeps the editor transport specification (including command arguments,
+environment values and HTTP headers) only in memory. Durable session policy holds
+a fingerprint and the selected schemas, not a copy of those credentials. After a
+gateway restart, the editor must supply the same `mcpServers` on load/resume.
+Missing credentials refuse execution; a changed specification or secret refuses
+reattachment rather than silently changing the session. Start a new session when
+changing the server configuration. Commands and paths run on the gateway host.
 
 ## Installation
 
