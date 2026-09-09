@@ -96,7 +96,12 @@ def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path, p
                 assert any(role == 'user' and 'WORKER_INFERENCE' in content for role, content in rows)
                 assert any(role == 'assistant' and 'RECOVERY_ACK_WORKER_INFERENCE' in content for role, content in rows)
             assert len(peer.requests) == 1, peer.requests
-            print(json.dumps({'proof': proof, 'rows': rows, 'inference_requests': len(peer.requests)}, default=str))
+            print(json.dumps({'result': proof['result'], 'opens': proof['opens'], 'fds': proof['fds'],
+                              'input_tokens': proof['context']['input_tokens'],
+                              'output_tokens': proof['context']['output_tokens'],
+                              'prompt_persisted': bool(proof['context']['system_prompt']),
+                              'finished': proof['finished'], 'refusals': proof['refusals'],
+                              'rows': rows, 'inference_requests': len(peer.requests)}, default=str))
     finally:
         peer.shutdown()
         peer.server_close()
