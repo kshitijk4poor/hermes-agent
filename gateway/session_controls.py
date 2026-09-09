@@ -35,7 +35,7 @@ class AuthorityConnection:
                     'commands.catalog': self.command_catalog, 'complete.slash': self.slash_completions,
                     'slash.exec': self.slash_exec, 'command.dispatch': self.command_dispatch,
                     'session.list': self.list_sessions, 'session.info': self.info,
-                    'session.mutate': self.mutate,
+                    'session.mutate': self.mutate, 'bot_relay.deliver': self.bot_deliver,
                     'worker.register': self.worker_register, 'worker.adopt': self.worker_adopt,
                     'worker.persist': self.worker_persist,
                     'setup.status': self.setup_status, 'setup.runtime_check': self.setup_runtime_check,
@@ -54,6 +54,10 @@ class AuthorityConnection:
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+
+    async def bot_deliver(self, ref, params):
+        from gateway.session_bot import deliver
+        return await deliver(self, params)
 
     async def worker_register(self, ref, params):
         from gateway.session_worker import worker_request

@@ -1,0 +1,112 @@
+"""Bot Chat ingress into the existing authority FIFO; viewers never own delivery.
+
+The mailbox is a delivery receipt, not an execution queue. A committed canonical
+admission is the only consumer; unknown execution is never retried as inference.
+"""
+import asyncio
+from pathlib import Path
+
+from gateway.session_contract import SessionRef
+from gateway.config import Platform
+from gateway.platforms.event import MessageEvent
+from hermes_state_runtime import RuntimeStoreError, get_session_admission
+from tools.bot_live_delivery import _delivery_id, _locked, _read, _write
+
+
+def _home(authority, actor, profile):
+    home = Path(authority.db.db_path).parent.resolve()
+    name = home.name if home.parent.name == 'profiles' else 'default'
+    if actor.profile_id != authority.profile_id or profile not in (name, 'hermes' if name == 'default' else name):
+        raise RuntimeStoreError('profile_mismatch')
+    if 'session:submit' not in actor.capabilities:
+        raise RuntimeStoreError('permission_denied')
+    return home
+
+
+def _target(authority, actor):
+    row = authority.db.get_session_by_title('Bot Chat')
+    if row is None:
+        raise RuntimeStoreError('not_found')
+    tip = authority.db.get_compression_tip(row['id'])
+    target = authority.db.get_session(tip)
+    if target is None or not str(target.get('chat_id') or '').startswith('local-'):
+        # A legacy transcript needs an owner-side binding migration, not a new agent.
+        raise RuntimeStoreError('runtime_coordination_required')
+    ref = SessionRef(authority.profile_id, target['chat_id'])
+    authority.authorize(actor, ref, 'session:submit')
+    live = authority.sessions[ref.session_id]
+    entry = authority.runner.session_store.lookup_by_session_key(live.route)
+    if live.source.platform != Platform.LOCAL or entry is None or entry.session_id != tip:
+        raise RuntimeStoreError('admission_conflict')
+    return ref, live, entry
+
+
+def _result(authority, record):
+    row = get_session_admission(authority.db, admission_id=record['admission_id'])
+    if row is None:
+        raise RuntimeStoreError('storage_unavailable')
+    status = {'queued': 'queued', 'started': 'claimed', 'unknown': 'ambiguous', 'terminal': 'ambiguous'}[row['status']]
+    # A crash between settlement and receipt publication is unknown, not permission
+    # to infer again. Never fabricate the reply from a later transcript message.
+    if record.get('status') in {'settled', 'failed'}:
+        status = record['status']
+    return {k: v for k, v in dict(status=status, delivery_id=record['delivery_id'],
+        profile_home=record['profile_home'], session_id=record['session_id'],
+        admission_id=record['admission_id'], reply=record.get('reply', '')).items()}
+
+
+async def _record_reply(authority, home, key, future):
+    reply = await asyncio.shield(future)
+    with _locked(home) as root:
+        path = root / f'{key}.json'
+        record = _read(path)
+        row = get_session_admission(authority.db, admission_id=record['admission_id'])
+        record.update(status='settled' if row['outcome'] == 'completed' else 'failed', reply=reply or '')
+        _write(path, record)
+
+
+async def deliver(connection, params):
+    authority, actor = connection.authority, connection.actor
+    home = _home(authority, actor, params.get('profile'))
+    if set(params) - {'id', 'profile', 'message'}:
+        raise RuntimeStoreError('invalid_params')
+    try:
+        key = _delivery_id(params.get('id'))
+    except ValueError as exc:
+        raise RuntimeStoreError('invalid_params') from exc
+    message = params.get('message')
+    if not isinstance(message, str) or not message.strip() or len(message) > 16200:
+        raise RuntimeStoreError('invalid_params')
+    authority._require_admission_open()
+    with _locked(home) as root:
+        path = root / f'{key}.json'
+        record = _read(path)
+        if record is not None and record.get('admission_id'):
+            if record['message'] != message or record['principal_id'] != actor.subject:
+                raise RuntimeStoreError('admission_conflict')
+            authority.authorize(actor, SessionRef(authority.profile_id, record['session_id']), 'session:submit')
+            return _result(authority, record)
+        if record is not None:
+            raise RuntimeStoreError('unknown_execution')
+        ref, live, entry = _target(authority, actor)
+        event = MessageEvent(text=message, source=live.source, internal=True,
+            message_id='bot:' + key, metadata={'gateway_session_key': live.route,
+                                             'gateway_session_id': entry.session_id})
+        # Pin the physical target before committing. A process death in this
+        # two-store window leaves an explicit unknown record, never a new target.
+        record = dict(delivery_id=key, profile_home=str(home), session_id=ref.session_id,
+            principal_id=actor.subject, message=message, status='ambiguous')
+        _write(path, record)
+        receipt = await authority.admit_automation(authority.runner._adapter_for_source(live.source), event, 'bot:' + key)
+        record.update(status='canonical', admission_id=receipt.admission_id)
+        _write(path, record)
+        if receipt.status in {'queued', 'started'}:
+            future = authority.waiters.setdefault(receipt.admission_id, asyncio.get_running_loop().create_future())
+            task = asyncio.create_task(_record_reply(authority, home, key, future))
+            # Keep receipt publication independent of the requesting WebSocket.
+            tasks = getattr(authority, '_bot_receipt_tasks', None)
+            if tasks is None:
+                tasks = authority._bot_receipt_tasks = set()
+            tasks.add(task)
+            task.add_done_callback(tasks.discard)
+        return _result(authority, record)
