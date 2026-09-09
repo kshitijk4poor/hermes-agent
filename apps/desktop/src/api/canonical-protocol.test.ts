@@ -55,3 +55,21 @@ test('pending resume and live updates share the existing queue projection', () =
   protocol.event(cleared)
   expect(cleared.payload).toHaveProperty('pending_submissions', [])
 })
+
+test('composer branch and model switch become canonical prepared mutations with identity retained', () => {
+  const protocol = new CanonicalDesktopProtocol()
+  protocol.result('session.resume', { session_id: 's' }, { session_id: 's', revision: 4, execution_generation: 9 })
+  const branch = protocol.prepare('session.branch', { session_id: 's' })
+  expect(protocol.wire('session.branch')).toBe('session.mutate')
+  expect(branch).toEqual({ session_id: 's', request_id: expect.any(String), expected_revision: 4, expected_generation: 9, operation: 'branch', payload: {} })
+  expect(protocol.prepare('session.branch', { session_id: 's' })).toEqual(branch)
+  const branched = protocol.result('session.branch', branch, { session_id: 's', revision: 5, operation: 'branch', branched_session_id: 'child', copied_messages: 6 })
+  expect(branched).toMatchObject({ session_id: 'child', stored_session_id: 'child', parent_session_id: 's' })
+  expect(protocol.prepare('session.branch', { session_id: 's' }).request_id).not.toBe(branch.request_id)
+
+  const model = protocol.prepare('slash.exec', { session_id: 's', command: 'model switched' })
+  expect(protocol.wire('slash.exec', model)).toBe('session.mutate')
+  expect(model).toMatchObject({ session_id: 's', expected_revision: 5, operation: 'model', payload: { model: 'switched' } })
+  expect(protocol.result('slash.exec', model, { session_id: 's', revision: 6, operation: 'model', model: 'switched', provider: 'custom' })).toMatchObject({ type: 'exec', output: expect.stringContaining('switched') })
+  expect(protocol.wire('slash.exec', protocol.prepare('slash.exec', { session_id: 's', command: 'help' }))).toBe('slash.exec')
+})
