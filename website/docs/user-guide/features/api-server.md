@@ -465,6 +465,18 @@ When `session_id` identifies an existing Hermes session and no explicit
 that session's active transcript. Session turn leases serialize concurrent
 writers and refresh the transcript after a contended wait.
 
+**API sessions are their own sessions.** `session_id` (here) and the
+`X-Hermes-Session-Id` header (on `/v1/chat/completions` and `/v1/responses`) may
+name a session the API server created or one it may create; they cannot bind a
+session that another surface owns — a CLI, TUI, Desktop, ACP or messaging
+conversation. Such a request is refused with HTTP 409 and error code
+`permission_denied` before any admission: no run is created, no
+`Idempotency-Key` reservation is kept, and an exact retry answers 409 again. This
+replaces the previous behavior where the API server ran its own agent on the
+foreign transcript in parallel with its live owner. To work on a chat from
+another surface, attach through the gateway WebSocket (a `prompt.submit` on the
+shared session) instead of the OpenAI-compatible routes.
+
 ### GET /v1/runs/\{run_id\}
 
 Poll the current run state. This is useful for dashboards that need status without holding an SSE connection open, or for UIs that reconnect after navigation.
