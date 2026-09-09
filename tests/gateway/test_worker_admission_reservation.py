@@ -43,3 +43,35 @@ def test_started_admission_binds_only_exact_owned_process_and_principal(tmp_path
         process.stdin.close()
         process.wait(timeout=5)
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_reserved_process_uses_existing_authenticated_adoption_and_persistence(tmp_path):
+    from gateway.session_worker import worker_request
+    from gateway.session_worker_reservation import reserve_admission_worker
+    db = SessionDB(tmp_path / 'state.db')
+    process = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'], stdin=subprocess.PIPE,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        db.create_session('owned', 'cli')
+        epoch = begin_runtime_epoch(db, instance_id='owner')
+        authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
+        admitted = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
+        claim_session_input(db, epoch=epoch, session_id='owned')
+        scope = reserve_admission_worker(authority, admission_id=admitted['admission_id'], process=process, principal_id='human')
+        actor = SimpleNamespace(subject='human', profile_id=str(tmp_path), capabilities={'worker:adopt'})
+        connection = SimpleNamespace(authority=authority, actor=actor)
+        identity = {k: v for k, v in scope.items() if k != 'epoch'}
+        with pytest.raises(Exception, match='permission_denied'):
+            await worker_request(connection, None, identity | {'secret': 'wrong-secret-for-reservation'}, operation='adopt')
+        receipt = await worker_request(connection, None, identity, operation='adopt')
+        assert receipt['execution_id'] == scope['execution_id']
+        params = scope | {'sequence': 1, 'operation': 'execution.finish', 'payload': {}}
+        result = await worker_request(connection, None, params, operation='persist')
+        assert result['status'] == 'terminal'
+        with pytest.raises(Exception, match='stale_generation'):
+            await worker_request(connection, None, params | {'sequence': 2}, operation='persist')
+    finally:
+        process.stdin.close()
+        process.wait(timeout=5)
+        db.close()
