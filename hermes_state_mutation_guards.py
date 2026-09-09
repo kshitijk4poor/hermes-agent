@@ -17,4 +17,15 @@ def require_idle(db, conn, session_ids):
 
 def delete_targets(conn, session_id):
     from hermes_state_sessions import _collect_delegate_child_ids
-    return [session_id, *sorted(_collect_delegate_child_ids(conn, [session_id]))]
+    import json
+    from hermes_state_local import POLICY_PREFIX
+    from hermes_state_local_lineage import validate_local_lineage
+    targets = {session_id}
+    saved = conn.execute('SELECT value FROM state_meta WHERE key=?',
+                         (POLICY_PREFIX + session_id,)).fetchone()
+    if saved is not None:
+        receipt = json.loads(saved[0])
+        validate_local_lineage(conn, receipt)
+        targets.update(receipt.get('lineage', [session_id]))
+    targets.update(_collect_delegate_child_ids(conn, targets))
+    return [session_id, *sorted(targets - {session_id})]

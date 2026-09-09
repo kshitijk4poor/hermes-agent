@@ -59,6 +59,7 @@ def _delete(db, conn, session_id, payload):
     from hermes_state_mutation_retirement import retire_routes
     retire_routes(conn, targets)
     for sid in targets:
+        db._bump_conversation_generation(conn, sid, 'session_reset')
         conn.execute('UPDATE sessions SET parent_session_id=NULL, runtime_revision=runtime_revision+1 WHERE parent_session_id=?', (sid,))
         conn.execute('DELETE FROM messages WHERE session_id=?', (sid,))
     conn.executemany('DELETE FROM sessions WHERE id=?', [(sid,) for sid in targets])
