@@ -562,7 +562,23 @@ running.
 
 Resolve a pending approval for a run that is waiting on a human decision (for example, a tool call gated behind an approval policy). The body carries the approval decision; the run resumes once the decision is recorded. This endpoint is advertised in `/v1/capabilities` as the `run_approval` feature so external UIs can detect support before surfacing an approval prompt.
 
-MCP trust-gate consent — a write-capable tool on a server configured `trust: untrusted` — surfaces the same way: the run emits an `approval.request` event and parks in `waiting_for_approval` until this endpoint resolves it (`once` runs the tool, `deny` blocks it).
+With the canonical gateway owner, `GET /v1/runs/{run_id}` exposes
+`pending_controls`, using the same `prompt_id` and `execution_generation` as
+attached WebSocket viewers. Respond with the exact current identity:
+
+```json
+{"request_id": "<prompt_id>", "execution_generation": 3, "choice": "once"}
+```
+
+Canonical controls do not accept identityless or bulk responses. Stale generations,
+foreign prompt IDs, and settled runs return HTTP 409. Existing run authentication
+and hosted-room approval restrictions still apply.
+
+### POST /v1/runs/\{run_id\}/clarify
+
+Answer a canonical clarification with `request_id`, `execution_generation`, and
+`answer` (a string). This authenticated endpoint and WebSocket `clarify.respond`
+resolve the same waiting tool; answering does not submit another inference turn.
 
 ## Jobs API (background scheduled work)
 

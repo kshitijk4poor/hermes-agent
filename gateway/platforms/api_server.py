@@ -4429,6 +4429,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     _handle_get_run = _run_route_delegate("_handle_get_run")
     _handle_run_events = _run_route_delegate("_handle_run_events")
     _handle_run_approval = _run_route_delegate("_handle_run_approval")
+    _handle_run_clarify = _run_route_delegate("_handle_run_clarify")
     _handle_steer_run = _run_route_delegate("_handle_steer_run")
     _handle_stop_run = _run_route_delegate("_handle_stop_run")
 
@@ -4635,6 +4636,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Not used — the HTTP request/response cycle handles delivery directly."""
         return SendResult(success=False, error="API server uses HTTP request/response, not send()")
+
+    async def send_clarify(self, chat_id: str, question: str, choices: Optional[list],
+                           clarify_id: str, session_key: str,
+                           metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        from gateway.platforms.api_server_authority_runs import send_clarify
+        return await send_clarify(self, chat_id=chat_id, clarify_id=clarify_id)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return basic info about the API server."""

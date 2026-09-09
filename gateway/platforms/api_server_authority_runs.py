@@ -25,9 +25,51 @@ def run_projection(adapter, run_id):
     result = saved.get('result', {}) if saved else {}
     if row['status'] == 'terminal' and result.get('failed'):
         status = 'failed'
-    return {'run_id': run_id, 'status': status, 'session_id': row['target_session_id'],
+    pending = []
+    live = authority.sessions.get(row['target_session_id'])
+    if live is not None and row['status'] == 'started':
+        pending = list(live.controls.snapshot(row['target_session_id'], row['generation']))
+    return {'pending_controls': pending, 'run_id': run_id, 'status': status, 'session_id': row['target_session_id'],
             'admission_id': row['admission_id'], 'execution_generation': row['generation'],
             'output': result.get('final_response', ''), 'usage': saved.get('usage', {}) if saved else {}}
+
+
+async def send_clarify(adapter, *, chat_id, **kwargs):
+    from gateway.platforms.base import SendResult
+    authority = getattr(adapter.gateway_runner, 'session_authority', None)
+    if authority is None or chat_id not in authority.sessions:
+        return SendResult(success=False, error='No canonical API session')
+    handle = authority._handle(SessionRef(authority.profile_id, chat_id))
+    if handle.execution_state != 'running':
+        return SendResult(success=False, error='No active API execution')
+    # TurnRunner registers the shared prompt after this ACK; HTTP polling and WS
+    # subscribers consume that projection rather than an adapter-local message.
+    return SendResult(success=True, message_id=kwargs['clarify_id'])
+
+
+async def respond_run(adapter, run_id, body, *, kind):
+    import uuid
+    owned = run_admission(adapter, run_id)
+    if owned is None:
+        raise RuntimeStoreError('not_found')
+    authority, row = owned
+    generation = body.get('execution_generation')
+    prompt_id = body.get('request_id')
+    field = 'choice' if kind == 'approval' else 'answer'
+    if set(body) != {'request_id', 'execution_generation', field}:
+        raise RuntimeStoreError('invalid_params')
+    if row['status'] != 'started' or type(generation) is not int or generation != row['generation']:
+        raise RuntimeStoreError('stale_generation')
+    ref = SessionRef(authority.profile_id, row['target_session_id'])
+    actor = Principal('api', authority.profile_id,
+        frozenset({'session:read', 'session:approve', 'session:respond'}), 'api-control:' + uuid.uuid4().hex)
+    snapshot = await authority.attach(actor, ref)
+    try:
+        if not any(p['prompt_id'] == prompt_id and p['kind'] == kind for p in snapshot.prompts):
+            raise RuntimeStoreError('approval_not_pending')
+        return await authority.respond(actor, ref, generation, prompt_id, {field: body[field]}, kind=kind)
+    finally:
+        await authority.detach(actor, snapshot.subscription_id)
 
 
 async def stop_run(adapter, run_id):

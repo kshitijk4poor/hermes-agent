@@ -236,6 +236,7 @@ def _http_routes(self) -> list[tuple[str, str, Any]]:
         ("POST", "/v1/runs", self._handle_runs), ("GET", "/v1/runs/{run_id}", self._handle_get_run),
         ("GET", "/v1/runs/{run_id}/events", self._handle_run_events),
         ("POST", "/v1/runs/{run_id}/approval", self._handle_run_approval),
+        ("POST", "/v1/runs/{run_id}/clarify", self._handle_run_clarify),
         ("POST", "/v1/runs/{run_id}/steer", self._handle_steer_run),
         ("POST", "/v1/runs/{run_id}/stop", self._handle_stop_run)]
 
@@ -1188,6 +1189,10 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
         body = await request.json()
     except Exception:
         return _json_error(_openai_error, "Invalid JSON", status=400)
+    if getattr(self.gateway_runner, 'session_authority', None) is not None:
+        if self._room_grant_token(request) and body.get('choice') not in {'once', 'deny'}:
+            return _json_error(_openai_error, 'Room approvals require once or deny', status=400)
+        return await _respond_authority_run(self, run_id, body, kind='approval', _api_server=_api_server)
     raw_choice = str(body.get("choice", "")).strip().lower()
     choice = _APPROVAL_CHOICE_ALIASES.get(raw_choice, raw_choice)
     room_scoped = bool(self._room_grant_token(request))
@@ -1226,6 +1231,27 @@ async def _handle_run_approval(self, request: "web.Request", *, _api_server) -> 
     return web.json_response({
         "object": "hermes.run.approval_response", "run_id": run_id, "choice": choice, **request_id_field,
         "resolved": resolved})
+
+
+async def _respond_authority_run(self, run_id, body, *, kind, _api_server):
+    from gateway.platforms.api_server_authority_runs import respond_run
+    from hermes_state_runtime import RuntimeStoreError
+    try:
+        result = await respond_run(self, run_id, body, kind=kind)
+        return web.json_response({'run_id': run_id, **result})
+    except RuntimeStoreError as exc:
+        return _json_error(_api_server._openai_error, exc.reason, code=exc.reason, status=409)
+
+
+async def _handle_run_clarify(self, request, *, _api_server):
+    run_id, _, _, _, err = _load_owned_run(
+        self, request, _api_server=_api_server, permission=None, active_fallback=False)
+    if err is not None:
+        return err
+    body, err = await self._read_json_body(request)
+    if err is not None:
+        return err
+    return await _respond_authority_run(self, run_id, body, kind='clarify', _api_server=_api_server)
 
 
 async def _handle_steer_run(self, request: "web.Request", *, _api_server) -> "web.Response":
