@@ -455,15 +455,12 @@ async def import_sessions_endpoint(request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid session import payload") from exc
 
-    try:
-        result = await asyncio.to_thread(
-            _with_db, body.profile, lambda db: db.import_sessions(body.sessions), read_only=False)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    if not result.get("ok", False):
-        raise HTTPException(status_code=400, detail=result)
-    return result
+    from hermes_cli.web_server_sessions import _mutate_session_request
+    if not body.sessions or not isinstance(body.sessions[0].get('id'), str):
+        raise HTTPException(status_code=400, detail='invalid_params')
+    return await _mutate_session_request(request, body.profile, body.sessions[0]['id'],
+        request_id=body.request_id, expected_revision=body.expected_revision,
+        operation='import', payload={'sessions': body.sessions})
 
 
 @manage_router.get("/api/sessions/empty/count")
@@ -737,21 +734,13 @@ async def get_session_messages_around(
 
 
 @manage_router.delete("/api/sessions/{session_id}")
-async def delete_session_endpoint(session_id: str, profile: Optional[str] = None):
-    def _delete(db):
-        # Already-absent is an idempotent success: the desktop optimistically
-        # removes the row and RESTORES it on any error, so a 404 resurrected
-        # ghost rows (transient empties racing the sidebar snapshot).
-        sid = _resolve_session_id(db, session_id)
-        if not sid:
-            return {"ok": True, "already_absent": True}
-        try:
-            db.delete_session(sid, sessions_dir=_session_files_dir(profile), exclude_active_write_guards=True)
-        except SessionActiveWriteGuardError as exc:
-            raise HTTPException(status_code=409, detail=str(exc))
-        return {"ok": True}
-
-    return await asyncio.to_thread(_with_db, profile, _delete, read_only=False)
+async def delete_session_endpoint(session_id: str, request: Request, profile: Optional[str] = None,
+                                  request_id: Optional[str] = None, expected_revision: Optional[int] = None,
+                                  expected_generation: Optional[int] = None):
+    from hermes_cli.web_server_sessions import _mutate_session_request
+    return await _mutate_session_request(request, profile, session_id,
+        request_id=request_id, expected_revision=expected_revision,
+        expected_generation=expected_generation, operation='delete', payload={})
 
 
 @manage_router.post("/api/sessions/owner-backfill")

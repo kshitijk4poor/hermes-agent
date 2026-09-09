@@ -262,6 +262,8 @@ class BulkDeleteSessions(BaseModel):
     profile: Optional[str] = None
 
 class SessionImport(BaseModel):
+    request_id: Optional[str] = None
+    expected_revision: Optional[int] = None
     sessions: List[Dict[str, Any]]
     profile: Optional[str] = None
 
