@@ -4045,78 +4045,18 @@ def _inject_profile_env_vars() -> None:
 _inject_profile_env_vars()
 
 
-PlatformManifestSource = Literal["all", "bundled", "user"]
+def _platform_plugin_manifests():
+    from agent.safe_worker_policy import safe_worker_enabled
 
-
-def _is_plugin_dir_name(name: str) -> bool:
-    # Same rule as plugins_discovery.scan_directory: __pycache__-style dunders aren't plugins; a dot
-    # dir can be, so its secrets are declared too.
-    return not (name.startswith("__") and name.endswith("__"))
-
-
-def _platform_manifest_paths(home: Optional[Path] = None, source: PlatformManifestSource = "all"):
-    """Yield ``(dir_name, manifest_path, require_kind, stat)`` for every platform plugin manifest.
-    ``source`` is ``"bundled"`` (shipped ``plugins/platforms/*``), ``"user"`` (``<home>/plugins/
-    platforms/*`` plus flat ``<home>/plugins/*`` installs, which must declare ``kind: platform``,
-    #46600) or ``"all"``. ``home`` defaults to the bound Hermes home. A directory that cannot be
-    listed or searched yields ``(name, None, require_kind, error)``: a plugin there can't load
-    either, so callers skip it. One ``scandir`` per root and one ``stat`` per candidate, because
-    the child-env scrub stamps these on every spawn."""
-    roots = []
-    if source in ("all", "bundled"):
-        roots.append((get_project_root() / "plugins" / "platforms", False))
-    if source in ("all", "user"):
-        user_plugins = (home if home is not None else get_hermes_home()) / "plugins"
-        roots += [(user_plugins / "platforms", False), (user_plugins, True)]
-    for root, require_kind in roots:
-        try:
-            with os.scandir(root) as it:
-                entries = [e for e in it if _is_plugin_dir_name(e.name)]
-        except (FileNotFoundError, NotADirectoryError):
-            continue
-        except OSError as exc:
-            yield str(root), None, require_kind, exc
-            continue
-        for entry in entries:
-            try:
-                if not entry.is_dir():
-                    continue
-            except OSError:
-                continue
-            for file_name in ("plugin.yaml", "plugin.yml"):
-                path = Path(entry.path) / file_name
-                try:
-                    st = os.stat(path)
-                except PermissionError as exc:  # the dir itself is not searchable
-                    yield entry.name, None, require_kind, exc
-                    break
-                except OSError:  # missing, a symlink loop: discovery's exists() is False too
-                    continue
-                if not stat.S_ISREG(st.st_mode):
-                    continue
-                yield entry.name, path, require_kind, st
-                break
-
-
-def platform_manifest_stamp(home: Optional[Path] = None) -> tuple:
-    """Change-detection key over every user platform plugin manifest of ``home`` (path plus
-    :func:`utils.file_signature`): it changes when one is added, removed, replaced or edited in
-    place, so a cache keyed on it never serves a stale declaration."""
-    return tuple((name, str(path), file_signature(st) if path is not None else type(st).__name__)
-                 for name, path, _kind, st in _platform_manifest_paths(home, "user"))
-
-
-def _platform_plugin_manifests(home: Optional[Path] = None, source: PlatformManifestSource = "all", *,
-                               strict: bool = False, skipped: "list | None" = None):
-    """Yield ``(dir_name, manifest_dict)`` for every platform plugin manifest (see
-    :func:`_platform_manifest_paths`). ``strict`` raises when a manifest cannot be read instead of
-    skipping it: the child-env scrub must not lose a declared secret to an I/O error. Only a
-    manifest known to be a platform's counts (the bundled and ``plugins/platforms/`` dirs); a
-    flat ``plugins/*`` manifest proves it is one only by its content, so an unreadable one is
-    skipped with a warning, as is an unsearchable plugin directory. A manifest that does not
-    parse declares nothing (its adapter cannot load either) and is skipped. Every skip is appended
-    to ``skipped``, so a caller can tell a complete scan from a partial one."""
-    for dir_name, manifest_path, require_kind, st in _platform_manifest_paths(home, source):
+    if safe_worker_enabled():
+        return
+    """Yield ``(dir_name, manifest_dict)`` for every bundled ``plugins/platforms/*/plugin.y(a)ml``."""
+    platforms_dir = get_project_root() / "plugins" / "platforms"
+    if not platforms_dir.is_dir():
+        return
+    for child in platforms_dir.iterdir():
+        manifest_path = next(
+            (p for p in (child / "plugin.yaml", child / "plugin.yml") if child.is_dir() and p.exists()), None)
         if manifest_path is None:
             logger.warning("Skipping unreadable plugin directory %s: %s", dir_name, st)
             if skipped is not None:
