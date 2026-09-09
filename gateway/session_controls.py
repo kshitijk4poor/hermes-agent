@@ -211,6 +211,9 @@ class AuthorityConnection:
         return asdict(await self.authority.cancel_queued(self.actor, ref, params.get('admission_id')))
 
     async def interrupt(self, ref, params):
+        from gateway.session_managed_worker import interrupt_managed
+        if interrupt_managed(self.authority, self.actor, ref, params.get('execution_generation')):
+            return asdict(self.authority._handle(ref))
         return asdict(await self.authority.interrupt(self.actor, ref, params.get('execution_generation')))
 
     async def respond(self, ref, params):

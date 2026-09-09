@@ -21,6 +21,12 @@ class Model(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if not body.get('messages'):
             message = {'role': 'assistant', 'content': 'metadata'}
+        elif (self.server.control_mode and any(m['role'] == 'tool' for m in body['messages'])
+              and not any(m.get('name') == 'clarify' or m.get('tool_call_id') == 'managed-clarify' for m in body['messages'])):
+            self.server.requests.append(body)
+            message = {'role': 'assistant', 'content': None, 'tool_calls': [{
+                'id': 'managed-clarify', 'type': 'function', 'function': {'name': 'clarify',
+                'arguments': json.dumps({'question': 'Choose managed answer', 'choices': ['Alpha', 'Beta']})}}]}
         elif any(m['role'] == 'tool' for m in body['messages']):
             self.server.requests.append(body)
             self.server.blocked.set()
@@ -30,7 +36,7 @@ class Model(BaseHTTPRequestHandler):
             self.server.requests.append(body)
             message = {'role': 'assistant', 'content': None, 'tool_calls': [{
                 'id': 'managed-tool', 'type': 'function', 'function': {'name': 'terminal',
-                'arguments': json.dumps({'command': 'printf MANAGED_TOOL_EFFECT', 'timeout': 10})}}]}
+                'arguments': json.dumps({'command': self.server.command, 'timeout': 10})}}]}
         choice = {'index': 0, 'message': message, 'finish_reason': 'tool_calls' if message.get('tool_calls') else 'stop'}
         frame = {'id': 'managed-model', 'model': 'managed-model', 'choices': [choice],
                  'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}}
@@ -54,7 +60,7 @@ class Model(BaseHTTPRequestHandler):
 
 
 @pytest.mark.linux_only
-@pytest.mark.parametrize('worker_action', ['detach', 'kill'])
+@pytest.mark.parametrize('worker_action', ['detach', 'kill', 'controls', 'stop'])
 def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path, worker_action):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
@@ -62,6 +68,11 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
     user.mkdir()
     peer = ThreadingHTTPServer(('127.0.0.1', 0), Model)
     peer.requests = []
+    peer.control_mode = worker_action in {'controls', 'stop'}
+    target = home / 'delete-after-consent'
+    target.mkdir()
+    (target / 'owned.txt').write_text('owned')
+    peer.command = 'rm -rf ' + str(target) if peer.control_mode else 'printf MANAGED_TOOL_EFFECT'
     peer.blocked, peer.release = threading.Event(), threading.Event()
     thread = threading.Thread(target=peer.serve_forever, daemon=True)
     thread.start()
@@ -70,6 +81,7 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
         'gateway': {'multiplex_profiles': False, 'managed_workers': True},
         'model': {'provider': 'custom', 'default': 'managed-model', 'base_url': url},
         'auxiliary': {'title_generation': {'enabled': False}},
+        'approvals': {'mode': 'manual'},
         'platform_toolsets': {'cli': ['terminal']}}))
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
@@ -84,11 +96,40 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
         async with websocket(home, desc) as ws:
             created = await rpc(ws, 'session.create', request_id='managed', source='cli', cwd=str(home),
                                 model='managed-model', provider='custom', base_url=url, api_key='loopback-only',
-                                toolsets=['terminal'], ignore_rules=True)
+                                toolsets=['terminal', 'clarify'] if peer.control_mode else ['terminal'], ignore_rules=True)
             assert 'result' in created, created
             sid = created['result']['session_id']
             submitted = await rpc(ws, 'prompt.submit', session_id=sid, input_id='managed-input', text='DO_MANAGED_TOOL')
             assert 'result' in submitted, submitted
+            if peer.control_mode:
+                async def prompt(kind):
+                    async with asyncio.timeout(20):
+                        while True:
+                            snapshot = await rpc(ws, 'session.resume', session_id=sid)
+                            found = next((p for p in snapshot['result']['prompts'] if p['kind'] == kind), None)
+                            if found:
+                                return found
+                            await asyncio.sleep(.05)
+                approval = await prompt('approval')
+                assert target.exists()
+                answered = await rpc(ws, 'approval.respond', session_id=sid,
+                    execution_generation=approval['execution_generation'], prompt_id=approval['prompt_id'], choice='once')
+                assert answered['result']['status'] == 'resolved', answered
+                clarify = await prompt('clarify')
+                assert not target.exists()
+                if worker_action == 'stop':
+                    stopped = await rpc(ws, 'session.interrupt', session_id=sid,
+                                        execution_generation=clarify['execution_generation'])
+                    assert 'result' in stopped, stopped
+                    peer.release.set()
+                    async with asyncio.timeout(15):
+                        while query('SELECT status FROM session_admissions WHERE request_id=?', ('managed-input',)) == [('started',)]:
+                            await asyncio.sleep(.05)
+                    assert query('SELECT status FROM session_admissions') == [('terminal',)], (home / 'restart.log').read_text()
+                    return
+                answered = await rpc(ws, 'clarify.respond', session_id=sid,
+                    execution_generation=clarify['execution_generation'], prompt_id=clarify['prompt_id'], answer='Beta')
+                assert answered['result']['status'] == 'resolved', answered
             assert await asyncio.to_thread(peer.blocked.wait, 30), (home / 'restart.log').read_text()
             workers = query('SELECT execution_id,status FROM worker_executions WHERE session_id=?', (sid,))
             assert len(workers) == 1, workers
@@ -123,10 +164,15 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
         rows = query('SELECT role,content FROM messages WHERE session_id=? ORDER BY id', (sid,))
         assert sum(role == 'user' and 'DO_MANAGED_TOOL' in content for role, content in rows) == 1, rows
         assert sum(role == 'assistant' and 'MANAGED_TOOL_DONE' in (content or '') for role, content in rows) == 1, rows
-        assert any(role == 'tool' and 'MANAGED_TOOL_EFFECT' in content for role, content in rows), rows
+        if peer.control_mode:
+            assert any(role == 'tool' and 'Beta' in content for role, content in rows), rows
+        else:
+            assert any(role == 'tool' and 'MANAGED_TOOL_EFFECT' in content for role, content in rows), rows
         assert query('SELECT status FROM worker_executions WHERE session_id=?', (sid,)) == [('terminal',)]
         assert query('SELECT COUNT(*) FROM session_turn_leases') == [(0,)]
-        assert len(peer.requests) == 2
+        assert len(peer.requests) == (3 if peer.control_mode else 2), json.dumps([
+            {'model': r.get('model'), 'roles': [m['role'] for m in r['messages']],
+             'user': [str(m.get('content'))[:120] for m in r['messages'] if m['role'] == 'user']} for r in peer.requests])
         print(json.dumps({'owner_pid': owner.pid, 'worker_pid': pid, 'worker_module': 'agent.managed_worker',
                           'model_requests': len(peer.requests), 'rows': rows, 'detach_survived': True}))
 

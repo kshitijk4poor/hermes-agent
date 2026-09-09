@@ -59,6 +59,80 @@ class WorkerChannel:
             self.stream.flush()
 
 
+class WorkerControls:
+    def __init__(self, channel, route):
+        self.channel, self.route = channel, route
+        self.agent = None
+        self.stopped = threading.Event()
+        self.finish = threading.Event()
+        self.clarifications = {}
+        self.lock = threading.Lock()
+        self.reader = threading.Thread(target=self.read, name='managed-controls', daemon=True)
+        self.reader.start()
+
+    def stop(self):
+        self.stopped.set()
+        if self.agent is not None:
+            self.agent.interrupt()
+        with self.lock:
+            for state in self.clarifications.values():
+                state['answer'] = '[Interrupted]'
+                state['event'].set()
+
+    def read(self):
+        from tools.approval import resolve_gateway_approval
+        try:
+            while True:
+                frame = read_frame(sys.stdin.buffer)
+                if frame == {'type': 'stop'}:
+                    self.stop()
+                    continue
+                if frame == {'type': 'finish'}:
+                    self.finish.set()
+                    return
+                if (set(frame) != {'type', 'prompt_id', 'value'} or frame['type'] not in {'approval', 'clarify'}
+                        or not isinstance(frame['prompt_id'], str) or not isinstance(frame['value'], str)
+                        or len(frame['value']) > 16384):
+                    raise ValueError('invalid_managed_control')
+                if frame['type'] == 'approval':
+                    if frame['value'] not in {'once', 'deny', 'session', 'always'}:
+                        raise ValueError('invalid_managed_control')
+                    resolve_gateway_approval(self.route, frame['value'], request_id=frame['prompt_id'])
+                else:
+                    with self.lock:
+                        state = self.clarifications.get(frame['prompt_id'])
+                        if state is not None:
+                            state['answer'] = frame['value']
+                            state['event'].set()
+        except (EOFError, OSError, ValueError):
+            self.stop()
+            self.finish.set()
+
+    def approval(self, data):
+        from tools.approval import ack_gateway_approval
+        fields = {'request_id', 'command', 'description', 'allow_session', 'allow_permanent', 'smart_denied', 'edit'}
+        self.channel.send('approval', data={k: v for k, v in data.items() if k in fields})
+        ack_gateway_approval(self.route, data['request_id'])
+
+    def clarify(self, question, choices, multi_select=False):
+        import uuid
+        prompt_id = uuid.uuid4().hex
+        state = {'event': threading.Event(), 'answer': '[No response]'}
+        with self.lock:
+            if self.stopped.is_set() or len(self.clarifications) >= 16:
+                return '[Interrupted]'
+            self.clarifications[prompt_id] = state
+        try:
+            self.channel.send('clarify', prompt_id=prompt_id, question=question,
+                              choices=list(choices or []), multi_select=bool(multi_select))
+            state['event'].wait(3600)
+            return state['answer']
+        finally:
+            with self.lock:
+                self.clarifications.pop(prompt_id, None)
+            self.channel.send('prompt_settled', prompt_id=prompt_id)
+
+
 def execute(frame, channel):
     from agent.runtime_session_store import RuntimeSessionStore, WorkerRPC
     scope = dict(frame['scope'])
@@ -71,6 +145,12 @@ def execute(frame, channel):
     from gateway.session_policy import restore_policy, policy_scope
     policy = restore_policy(frame['policy'])
     from run_agent import AIAgent
+    from tools.approval import register_gateway_notify, unregister_gateway_notify
+    from tools.approval_context import set_current_session_key
+    set_current_session_key(frame['route'])
+    os.environ['HERMES_GATEWAY_SESSION'] = '1'
+    controls = WorkerControls(channel, frame['route'])
+    register_gateway_notify(frame['route'], controls.approval)
     agent = None
     try:
         with policy_scope(policy):
@@ -81,7 +161,11 @@ def execute(frame, channel):
                 gateway_session_key=frame['route'], user_id=frame['user_id'], chat_id=frame['chat_id'],
                 skip_context_files=policy.ignore_rules, load_soul_identity=not policy.ignore_rules,
                 skip_memory=policy.ignore_rules, skip_background_review=True, quiet_mode=True,
-                stream_delta_callback=lambda text: channel.send('delta', text=text) if text else None)
+                stream_delta_callback=lambda text: channel.send('delta', text=text) if text else None,
+                clarify_callback=controls.clarify)
+            controls.agent = agent
+            if controls.stopped.is_set():
+                agent.interrupt()
             channel.send('ready', pid=os.getpid())
             history = store.get_messages_as_conversation(scope['session_id'])
             result = agent.run_conversation(frame['text'], conversation_history=history)
@@ -89,13 +173,16 @@ def execute(frame, channel):
             agent.close()
             agent = None
             store.flush_token_counts()
+            if result.get('final_response') is None and (result.get('interrupted') or result.get('failed')):
+                result['final_response'] = ''
             channel.send('result', result={k: result[k] for k in
                 ('final_response', 'failed', 'interrupted') if k in result})
-            if read_frame(sys.stdin.buffer) != {'type': 'finish'}:
-                raise ValueError('invalid_managed_worker_control')
+            if not controls.finish.wait(30):
+                raise ValueError('managed_finish_timeout')
             store.finish()
             channel.send('finished')
     finally:
+        unregister_gateway_notify(frame['route'])
         if agent is not None:
             agent._end_session_on_close = False
             agent.close()

@@ -13,6 +13,7 @@ class PendingControls:
     def __init__(self, events):
         self.events = events
         self.pending = {}
+        self.remote_responders = {}
 
     def register(self, session_id, route, generation, data):
         from gateway.run import _redact_approval_command
@@ -48,10 +49,12 @@ class PendingControls:
     def snapshot(self, session_id, generation):
         with self.events.lock:
             for prompt_id, (route, prompt) in list(self.pending.items()):
-                active = (not route.event.is_set() if prompt['kind'] == 'clarify' else
-                          any(p['request_id'] == prompt_id for p in list_gateway_approvals(route)))
+                active = (prompt_id in self.remote_responders or
+                          (not route.event.is_set() if prompt['kind'] == 'clarify' else
+                           any(p['request_id'] == prompt_id for p in list_gateway_approvals(route))))
                 if prompt['execution_generation'] != generation or not active:
                     del self.pending[prompt_id]
+                    self.remote_responders.pop(prompt_id, None)
                     self.events.publish(session_id, {'prompt_id': prompt_id,
                         'execution_generation': prompt['execution_generation']}, event_type=prompt['kind'] + '.settled')
             return tuple(deepcopy(prompt) for _, prompt in self.pending.values())
@@ -65,6 +68,18 @@ class PendingControls:
             route, prompt = entry
             if prompt['kind'] != kind:
                 raise RuntimeStoreError('invalid_params')
+            if prompt_id in self.remote_responders:
+                field = 'answer' if kind == 'clarify' else 'choice'
+                if (not isinstance(response, dict) or set(response) != {field}
+                        or not isinstance(response[field], str) or len(response[field]) > 16384
+                        or (kind == 'approval' and response[field] not in prompt['choices'])):
+                    raise RuntimeStoreError('invalid_params')
+                self.remote_responders[prompt_id](kind, prompt_id, response[field])
+                del self.remote_responders[prompt_id]
+                del self.pending[prompt_id]
+                self.events.publish(session_id, {'prompt_id': prompt_id, 'execution_generation': generation},
+                                    event_type=kind + '.settled')
+                return {'status': 'resolved', 'prompt_id': prompt_id}
             if kind == 'clarify':
                 from tools.clarify_gateway import resolve_gateway_clarify
                 if (not isinstance(response, dict) or set(response) != {'answer'}

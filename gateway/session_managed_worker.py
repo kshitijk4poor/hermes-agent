@@ -2,6 +2,9 @@
 import asyncio
 from dataclasses import asdict, replace
 import json
+import queue
+import threading
+from types import SimpleNamespace
 from pathlib import Path
 import subprocess
 import sys
@@ -47,13 +50,40 @@ def _bootstrap(authority, ref, row, policy, scope):
 class ManagedWorker:
     def __init__(self, process):
         self.process = process
+        self.write_lock = threading.Lock()
+        self.commands = queue.Queue(maxsize=16)
+        self.closed = threading.Event()
+        self.writer = threading.Thread(target=self._write_controls, name='managed-control-writer', daemon=True)
+
+    def _write_controls(self):
+        try:
+            while not self.closed.is_set():
+                try:
+                    frame = self.commands.get(timeout=.5)
+                except queue.Empty:
+                    continue
+                self.send(frame)
+        except (OSError, ValueError):
+            self.closed.set()
+
+    def control(self, frame):
+        if self.closed.is_set():
+            raise RuntimeStoreError('managed_worker_lost')
+        try:
+            self.commands.put_nowait(frame)
+        except queue.Full as exc:
+            raise RuntimeStoreError('worker_control_backpressure') from exc
+
+    def respond(self, kind, prompt_id, value):
+        self.control({'type': kind, 'prompt_id': prompt_id, 'value': value})
 
     def send(self, frame):
-        self.process.stdin.write(encode_frame(frame))
-        self.process.stdin.flush()
+        with self.write_lock:
+            self.process.stdin.write(encode_frame(frame))
+            self.process.stdin.flush()
 
     def close(self):
-        self.process.stdin.close()
+        self.closed.set()
         if self.process.poll() is None:
             self.process.terminate()
         try:
@@ -61,7 +91,60 @@ class ManagedWorker:
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait(timeout=5)
+        if self.writer.ident is not None:
+            self.writer.join(timeout=5)
+        self.process.stdin.close()
         self.process.stdout.close()
+
+
+def interrupt_managed(authority, actor, ref, generation):
+    worker = getattr(authority, '_managed_workers', {}).get(ref.session_id)
+    if worker is None:
+        return False
+    authority.authorize(actor, ref, 'session:control')
+    authority.check_approval_generation(ref.session_id, generation)
+    worker.control({'type': 'stop'})
+    return True
+
+
+def _prompt_frame(authority, ref, row, worker, frame):
+    live = authority.sessions[ref.session_id]
+    controls = live.controls
+    kind = frame.get('type')
+    if kind == 'prompt_settled' and set(frame) == {'type', 'prompt_id'}:
+        prompt_id = frame['prompt_id']
+        controls.remote_responders.pop(prompt_id, None)
+        saved = controls.pending.pop(prompt_id, None)
+        if saved:
+            live.event_stream.publish(ref.session_id, {'prompt_id': prompt_id,
+                'execution_generation': row['generation']}, event_type=saved[1]['kind'] + '.settled')
+        return True
+    if kind not in {'approval', 'clarify'}:
+        return False
+    if len(controls.remote_responders) >= 16:
+        raise RuntimeStoreError('worker_control_backpressure')
+    if kind == 'approval':
+        fields = {'request_id', 'command', 'description', 'allow_session', 'allow_permanent', 'smart_denied', 'edit'}
+        data = frame.get('data')
+        if set(frame) != {'type', 'data'} or not isinstance(data, dict) or set(data) - fields:
+            raise RuntimeStoreError('invalid_worker_frame')
+        prompt_id = data.get('request_id')
+    else:
+        if (set(frame) != {'type', 'prompt_id', 'question', 'choices', 'multi_select'}
+                or not isinstance(frame['question'], str) or not isinstance(frame['choices'], list)
+                or any(not isinstance(c, str) for c in frame['choices']) or type(frame['multi_select']) is not bool):
+            raise RuntimeStoreError('invalid_worker_frame')
+        prompt_id = frame['prompt_id']
+    if not isinstance(prompt_id, str) or not prompt_id or prompt_id in controls.pending:
+        raise RuntimeStoreError('invalid_worker_frame')
+    controls.remote_responders[prompt_id] = worker.respond
+    if kind == 'approval':
+        authority.register_approval(ref.session_id, row['generation'], live.route, data)
+    else:
+        entry = SimpleNamespace(clarify_id=prompt_id, question=frame['question'], choices=frame['choices'],
+                                multi_select=frame['multi_select'], event=threading.Event())
+        authority.register_clarify(ref.session_id, row['generation'], entry)
+    return True
 
 
 async def execute_managed(authority, ref, row, policy):
@@ -81,9 +164,13 @@ async def execute_managed(authority, ref, row, policy):
                     process=process, principal_id=row['principal_id'])
         # The child reads nothing else until the exact reservation has committed.
         await asyncio.to_thread(worker.send, _bootstrap(authority, ref, row, policy, scope))
+        worker.writer.start()
         while True:
             frame = await asyncio.to_thread(read_frame, process.stdout)
             authority.check_approval_generation(ref.session_id, row['generation'])
+            with authority.sessions[ref.session_id].event_stream.lock:
+                if _prompt_frame(authority, ref, row, worker, frame):
+                    continue
             kind = frame.get('type')
             if kind == 'ready' and set(frame) == {'type', 'pid'} and frame['pid'] == process.pid:
                 continue
@@ -97,6 +184,7 @@ async def execute_managed(authority, ref, row, policy):
                     raise RuntimeStoreError('invalid_worker_result')
                 retain_result(authority.db, epoch=authority.epoch, row=row, result={'result': result, 'usage': {}})
                 accepted = result
+                authority.sessions[ref.session_id].controls.snapshot(ref.session_id, None)
                 await asyncio.to_thread(worker.send, {'type': 'finish'})
                 continue
             if frame == {'type': 'finished'} and accepted is not None:
@@ -106,6 +194,9 @@ async def execute_managed(authority, ref, row, policy):
                 return accepted['final_response']
             raise RuntimeStoreError('invalid_worker_frame')
     except (Exception, asyncio.CancelledError) as exc:
+        import logging
+        logging.getLogger(__name__).warning('Managed worker lost: %s',
+            exc.reason if isinstance(exc, RuntimeStoreError) else type(exc).__name__)
         if scope is None:
             raise
         from gateway.session_worker_reservation import lose_admission_worker
