@@ -125,6 +125,9 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             else:
                 self.journal = {'scope': self.scope, 'next_sequence': 1, 'pending': []}
                 self._save(self.journal)
+            if is_worker_process():
+                from tools.async_delegation_worker import bind_worker_delegation_store
+                bind_worker_delegation_store(self)
         except Exception:
             self._outbox_owner.close()
             raise
