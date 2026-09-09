@@ -4,10 +4,15 @@ from pathlib import Path
 import subprocess
 import sys
 
+import importlib.machinery
+
 import pytest
 
-# The probe drives the real Discord adapter (a `messaging` extra); CI's base venv has no discord.py.
-pytest.importorskip("discord")
+# The probe is a fresh interpreter driving the real Discord adapter; tests/gateway/conftest.py's
+# in-process MagicMock ``discord`` shadows sys.modules here, so ask the path finder for the REAL
+# distribution (a `messaging` extra absent from the CI venv) instead of the import cache.
+if importlib.machinery.PathFinder.find_spec("discord") is None:
+    pytest.skip("discord.py not installed (messaging extra)", allow_module_level=True)
 
 
 def _probe(tmp_path, mode):
