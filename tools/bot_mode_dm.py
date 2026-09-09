@@ -591,14 +591,15 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool,
                 print(_live_outcome_unknown(dm_file, exc))
                 return 1
             if record is not None:
-                return _wait_live_dm(record["profile_home"], record["delivery_id"], dm_file=dm_file)
+                return _wait_live_dm(record["profile_home"], record["delivery_id"])
+    if not stdin_file:
+        print(json.dumps({"reason": "runtime_unavailable", "error": "No canonical Bot Chat authority; payload retained."}))
+        return 1
     try:
         from tools.bot_relay import delivery_env
 
         env = delivery_env(author, profile_home if not stdin_file else None)
         with _delivery_lock(argv, stdin_file=stdin_file):
-            if not stdin_file:
-                return _run_local_turn(argv, dm_file, env=env)
             # Keep the file open until the transport exits; cleanup occurs
             # after subprocess.run returns, not merely after stdin reaches EOF.
             with open(dm_file, "r", encoding="utf-8-sig") as stream:
