@@ -75,17 +75,13 @@ def _session_latest_descendant(session_id: str, db):
     return current, path
 
 
-async def _mutate_session_request(request, profile, session_id, *, request_id,
-                                  expected_revision, operation, payload, expected_generation=None):
-    """Resolve the authenticated principal and owner; never open a second writer."""
+def _session_mutation_context(request, profile):
+    """Use the same principal and profile boundary for prepare and apply."""
     from fastapi import HTTPException
-    from gateway.session_contract import Principal, SessionRef
-    from gateway.session_mutations import mutate_session
-    from hermes_state_runtime import RuntimeStoreError
+    from gateway.session_contract import Principal
     from hermes_cli.web_server import _has_valid_session_token
     from hermes_cli.web_server_cron import _cron_profile_home
     from hermes_state import _default_db_path
-    import sqlite3
 
     native = getattr(request.state, 'native_http_principal', None)
     session = getattr(request.state, 'session', None)
@@ -105,14 +101,26 @@ async def _mutate_session_request(request, profile, session_id, *, request_id,
         raise HTTPException(status_code=403, detail='profile_mismatch')
     if native is not None and native['profile_id'] != authority.profile_id:
         raise HTTPException(status_code=403, detail='profile_mismatch')
+    return authority, Principal(subject, authority.profile_id,
+        frozenset({'session:read', 'session:control', 'session:create'}), 'http')
+
+
+async def _mutate_session_request(request, profile, session_id, *, request_id,
+                                  expected_revision, operation, payload, expected_generation=None):
+    """Resolve the authenticated principal and owner; never open a second writer."""
+    import sqlite3
+    from fastapi import HTTPException
+    from gateway.session_contract import SessionRef
+    from gateway.session_mutations import mutate_session
+    from hermes_state_runtime import RuntimeStoreError
+
+    authority, actor = _session_mutation_context(request, profile)
     if operation == 'import':
         _, errors = authority.db._validate_import_payload(payload['sessions'])
         if errors:
             raise HTTPException(status_code=400, detail={'errors': errors})
     if request_id is None or expected_revision is None:
         raise HTTPException(status_code=409, detail='mutation_identity_required')
-    actor = Principal(subject, authority.profile_id,
-        frozenset({'session:read', 'session:control', 'session:create'}), 'http')
     params = dict(session_id=session_id, request_id=request_id, expected_revision=expected_revision,
         operation=operation, payload=payload)
     if expected_generation is not None:

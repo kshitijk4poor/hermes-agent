@@ -523,6 +523,18 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
     return await asyncio.to_thread(_with_db, profile, _detail, read_only=True)
 
 
+@manage_router.get("/api/sessions/{session_id}/mutation-snapshot")
+async def get_session_mutation_snapshot(session_id: str, request: Request, profile: Optional[str] = None):
+    from hermes_cli.web_server_sessions import _session_mutation_context
+    authority, _actor = _session_mutation_context(request, profile)
+    row = authority.db.get_session(session_id)
+    # An absent import anchor has revision zero by the owner's storage contract,
+    # not by a client guessing after a failed or stale detail request.
+    return {'session_id': session_id, 'exists': row is not None,
+            'runtime_revision': row['runtime_revision'] if row else 0,
+            'runtime_generation': row['runtime_generation'] if row else None}
+
+
 @manage_router.get("/api/sessions/{session_id}/latest-descendant")
 async def get_session_latest_descendant(session_id: str, profile: Optional[str] = None):
     latest, path = await asyncio.to_thread(
