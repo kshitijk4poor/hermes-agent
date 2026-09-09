@@ -305,6 +305,26 @@ def worker_archive(db, conn, sid, payload):
     return {'value': value}
 
 
+def _migrate_worker_automation(db, conn, parent, child):
+    from hermes_cli.goals import GoalState
+    from hermes_cli.heartbeat import HeartbeatState
+    from hermes_cli.loops import LoopState
+    for family, state_type in (('goal', GoalState), ('heartbeat', HeartbeatState), ('loop', LoopState)):
+        old_key, new_key = f'{family}:{parent}', f'{family}:{child}'
+        row = conn.execute('SELECT value FROM state_meta WHERE key=?', (old_key,)).fetchone()
+        if row is None:
+            continue
+        state = state_type.from_json(row[0])
+        if state.status == 'cleared':
+            continue
+        prior = conn.execute('SELECT value FROM state_meta WHERE key=?', (new_key,)).fetchone()
+        if prior is not None and (family != 'heartbeat' or state_type.from_json(prior[0]).status != 'cleared'):
+            continue
+        db.set_meta(new_key, state.to_json(), cursor=conn)
+        state.status = 'cleared'
+        db.set_meta(old_key, state.to_json(), cursor=conn)
+
+
 def worker_publish(db, conn, sid, payload):
     from hermes_state_sessions import _parse_model_config
     _fields(payload, ('child_session_id', 'source', 'messages', 'model', 'model_config', 'system_prompt',
@@ -341,6 +361,7 @@ def worker_publish(db, conn, sid, payload):
     if worker is None:
         raise RuntimeStoreError('stale_generation')
     publish_on_connection(db, conn, parent_session_id=sid, **dict(payload, model_config=cfg))
+    _migrate_worker_automation(db, conn, sid, child)
     conn.execute('UPDATE sessions SET runtime_generation=? WHERE id=?', (worker['generation'], child))
     conn.execute('UPDATE worker_executions SET session_id=? WHERE execution_id=?', (child, worker['execution_id']))
     conn.execute("UPDATE session_admissions SET target_session_id=?,lineage_json=json_insert(lineage_json,'$[#]',?) "
