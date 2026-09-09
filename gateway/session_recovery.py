@@ -336,9 +336,9 @@ class SessionRecoveryMixin:
         recorder = getattr(db, "record_gateway_session_peer", None)
         if not callable(recorder):
             return
-        from gateway.session_identity import transport_profile_of
+        from gateway.session_api import api_storage_source
         peer = dict(
-            source=source.platform.value, user_id=source.user_id, session_key=session_key,
+            source=api_storage_source(db, session_id, source.platform.value), user_id=source.user_id, session_key=session_key,
             chat_id=source.chat_id, chat_type=source.chat_type, thread_id=source.thread_id)
         try:
             recorder(

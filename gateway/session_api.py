@@ -76,6 +76,15 @@ def bind_api_session(authority, session_id, *, hosted_dispatch=None):
     return restore_api_session(authority, session_id)
 
 
+def api_storage_source(db, session_id, fallback):
+    if fallback != 'api_server':
+        return fallback
+    with db._read_ctx() as conn:
+        saved = conn.execute('SELECT value FROM state_meta WHERE key=?',
+                             (_BINDING_PREFIX + session_id,)).fetchone()
+    return json.loads(saved[0]).get('storage_source', fallback) if saved else fallback
+
+
 def restore_api_session(authority, session_id):
     from gateway.session_authority import LiveSession
     with authority.db._read_ctx() as conn:
