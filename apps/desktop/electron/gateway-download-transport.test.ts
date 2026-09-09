@@ -35,6 +35,31 @@ test('download transport never follows redirects or retries after the save phase
   }
 })
 
+test('the connect timeout is dropped once headers arrive so a slow body streams to completion', async () => {
+  // The transport hands the raw response stream to the finalizer instead of
+  // buffering it, so the socket must stay open for as long as the save takes.
+  // A body that trickles in slower than the connect timeout must still land
+  // in full; only the wait for headers is bounded.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream' })
+    res.write('head-')
+    setTimeout(() => res.end('tail'), 120)
+  })
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}/file`
+  const finish = async (res: http.IncomingMessage) => {
+    const chunks: Buffer[] = []
+    for await (const chunk of res) { chunks.push(Buffer.from(chunk)) }
+    return Buffer.concat(chunks).toString()
+  }
+  try {
+    await expect(downloadViaTokenToFile(url, 'remote-static', {}, finish, { timeoutMs: 30 })).resolves.toBe('head-tail')
+  } finally {
+    destroyKeepaliveAgents()
+    await new Promise<void>(resolve => server.close(() => resolve()))
+  }
+})
+
 test.skipIf(process.platform === 'win32')('download retries mint a new private grant for every wire attempt and preserve remote auth', async () => {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'download-auth-'))
   const grants: string[] = []
