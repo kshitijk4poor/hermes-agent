@@ -245,6 +245,10 @@ def test_bare_agent_constructor_cannot_restore_safe_customizations(tmp_path, mod
             prefill_messages=[{"role": "user", "content": "PREFILL_SENTINEL"}],
             save_trajectories=False)
         from agent.background_review import load_background_review_settings
+        from agent.system_prompt import build_system_prompt
+        prompt = build_system_prompt(agent)
+        if mode == "safe":
+            assert "IDENTITY_SENTINEL" not in prompt
         flags = [agent.skip_context_files, agent.load_soul_identity, agent.skip_background_review]
         print(json.dumps({"flags": flags, "prefill": agent.prefill_messages,
                           "review": load_background_review_settings()[0], "reads": reads}))

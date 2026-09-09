@@ -4046,11 +4046,11 @@ _inject_profile_env_vars()
 
 
 def _platform_plugin_manifests():
+    """Yield ``(dir_name, manifest_dict)`` for every bundled ``plugins/platforms/*/plugin.y(a)ml``."""
     from agent.safe_worker_policy import safe_worker_enabled
 
     if safe_worker_enabled():
         return
-    """Yield ``(dir_name, manifest_dict)`` for every bundled ``plugins/platforms/*/plugin.y(a)ml``."""
     platforms_dir = get_project_root() / "plugins" / "platforms"
     if not platforms_dir.is_dir():
         return
