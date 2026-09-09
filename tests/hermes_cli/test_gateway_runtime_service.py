@@ -15,6 +15,7 @@ import pytest
     ("default", "deadline"),
     ("wrong_home", "profile_mismatch"), ("wrong_user", "service_account_mismatch"),
     ("missing_identity", "service_identity_unverified"),
+    ("omitted_empty_exec_lists", "deadline"),
     ("env_file", "service_identity_unverified"), ("dynamic_user", "service_identity_unverified"),
     ("wrong_command", "service_identity_unverified"), ("command_profile", "profile_mismatch"),
     ("dropin_home", "profile_mismatch"), ("manager_home", "profile_mismatch"),
@@ -65,6 +66,11 @@ def test_ensure_checks_effective_service_binding_before_start(tmp_path, monkeypa
         props['User'] = str(os.getuid() + 1)
     if case == "missing_identity":
         props = {k: props[k] for k in ("LoadState", "ActiveState", "SubState", "UnitFileState")}
+    if case == "omitted_empty_exec_lists":
+        # systemd >= 25x prints nothing for empty exec-command lists and
+        # EnvironmentFiles even under --all; absence there means empty, not unknown.
+        for key in ("ExecStartPre", "ExecCondition", "EnvironmentFiles"):
+            del props[key]
     if case == "env_file":
         env_file = tmp_path / "override.env"
         env_file.write_text(f'HERMES_HOME={tmp_path / "other"}\n', encoding="utf-8")

@@ -18,6 +18,9 @@ SYSTEMD_IDENTITY_PROPERTIES = (
     "PassEnvironment", "UnsetEnvironment", "PAMName", "RootDirectory", "RootImage",
     "ExecStartPre", "ExecCondition", "DropInPaths",
 )
+# `systemctl show --all` (systemd 259) prints no line at all for these when the
+# list is empty, so their absence carries no identity uncertainty.
+SYSTEMD_OMITTED_WHEN_EMPTY = ("EnvironmentFiles", "ExecStartPre", "ExecCondition")
 
 
 def _unverified() -> NoReturn:
@@ -106,6 +109,9 @@ def environment_pairs(value: str) -> dict[str, str]:
 def verify_systemd(props: dict[str, str], manager_env: str, home: Path, *, system: bool) -> None:
     import pwd
 
+    # systemd 259 omits empty exec-command lists and EnvironmentFiles from
+    # `show --all` output entirely; an omitted list is empty, not unknown.
+    props = {**{key: "" for key in SYSTEMD_OMITTED_WHEN_EMPTY}, **props}
     if not all(key in props for key in SYSTEMD_IDENTITY_PROPERTIES):
         _unverified()
     # These can change the execution account, environment, mount namespace, or
