@@ -4215,10 +4215,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         route: Optional[Dict[str, Any]] = None, session_model: Optional[str] = None,
         requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
         confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False,
-        session_history_delivery: str = "", turn_author: Optional[Dict[str, Any]] = None,
-        relay_metadata: Optional[Dict[str, Any]] = None, notification_category: str = "result",
-        resume_unanswered_turn: bool = False, approval_notify_callback=None,
-        approval_session_key: Optional[str] = None) -> tuple:
+        request_id: Optional[str] = None, history_from_session: bool = False) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -4235,7 +4232,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 requested_model=requested_model, requested_provider=requested_provider, model_options=model_options,
                 route=route, session_model=session_model, requested_runtime=requested_runtime,
                 route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock,
-                bind_declared_conversation=bind_declared_conversation)
+                bind_declared_conversation=bind_declared_conversation, request_id=request_id,
+                history_from_session=history_from_session)
         loop = asyncio.get_running_loop()
         # ContextVars do not follow run_in_executor threads: capture here, re-enter in _run().
         request_profile = _api_request_profile.get()

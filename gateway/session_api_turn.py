@@ -32,7 +32,7 @@ def check_api_turn(authority, ref, payload):
         raise RuntimeStoreError('runtime_draining')
     if 'api_turn_v1' in payload:
         data = payload['api_turn_v1']
-        if set(data) != {'history', 'settings'} or not isinstance(data['history'], list):
+        if set(data) != {'history', 'settings'} or (data['history'] is not None and not isinstance(data['history'], list)):
             raise RuntimeStoreError('invalid_params')
         if set(data['settings']) - set(_SETTING_KEYS):
             raise RuntimeStoreError('invalid_params')
@@ -55,20 +55,30 @@ async def run_api_turn(adapter, **kwargs):
             raise RuntimeStoreError('permission_denied')
         settings['route'] = {k: v for k, v in route.items() if k != 'api_key'}
     payload = json.loads(_json({'text': kwargs['user_message'], 'api_turn_v1': {
-        'history': kwargs['conversation_history'], 'settings': settings}}))
+        'history': None if kwargs.get('history_from_session') else kwargs['conversation_history'], 'settings': settings}}))
     check_api_turn(authority, ref, payload)
     row = admit_session_input(authority.db, epoch=authority.epoch, principal_id='api',
-                              session_id=sid, request_id=kwargs.get('active_run_id') or uuid.uuid4().hex,
+                              session_id=sid, request_id=kwargs.get('request_id') or kwargs.get('active_run_id') or uuid.uuid4().hex,
                               payload=payload)
     if row['status'] == 'terminal':
         result = admission_result(authority.db, row['admission_id'])
         if result is None:
             raise RuntimeStoreError('unknown_execution')
+        callback = kwargs.get('stream_delta_callback')
+        if callback:
+            callback(result['result'].get('final_response') or '')
         return result['result'], result['usage']
     waiter = authority.waiters.setdefault(row['admission_id'], asyncio.get_running_loop().create_future())
+    observers = getattr(authority, 'api_observers', None)
+    if observers is None:
+        observers = authority.api_observers = {}
+    observers.setdefault(row['admission_id'], []).append({
+        key: kwargs[key] for key in ('stream_delta_callback', 'tool_start_callback', 'tool_complete_callback')
+        if kwargs.get(key) is not None})
     authority._publish_pending(ref)
     authority._schedule(ref)
     await asyncio.shield(waiter)
+    observers.pop(row['admission_id'], None)
     saved = admission_result(authority.db, row['admission_id'])
     if saved is None:
         raise RuntimeStoreError('unknown_execution')
@@ -87,6 +97,25 @@ def prepare_api_execution(authority, ref, payload):
                          (_SETTINGS_PREFIX + ref.session_id, _json(settings)))
         authority.db._execute_write(write)
     return {'adapter': adapter, 'settings': settings, 'history': data['history'] if data else None}
+
+
+def publish_api_event(authority, session_id, event_type, payload):
+    execution = authority.sessions[session_id].event_stream.execution
+    admission_id = execution.get('admission_id') if execution else None
+    observers = getattr(authority, 'api_observers', {}).get(admission_id, ())
+    for observer in tuple(observers):
+        if event_type == 'message.delta':
+            callback = observer.get('stream_delta_callback')
+            if callback:
+                callback(payload['text'])
+        elif event_type == 'tool.start':
+            callback = observer.get('tool_start_callback')
+            if callback:
+                callback(payload['tool_call_id'], payload['tool_name'], {})
+        elif event_type == 'tool.complete':
+            callback = observer.get('tool_complete_callback')
+            if callback:
+                callback(payload['tool_call_id'], payload['tool_name'], {}, {})
 
 
 def prepare_api_runtime(model, runtime_kwargs):
