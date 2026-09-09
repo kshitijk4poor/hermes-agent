@@ -198,6 +198,11 @@ def test_real_user_systemd_scope_preserves_worker_context(
         pytest.skip("systemd-run --user --scope is unavailable on this host")
 
     workspace, task = worker_setup
+    from dataclasses import replace
+    from uuid import uuid4
+    # User-manager transient units outlive pytest's temporary directories.
+    task = replace(task, id=f"t_candidate_{uuid4().hex}")
+    unit = f"hermes-worker-kanban-{task.id}-run-{task.current_run_id}.scope"
     receipt = workspace / "worker-receipt.json"
     script = (
         "import json, os, pathlib, sys, time; "
@@ -206,22 +211,49 @@ def test_real_user_systemd_scope_preserves_worker_context(
         "'pid': os.getpid(), 'cwd': os.getcwd(), "
         "'task': os.environ.get('HERMES_KANBAN_TASK'), "
         "'run': os.environ.get('HERMES_KANBAN_RUN_ID'), "
-        "'cgroup': pathlib.Path('/proc/self/cgroup').read_text()})); os.replace(t, p); time.sleep(0.5)"
+        "'claim': os.environ.get('HERMES_KANBAN_CLAIM_LOCK'), "
+        "'board': os.environ.get('HERMES_KANBAN_BOARD'), "
+        "'home': os.environ.get('HERMES_HOME'), "
+        "'profile': os.environ.get('HERMES_PROFILE'), "
+        "'source': os.environ.get('HERMES_SESSION_SOURCE'), "
+        "'terminal_cwd': os.environ.get('TERMINAL_CWD'), "
+        "'cgroup': pathlib.Path('/proc/self/cgroup').read_text()})); time.sleep(0.5)"
     )
     monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: [sys.executable, "-c", script, str(receipt)])
     monkeypatch.setenv("INVOCATION_ID", "managed-gateway-test")
     monkeypatch.setattr(process_registry, "_is_supervised_gateway_process", lambda: True)
 
     pid = kbd._default_spawn(task, str(workspace))
-    deadline = time.monotonic() + 15
-    while not receipt.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
+    try:
+        deadline = time.monotonic() + 5
+        while not receipt.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
 
-    assert receipt.exists()
-    payload = json.loads(receipt.read_text(encoding="utf-8"))
-    assert payload["pid"] == pid
-    assert payload["cwd"] == str(workspace)
-    assert payload["task"] == task.id
-    assert payload["run"] == "23"
-    assert ".scope" in payload["cgroup"]
-    assert "hermes-gateway.service" not in payload["cgroup"]
+        log_path = kb.worker_logs_dir() / f"{task.id}.log"
+        assert receipt.exists(), log_path.read_text(encoding="utf-8", errors="replace")
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        assert payload["pid"] == pid
+        assert payload["cwd"] == str(workspace)
+        assert payload["task"] == task.id
+        assert payload["run"] == "23"
+        assert payload["claim"] == task.claim_lock
+        assert payload["board"] == kb.get_current_board()
+        assert payload["home"] == str(workspace.parent / '.hermes' / 'profiles' / task.assignee)
+        assert payload["profile"] == task.assignee
+        assert payload["source"] == 'kanban'
+        assert payload["terminal_cwd"] == str(workspace)
+        assert unit in payload["cgroup"]
+        assert "hermes-gateway.service" not in payload["cgroup"]
+        import psutil
+        assert psutil.Process(pid).wait(timeout=5) == 0
+    finally:
+        # Stop only this test's freshly named scope, never the historical fixed
+        # name or another producer's unit. The live-system guard stays enabled.
+        subprocess.run(["systemctl", "--user", "stop", unit], stdin=subprocess.DEVNULL,
+                       capture_output=True, timeout=10, check=False,
+                       env=process_registry.systemd_user_bus_env())
+        state = subprocess.run(["systemctl", "--user", "show", unit, "--property=ActiveState", "--value"],
+                               stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+                               env=process_registry.systemd_user_bus_env())
+        assert state.stdout.strip() in ('inactive', 'failed'), state.stdout + state.stderr
+    print(json.dumps({'worker': payload, 'scope_after_cleanup': state.stdout.strip()}))
