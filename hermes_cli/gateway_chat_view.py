@@ -97,6 +97,17 @@ class GatewayChatView:
                 execution_generation=prompt["execution_generation"], prompt_id=prompt_id,
                 **({"choice": answer} if expected == "approval" else {"answer": answer}))
             return True
+        if command == "/discard":
+            # Acknowledge a turn lost across an owner restart; the resume snapshot
+            # is the only source of the generation the authority stamped on it.
+            snapshot = await self.client.rpc("session.resume", session_id=self.session_id)
+            lost = next((row for row in snapshot.get("pending", [])
+                         if row["admission_id"] == rest.strip() and row["status"] == "unknown"), None)
+            if lost is None:
+                raise GatewayClientError("No unknown (lost) admission with that id; resume to refresh")
+            await self.client.rpc("prompt.resolve_unknown", session_id=self.session_id,
+                                  admission_id=lost["admission_id"], execution_generation=lost["execution_generation"])
+            return True
         if command in {'/branch', '/model', '/compress'}:
             from hermes_cli.gateway_mutations import slash_mutation
             operation, payload = slash_mutation(command, rest.strip())
@@ -111,7 +122,7 @@ class GatewayChatView:
             print(f"{operation}: {target}")
             return True
         if command == "/help":
-            print("/stop, /approve <id> <choice>, /answer <id> <text>, /quit (detach). /branch [title], /model <model> [--provider name], /compress [focus].")
+            print("/stop, /approve <id> <choice>, /answer <id> <text>, /discard <admission_id> (turn lost during restart), /quit (detach). /branch [title], /model <model> [--provider name], /compress [focus].")
             return True
         raise GatewayClientError("Unsupported gateway CLI command; use /help. No local command was run.")
 

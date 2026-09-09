@@ -22,6 +22,17 @@ publishes this state before `message.complete`, retaining the terminal event as 
 last event of that turn. Desktop translates both paths into its existing
 `pending_submissions` queue store.
 
+A turn that was `started` when its owning gateway died is recovered by the next owner
+as `unknown`: Hermes cannot prove which side effects happened, so it neither replays
+the input nor lets the queued turns behind it run. `prompt.resolve_unknown`
+(`session:control`, params `session_id`, `admission_id`, `execution_generation`)
+acknowledges the loss: the row settles as `interrupted`, the session FIFO resumes and
+the follower runs exactly once. The generation must be the one stamped on the unknown
+row (visible in the resume/`session.info` projection), so a stale or already-resolved
+row is refused with `stale_generation`. Desktop shows such a row in the queue panel as
+"Turn lost during restart" with a **Discard** button; the gateway CLI exposes it as
+`/discard <admission_id>`. The lost input stays in the transcript for the user to resend.
+
 ## Shared authority local slash commands
 
 Authenticated local sessions accept `slash.exec({session_id, command})` and
