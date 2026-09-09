@@ -42,7 +42,8 @@ def test_owner_binds_reservation_to_verified_descendant_of_the_handle_only(tmp_p
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         real = int(launcher.stdout.readline())
-        assert real != launcher.pid and psutil.Process(real).ppid() == launcher.pid
+        # One hop on POSIX; a venv trampoline (Windows) nests a second launcher in the chain.
+        assert real != launcher.pid and launcher.pid in [p.pid for p in psutil.Process(real).parents()]
         with closing(SessionDB(tmp_path / 'state.db')) as db:
             db.create_session('owned', 'cli')
             epoch = begin_runtime_epoch(db, instance_id='owner')

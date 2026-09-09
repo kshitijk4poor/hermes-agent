@@ -493,6 +493,11 @@ def test_native_safe_mode_cli_executes_in_managed_worker(harness):
                     'worker_errors': [r for r in records(audit) if r['kind'] == 'worker_error'],
                     'worker_executions': query(home, 'SELECT execution_id,status FROM worker_executions'),
                     'gateway_log': (home / 'logs' / 'gateway.log').read_text(encoding='utf-8', errors='replace')[-4000:]}
+        if proc.returncode != 0:
+            # The assertion repr truncates the worker traceback; the artifact keeps it whole.
+            artifacts = Path(os.environ.get('UGW_ARTIFACT_DIR', str(home.parent)))
+            artifacts.mkdir(parents=True, exist_ok=True)
+            (artifacts / 'safe-mode-evidence.json').write_text(json.dumps(evidence, indent=1), encoding='utf-8')
         assert proc.returncode == 0, (proc.returncode, out, err, json.dumps(evidence, indent=1))
         assert 'NATIVE_ACK_SAFE_PROBE_NATIVE' in out + err, (out, err)
         sid = re.search(r'Session: (\S+)', err).group(1)
