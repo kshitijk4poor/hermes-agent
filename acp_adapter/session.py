@@ -244,16 +244,11 @@ class SessionManager:
         return results
 
     def _catalog_rows(self) -> dict[str, dict[str, Any]]:
-        from hermes_state import SessionDB
+        from acp_adapter.catalog import read_catalog_rows
         from pathlib import Path
 
         path = Path(self._db_instance.db_path) if self._db_instance is not None else get_hermes_home() / "state.db"
-        if not path.exists():
-            return {}
-        # A separate read-only connection must not initialize schemas, switch
-        # journal mode, or start a token writer merely to render the editor picker.
-        with SessionDB(db_path=path, read_only=True) as db:
-            return {str(row["id"]): dict(row) for row in db.list_sessions_rich(source="acp", limit=1000)}
+        return read_catalog_rows(path)
 
     def update_cwd(self, session_id: str, cwd: str) -> Optional[SessionState]:
         """Update the working directory for a session and its tool overrides."""

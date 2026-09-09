@@ -108,6 +108,37 @@ class GatewayACPAgent(acp.Agent):
         await self._resume(cwd, session_id, mcp_servers)
         return ResumeSessionResponse()
 
+    async def cancel(self, session_id, **kwargs):
+        snapshot = self._snapshots.get(session_id)
+        if snapshot is None:
+            raise GatewayClientError("not_found")
+        client = await self._client()
+        await client.rpc("session.interrupt", session_id=session_id,
+                         execution_generation=snapshot["execution_generation"])
+
+    async def fork_session(self, cwd, session_id, mcp_servers=None, **kwargs):
+        raise GatewayClientError("acp_fork_mutation_unavailable")
+
+    async def set_session_model(self, model_id, session_id, **kwargs):
+        raise GatewayClientError("acp_model_mutation_unavailable")
+
+    async def set_session_mode(self, mode_id, session_id, **kwargs):
+        raise GatewayClientError("acp_edit_policy_mutation_unavailable")
+
+    async def set_config_option(self, config_id, session_id, **kwargs):
+        raise GatewayClientError("acp_config_mutation_unavailable")
+
+    async def list_sessions(self, cursor=None, cwd=None, **kwargs):
+        from acp.schema import ListSessionsResponse, SessionInfo
+        from acp_adapter.catalog import catalog_sessions
+        rows = await asyncio.to_thread(catalog_sessions, self._home / "state.db", cwd)
+        if cursor:
+            index = next((i for i, row in enumerate(rows) if row["session_id"] == cursor), None)
+            rows = [] if index is None else rows[index + 1:]
+        page = [SessionInfo(session_id=row["session_id"], cwd=row["cwd"], title=row.get("title"),
+                            updated_at=row.get("updated_at")) for row in rows[:50]]
+        return ListSessionsResponse(sessions=page, next_cursor=page[-1].session_id if len(rows) > 50 else None)
+
     async def prompt(self, prompt, session_id, **kwargs):
         if session_id not in self._snapshots:
             raise GatewayClientError("not_found")
