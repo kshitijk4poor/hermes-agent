@@ -125,6 +125,8 @@ async def run_api_turn(adapter, **kwargs):
 
 async def observe_api_turn(admitted, **kwargs):
     authority, ref, row = admitted
+    if row['status'] == 'unknown':
+        raise RuntimeStoreError('unknown_execution')
     if row['status'] == 'terminal':
         result = admission_result(authority.db, row['admission_id'])
         if result is None:

@@ -835,18 +835,12 @@ class OpenAICompatRoutesMixin:
 
     async def _run_idempotent(
         self, request: "web.Request", body: Dict[str, Any], compute, *,
-        log_label: str, fingerprint_keys: List[str], route: str) -> tuple:
-        """Run ``compute()`` once per (principal scope, logical route, Idempotency-Key) + body fingerprint
-        -> ``((result, usage), None)`` or ``(None, 500 response)``.
-
-        ``_idem_cache`` is process-global: under ``gateway.multiplex_profiles`` every profile's
-        ``/p/<profile>/v1/...`` mirror shares it, so the key carries ``_run_idempotency_scope`` (the same
-        ``sha256(profile, expected API key)`` namespace the durable ``/v1/runs`` API uses) — a client key
-        colliding across profiles, or a rotated API_SERVER_KEY, never replays another principal's response.
-        ``route`` is the logical endpoint (``/v1/...`` and its ``/p/<profile>/v1/...`` alias are the same
-        route), folded into the key because the store keeps the fingerprint only as the slot's value.
-        """
-        from gateway.platforms.api_server import _error_response, _idem_cache, _make_request_fingerprint
+        log_label: str, fingerprint_keys: List[str]) -> tuple:
+        """Run ``compute()`` once per Idempotency-Key + body fingerprint ->
+        ``((result, usage), None)`` or ``(None, 500 response)``."""
+        from gateway.platforms.api_server import (
+            _error_response, _idem_cache, _make_request_fingerprint)
+        from hermes_state_runtime import RuntimeStoreError
         idempotency_key = request.headers.get("Idempotency-Key")
         try:
             if idempotency_key and getattr(self.gateway_runner, 'session_authority', None) is None:
@@ -855,6 +849,9 @@ class OpenAICompatRoutesMixin:
             else:
                 result, usage = await compute()
             return (result, usage), None
+        except RuntimeStoreError as exc:
+            from gateway.platforms.api_server import _openai_error
+            return None, web.json_response(_openai_error(exc.reason, code=exc.reason), status=409)
         except Exception as e:
             logger.error("Error running agent for %s: %s", log_label, e, exc_info=True)
             message = "" if getattr(e, "_notification_presentation_suppressed", False) is True else f"Internal server error: {e}"

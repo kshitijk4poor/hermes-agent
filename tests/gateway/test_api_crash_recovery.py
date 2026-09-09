@@ -57,8 +57,16 @@ def test_api_crash_queue_and_identified_result_retry(tmp_path):
             async with client.post(url + '/chat/completions', json={'messages': [{'role': 'user', 'content': 'WARM'}]},
                                    headers={'X-Hermes-Session-Id': 'unknown'}) as response:
                 assert response.status == 200, await response.text()
-            await run(client, 'started', 'BLOCK_STARTED', 'unknown')
+            async def block():
+                async with client.post(url + '/chat/completions',
+                    json={'messages': [{'role': 'user', 'content': 'BLOCK_STARTED'}]},
+                    headers={'X-Hermes-Session-Id': 'unknown', 'Idempotency-Key': 'started'}) as response:
+                    await response.read()
+            blocked = asyncio.create_task(block())
             assert await asyncio.to_thread(peer.blocked.wait, 15)
+            runs['started'] = 'chat:started'
+            blocked.cancel()
+            await asyncio.gather(blocked, return_exceptions=True)
             await run(client, 'follower', 'NEVER_REPLAY', 'unknown')
             await run(client, 'safe', 'SAFE_QUEUE', 'safe')
             assert rows()[runs['safe']] == 'queued'
@@ -70,6 +78,11 @@ def test_api_crash_queue_and_identified_result_retry(tmp_path):
                 while rows()[runs['safe']] != 'terminal':
                     await asyncio.sleep(.05)
             assert rows()[runs['started']] == 'unknown' and rows()[runs['follower']] == 'queued', rows()
+            async with client.post(url + '/chat/completions',
+                json={'messages': [{'role': 'user', 'content': 'BLOCK_STARTED'}]},
+                headers={'X-Hermes-Session-Id': 'unknown', 'Idempotency-Key': 'started'}) as response:
+                unknown = await response.json()
+                assert response.status == 409 and unknown['error']['code'] == 'unknown_execution', unknown
             before = len(peer.requests)
             await run(client, 'safe', 'SAFE_QUEUE', 'safe')
             async with client.get(url + '/runs/' + runs['safe']) as response:
