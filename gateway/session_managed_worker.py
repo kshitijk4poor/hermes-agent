@@ -75,6 +75,7 @@ async def execute_managed(authority, ref, row, policy):
         workers = authority._managed_workers = {}
     workers[ref.session_id] = worker
     accepted = None
+    scope = None
     try:
         scope = reserve_admission_worker(authority, admission_id=row['admission_id'],
                     process=process, principal_id=row['principal_id'])
@@ -104,6 +105,23 @@ async def execute_managed(authority, ref, row, policy):
                     raise RuntimeStoreError('managed_worker_lost')
                 return accepted['final_response']
             raise RuntimeStoreError('invalid_worker_frame')
+    except (Exception, asyncio.CancelledError) as exc:
+        if scope is None:
+            raise
+        from gateway.session_worker_reservation import lose_admission_worker
+        lose_admission_worker(authority, row, scope)
+        live = authority.sessions[ref.session_id]
+        with live.event_stream.lock:
+            live.controls.snapshot(ref.session_id, None)
+            authority._publish_pending(ref)
+            live.event_stream.publish(ref.session_id, {'text': 'Worker execution is unknown.',
+                'content': 'Worker execution is unknown.', 'admission_id': row['admission_id'], 'outcome': 'unknown'})
+        waiter = authority.waiters.pop(row['admission_id'], None)
+        if waiter is not None and not waiter.done():
+            waiter.set_result('Worker execution is unknown.')
+        # Stop this drain without its ordinary Exception→failed settlement. The
+        # committed unknown row deliberately pauses every accepted follower.
+        raise asyncio.CancelledError('managed_worker_unknown') from exc
     finally:
         workers.pop(ref.session_id, None)
         await asyncio.to_thread(worker.close)

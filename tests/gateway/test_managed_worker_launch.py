@@ -54,7 +54,8 @@ class Model(BaseHTTPRequestHandler):
 
 
 @pytest.mark.linux_only
-def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path):
+@pytest.mark.parametrize('worker_action', ['detach', 'kill'])
+def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path, worker_action):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
@@ -94,6 +95,21 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
             children = [p for p in psutil.Process(owner.pid).children() if p.cmdline()[-2:] == ['-m', 'agent.managed_worker']]
             assert len(children) == 1, [(p.pid, p.cmdline()) for p in psutil.Process(owner.pid).children()]
             pid = children[0].pid
+            if worker_action == 'kill':
+                follower = await rpc(ws, 'prompt.submit', session_id=sid, input_id='follower', text='NEVER_REPLAY')
+                assert 'result' in follower, follower
+                children[0].kill()
+                async with asyncio.timeout(10):
+                    while query('SELECT status FROM session_admissions WHERE request_id=?', ('managed-input',)) == [('started',)]:
+                        await asyncio.sleep(.05)
+                assert query('SELECT request_id,status FROM session_admissions ORDER BY seq') == [
+                    ('managed-input', 'unknown'), ('follower', 'queued')]
+                restored = await rpc(ws, 'session.resume', session_id=sid)
+                assert any(p['status'] == 'unknown' for p in restored['result']['pending']), restored
+                assert not query("SELECT value FROM state_meta WHERE key LIKE 'gateway.admission.result.v1.%'")
+                peer.release.set()
+                print(json.dumps({'owner_pid': owner.pid, 'killed_worker_pid': pid, 'outcome': 'unknown', 'follower': 'queued'}))
+                return
         # Viewer connection is gone while the real model still holds the turn.
         assert psutil.Process(pid).is_running()
         peer.release.set()

@@ -55,3 +55,25 @@ def reserve_admission_worker(authority, *, admission_id, process, principal_id):
         return scope | {'epoch': authority.epoch}
 
     return authority.db._execute_write(write)
+
+
+def lose_admission_worker(authority, row, scope):
+    """Revoke a private assignment and pause its FIFO; no inference replay.
+
+    This also fences a result already in the pipe at loss/shutdown. Retention
+    requires a still-started admission even when the generation has not changed.
+    """
+    def write(conn):
+        _epoch(conn, scope['epoch'])
+        current = _admission(conn, row['admission_id'])
+        if (current['status'] != 'started' or current['owner_epoch'] != scope['epoch']
+                or current['generation'] != scope['generation']):
+            raise RuntimeStoreError('stale_generation')
+        worker = conn.execute('SELECT * FROM worker_executions WHERE execution_id=?',
+                              (scope['execution_id'],)).fetchone()
+        if worker is None or worker['generation'] != scope['generation'] or worker['owner_epoch'] != scope['epoch']:
+            raise RuntimeStoreError('stale_generation')
+        conn.execute("UPDATE worker_executions SET status='terminal' WHERE execution_id=?", (scope['execution_id'],))
+        conn.execute("UPDATE session_admissions SET status='unknown' WHERE admission_id=?", (row['admission_id'],))
+        conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (current['target_session_id'],))
+    authority.db._execute_write(write)
