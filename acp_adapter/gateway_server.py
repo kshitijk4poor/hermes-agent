@@ -81,8 +81,6 @@ class GatewayACPAgent(acp.Agent):
         return NewSessionResponse(session_id=snapshot["session_id"])
 
     async def _resume(self, cwd, session_id, mcp_servers):
-        if mcp_servers:
-            raise GatewayClientError("acp_mcp_policy_unavailable")
         client = await self._client()
         info = await client.rpc("session.info", session_id=session_id)
         if "cwd" in info and _normalize_cwd_for_compare(info["cwd"]) != _normalize_cwd_for_compare(_translate_acp_cwd(cwd)):
@@ -90,7 +88,13 @@ class GatewayACPAgent(acp.Agent):
         if "cwd" not in info and self._conn:
             await self._conn.session_update(session_id=session_id, update=acp.update_agent_message_text(
                 "Attached to the gateway's existing session policy; editor cwd is not applied.\n"))
-        snapshot = await client.rpc("session.resume", session_id=session_id)
+        resume_params = {}
+        if mcp_servers:
+            descriptor = await client.rpc("runtime.describe")
+            if "acp-session-mcp-v1" not in descriptor.get("capabilities", []):
+                raise GatewayClientError("acp_mcp_policy_unavailable")
+            resume_params['editor'] = {'mcp_servers': [s.model_dump(by_alias=True) for s in mcp_servers]}
+        snapshot = await client.rpc("session.resume", session_id=session_id, **resume_params)
         self._snapshots[session_id] = snapshot
         from acp_adapter.server import _history_replay_updates
         if self._conn:
