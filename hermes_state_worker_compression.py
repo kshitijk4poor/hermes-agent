@@ -98,7 +98,109 @@ def worker_compression_counter(db, conn, sid, payload, *, column):
     return {'value': None}
 
 
+class CompressionSnapshot:
+    """Reuse production read algorithms on the receipt connection, never a second handle.
+
+    Only read primitives are provided; this object cannot start/commit a write.
+    Wire handlers below select concrete projections, not caller-named methods.
+    """
+    from hermes_state_compression import SessionCompressionMixin as _C
+    from hermes_state_messages import SessionMessagesMixin as _M
+    from hermes_state_sessions import SessionSessionsMixin as _S
+
+    get_compression_chain = _C.get_compression_chain
+    get_compression_tip = _C.get_compression_tip
+    get_compression_lineage = _C.get_compression_lineage
+    _is_compression_child_row = _C._is_compression_child_row
+    _session_lineage_root_to_tip = _S._session_lineage_root_to_tip
+    _is_explicit_branch_session = _S._is_explicit_branch_session
+    declared_scope_identity = _S.declared_scope_identity
+    _resume_lineage_ids = _M._resume_lineage_ids
+    get_conversation_root = _M.get_conversation_root
+    resolve_resume_session_id = _M.resolve_resume_session_id
+    latest_conversation_boundary = _M.latest_conversation_boundary
+    _is_explicit_fork_child_row = _M._is_explicit_fork_child_row
+
+    def __init__(self, db, conn):
+        self.db, self.conn = db, conn
+
+    def _read_ctx(self):
+        from contextlib import nullcontext
+        return nullcontext(self.conn)
+
+    def _read_one(self, sql, params=()):
+        return self.conn.execute(sql, params).fetchone()
+
+    def _read_all(self, sql, params=()):
+        return self.conn.execute(sql, params).fetchall()
+
+    def get_session(self, sid):
+        from hermes_state_worker_context import worker_context
+        return worker_context(self.db, self.conn, sid, {})['session']
+
+    def authorize(self, assigned, target):
+        _text(target)
+        # Attribution ancestry is readable; unrelated siblings and foreign trees are not.
+        allowed = self._session_lineage_root_to_tip(assigned)
+        allowed += self.get_compression_chain(assigned)
+        if target not in allowed:
+            raise RuntimeStoreError('permission_denied')
+
+
+def worker_lineage_context(db, conn, sid, payload):
+    _fields(payload, ('target',))
+    view = CompressionSnapshot(db, conn)
+    target = payload['target']
+    view.authorize(sid, target)
+    return {'session': view.get_session(target)}
+
+
+def worker_lineage(db, conn, sid, payload):
+    _fields(payload, ('target',))
+    view = CompressionSnapshot(db, conn)
+    target = payload['target']
+    view.authorize(sid, target)
+    return {'readable_ids': view._session_lineage_root_to_tip(sid) + view.get_compression_chain(sid),
+            'lineage': view.get_compression_lineage(target),
+            'root': view.get_conversation_root(target),
+            'tip': view.get_compression_tip(target),
+            'resume': view.resolve_resume_session_id(target),
+            'identity': view.declared_scope_identity(target)}
+
+
+def worker_boundary(db, conn, sid, payload):
+    _fields(payload, ('session_key', 'source'))
+    view = CompressionSnapshot(db, conn)
+    row = view.get_session(sid)
+    if (row['session_key'], row['source']) != (payload['session_key'], payload['source']):
+        raise RuntimeStoreError('permission_denied')
+    return {'value': view.latest_conversation_boundary(payload['session_key'], payload['source'])}
+
+
+def worker_history(db, conn, sid, payload):
+    _fields(payload, ('target', 'include_ancestors', 'include_inactive', 'repair_alternation',
+                      'include_row_ids', 'include_compacted'))
+    if any(type(v) is not bool for k, v in payload.items() if k != 'target'):
+        raise RuntimeStoreError('invalid_params')
+    view = CompressionSnapshot(db, conn)
+    target = payload['target']
+    view.authorize(sid, target)
+    ids = view._resume_lineage_ids(target) if payload['include_ancestors'] else [target]
+    active = db._active_clause(payload['include_inactive'], payload['include_compacted'])
+    rows = conn.execute(f'SELECT {db._CONVERSATION_ROW_COLUMNS} FROM messages '
+                        f'WHERE session_id IN ({",".join("?" for _ in ids)}){active} ORDER BY id', ids).fetchall()
+    if payload['include_compacted']:
+        rows = db._dedupe_display_generations(rows)
+    return {'messages': db._rows_to_conversation(rows, session_id=target,
+        include_ancestors=payload['include_ancestors'], repair_alternation=payload['repair_alternation'],
+        include_row_ids=payload['include_row_ids'])}
+
+
 WORKER_COMPRESSION_HANDLERS = {
+    'compression.context': worker_lineage_context,
+    'compression.lineage': worker_lineage,
+    'compression.boundary': worker_boundary,
+    'compression.history': worker_history,
     **{'compression.lock.' + action: partial(worker_compression_lock, action=action)
        for action in ('acquire', 'renew', 'release', 'holder')},
     'compression.cooldown.record': worker_cooldown_record,

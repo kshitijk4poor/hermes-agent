@@ -2,6 +2,41 @@
 
 
 class RuntimeSessionCompressionMixin:
+    def get_session(self, session_id):
+        if session_id != self.scope['session_id']:
+            from agent.runtime_session_store import WorkerPersistenceError
+            ids = self._apply('compression.lineage', {'target': self.scope['session_id']})['readable_ids']
+            if session_id not in ids:
+                raise WorkerPersistenceError('permission_denied')
+        return self._apply('compression.context', {'target': session_id})['session']
+
+    def get_compression_lineage(self, session_id):
+        return self._apply('compression.lineage', {'target': session_id})['lineage']
+
+    def get_conversation_root(self, session_id):
+        return self._apply('compression.lineage', {'target': session_id})['root']
+
+    def get_compression_tip(self, session_id):
+        return self._apply('compression.lineage', {'target': session_id})['tip']
+
+    def resolve_resume_session_id(self, session_id):
+        return self._apply('compression.lineage', {'target': session_id})['resume']
+
+    def declared_scope_identity(self, session_id):
+        return tuple(self._apply('compression.lineage', {'target': session_id})['identity'])
+
+    def is_explicit_fork_child(self, session_id):
+        return self.declared_scope_identity(session_id)[0]
+
+    def latest_conversation_boundary(self, session_key, source):
+        return self._apply('compression.boundary', {'session_key': session_key, 'source': source})['value']
+
+    def get_messages_as_conversation(self, session_id, include_ancestors=False, include_inactive=False,
+                                     repair_alternation=False, include_row_ids=False, include_compacted=False):
+        return self._apply('compression.history', dict(target=session_id, include_ancestors=include_ancestors,
+            include_inactive=include_inactive, repair_alternation=repair_alternation,
+            include_row_ids=include_row_ids, include_compacted=include_compacted))['messages']
+
     def try_acquire_compression_lock(self, session_id, holder, ttl_seconds=300.0):
         self._session(session_id)
         return self._apply('compression.lock.acquire', {'holder': holder, 'ttl_seconds': ttl_seconds})['value']
