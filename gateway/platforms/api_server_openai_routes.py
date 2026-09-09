@@ -730,7 +730,14 @@ class OpenAICompatRoutesMixin:
         run_kwargs = dict(
             user_message=user_message, conversation_history=history,
             ephemeral_system_prompt=system_prompt, session_id=session_id,
-            gateway_session_key=gateway_session_key, **agent_overrides, route=route)
+            gateway_session_key=gateway_session_key, **agent_overrides, route=route,
+            relay_metadata=relay_metadata,
+            # #98619: only an explicitly provided X-Hermes-Session-Id is wake-capable (the
+            # header is 403-gated on API_SERVER_KEY, so the wake self-post can authenticate
+            # and the client can resume the session by sending it again). A fingerprint-derived
+            # id from a header-less client is NOT: delegate_task keeps its forced-sync fallback
+            # there — the wake would hard-fail or land in history that client never reloads.
+            session_history_delivery=("1" if provided_session_id else ""))
         if getattr(self.gateway_runner, 'session_authority', None) is not None:
             key = request.headers.get('Idempotency-Key')
             run_kwargs.update(request_id=('chat:' + key) if key else None,
