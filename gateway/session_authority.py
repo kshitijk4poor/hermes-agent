@@ -54,10 +54,14 @@ class SessionAuthority:
             raise RuntimeStoreError('permission_denied')
         if ref.session_id not in self.sessions:
             row = self.db.get_session(ref.session_id)
-            if row is None or not str(row.get('chat_id') or '').startswith('local-'):
+            if row is None:
                 raise RuntimeStoreError('not_found')
-            from gateway.session_local_recovery import restore_local_session
-            restore_local_session(self, ref.session_id)
+            if str(row.get('chat_id') or '').startswith('local-'):
+                from gateway.session_local_recovery import restore_local_session
+                restore_local_session(self, ref.session_id)
+            else:
+                from gateway.session_api import restore_api_session
+                restore_api_session(self, ref.session_id)
         from gateway.config import Platform
         source = self.sessions[ref.session_id].source
         if source is not None and source.platform == Platform.LOCAL and source.user_id != actor.subject:
