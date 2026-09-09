@@ -137,6 +137,21 @@ async def _mutate_session_request(request, profile, session_id, *, request_id,
         raise HTTPException(status_code=503, detail='storage_unavailable') from exc
 
 
+def _with_session_maintenance(profile, operation, *args):
+    """Offline bulk actions reserve the exact owner lock through final DB close."""
+    from fastapi import HTTPException
+    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
+    from hermes_cli.web_server_cron import _cron_profile_home
+    from hermes_state import _default_db_path
+
+    home = Path(_cron_profile_home(profile)[1]) if profile else Path(_default_db_path()).parent
+    try:
+        with exclusive_maintenance([home]):
+            return operation(*args)
+    except OwnershipConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def _session_db_read_probe_statements() -> tuple:
     """Probe the declared schema without reconciling it on a browsing request."""
     from hermes_state_schema import schema_read_probe_statements

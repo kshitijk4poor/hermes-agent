@@ -89,7 +89,7 @@ def _prune_sessions(body: SessionPrune):
     if has_window or (attr_filters_set and "older_than_days" not in body.model_fields_set):
         effective_older_than = None
     profile_home = _cron_profile_home(body.profile)[1] if body.profile else get_hermes_home()
-    db = _open_session_db_for_profile(body.profile, read_only=False)
+    db = _open_session_db_for_profile(body.profile, read_only=body.dry_run)
     try:
         filters = {
             "older_than_days": effective_older_than, "started_before": body.started_before,
@@ -137,11 +137,16 @@ def _is_active(row: dict, now: float) -> bool:
 
 def _with_db(profile: Optional[str], fn: Callable, *, read_only: bool):
     """Open the profile's session DB, run ``fn(db)``, always close."""
-    db = _open_session_db_for_profile(profile, read_only=read_only)
-    try:
-        return fn(db)
-    finally:
-        db.close()
+    def run():
+        db = _open_session_db_for_profile(profile, read_only=read_only)
+        try:
+            return fn(db)
+        finally:
+            db.close()
+    if read_only:
+        return run()
+    from hermes_cli.web_server_sessions import _with_session_maintenance
+    return _with_session_maintenance(profile, run)
 
 
 def _serving_profile(profile: Optional[str]) -> str:
@@ -838,9 +843,17 @@ async def export_session_endpoint(session_id: str, profile: Optional[str] = None
 @manage_router.post("/api/sessions/prune")
 async def prune_sessions_endpoint(body: SessionPrune):
     """Delete ended sessions matching filters without blocking the event loop."""
-    if not body.dry_run:
-        # Same destructive rule as the rest of the family; a dry run deletes nothing, so it
-        # keeps working unnamed (it is the preview the confirm dialog reads).
-        body = body.model_copy(update={
-            "profile": destructive_profile(body.profile, "POST /api/sessions/prune")})
-    return await asyncio.to_thread(_prune_sessions, body)
+    if body.dry_run:
+        return await asyncio.to_thread(_prune_sessions, body)
+    from hermes_cli.web_server_sessions import _with_session_maintenance
+    return await asyncio.to_thread(_with_session_maintenance, body.profile, _prune_sessions, body)
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+from typing import Any  # noqa: F401,E402
+from typing import Dict  # noqa: F401,E402
+import logging  # noqa: F401,E402
+# ---- END PLUGIN-COMPAT ----
