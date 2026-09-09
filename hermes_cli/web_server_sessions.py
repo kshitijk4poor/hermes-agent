@@ -126,7 +126,8 @@ async def _mutate_session_request(request, profile, session_id, *, request_id,
     if expected_generation is not None:
         params['expected_generation'] = expected_generation
     try:
-        return await mutate_session(authority, actor, SessionRef(authority.profile_id, session_id), params)
+        result = await mutate_session(authority, actor, SessionRef(authority.profile_id, session_id), params)
+        return {'ok': True, **result}
     except RuntimeStoreError as exc:
         status = {'permission_denied': 403, 'profile_mismatch': 403, 'not_found': 404,
                   'invalid_params': 400, 'runtime_draining': 503}.get(exc.reason, 409)

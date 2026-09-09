@@ -60,6 +60,7 @@ async def test_http_and_ws_clients_compete_for_one_revision(tmp_path, monkeypatc
                 first = await client.patch('/api/sessions/session-fixture?token=fixture-token', json=body, headers={'Authorization': 'Bearer fixture-token'})
                 assert first.status_code == 200, first.text
                 assert first.json()['revision'] == 1
+                assert first.json()['ok'] is True
                 import websockets
                 async with websockets.connect(f'ws://127.0.0.1:{port}/ws?token=fixture-token') as ws:
                     await ws.send(json.dumps({'id': 1, 'method': 'session.mutate', 'params': {
