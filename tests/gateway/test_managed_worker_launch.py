@@ -21,6 +21,9 @@ class Model(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         if not body.get('messages'):
             message = {'role': 'assistant', 'content': 'metadata'}
+        elif any(m['role'] == 'user' and m.get('content') == 'RESUME_HISTORY' for m in body['messages']):
+            self.server.requests.append(body)
+            message = {'role': 'assistant', 'content': 'MANAGED_HISTORY_DONE'}
         elif (self.server.control_mode and any(m['role'] == 'tool' for m in body['messages'])
               and not any(m.get('name') == 'clarify' or m.get('tool_call_id') == 'managed-clarify' for m in body['messages'])):
             self.server.requests.append(body)
@@ -60,7 +63,7 @@ class Model(BaseHTTPRequestHandler):
 
 
 @pytest.mark.linux_only
-@pytest.mark.parametrize('worker_action', ['detach', 'kill', 'controls', 'stop'])
+@pytest.mark.parametrize('worker_action', ['detach', 'kill', 'controls', 'stop', 'history'])
 def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path, worker_action):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'
@@ -84,7 +87,16 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
         'approvals': {'mode': 'manual'},
         'platform_toolsets': {'cli': ['terminal']}}))
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
-    env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
+    audit = tmp_path / 'sqlite-opens.jsonl'
+    site = tmp_path / 'audit-site'
+    site.mkdir()
+    (site / 'sitecustomize.py').write_text(
+        "import json, os, sys\ndef witness(event, args):\n"
+        "    if event == 'sqlite3.connect':\n"
+        f"        with open({str(audit)!r}, 'a', encoding='utf-8') as f:\n"
+        "            f.write(json.dumps({'pid': os.getpid(), 'path': str(args[0])}) + '\\n')\n"
+        "sys.addaudithook(witness)\n")
+    env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=os.pathsep.join([str(site), str(root)]),
                OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
 
     def query(sql, args=()):
@@ -136,6 +148,12 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
             children = [p for p in psutil.Process(owner.pid).children() if p.cmdline()[-2:] == ['-m', 'agent.managed_worker']]
             assert len(children) == 1, [(p.pid, p.cmdline()) for p in psutil.Process(owner.pid).children()]
             pid = children[0].pid
+            opened = [json.loads(line) for line in audit.read_text().splitlines()]
+            # Positive control: the witness hook is live in the owner, so worker silence is real.
+            assert [r for r in opened if r['pid'] == owner.pid and 'state.db' in r['path']], opened
+            assert not [r for r in opened if r['pid'] == pid and 'state.db' in r['path']], opened
+            canonical_fds = [f.path for f in children[0].open_files() if Path(f.path).name in {'state.db', 'state.db-wal', 'state.db-shm'}]
+            assert canonical_fds == [], canonical_fds
             if worker_action == 'kill':
                 follower = await rpc(ws, 'prompt.submit', session_id=sid, input_id='follower', text='NEVER_REPLAY')
                 assert 'result' in follower, follower
@@ -179,7 +197,29 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
             {'model': r.get('model'), 'roles': [m['role'] for m in r['messages']],
              'user': [str(m.get('content'))[:120] for m in r['messages'] if m['role'] == 'user']} for r in peer.requests])
         print(json.dumps({'owner_pid': owner.pid, 'worker_pid': pid, 'worker_module': 'agent.managed_worker',
-                          'model_requests': len(peer.requests), 'rows': rows, 'detach_survived': True}))
+                          'model_requests': len(peer.requests), 'rows': rows, 'detach_survived': True,
+                          'canonical_sqlite_opens': [], 'canonical_fds': canonical_fds}))
+        if worker_action == 'history':
+            config = json.loads((home / 'config.yaml').read_text())
+            config['model']['default'] = 'CHANGED_PROFILE_MODEL'
+            config['platform_toolsets']['cli'] = []
+            (home / 'config.yaml').write_text(json.dumps(config))
+            async with websocket(home, desc) as ws:
+                await rpc(ws, 'session.resume', session_id=sid)
+                next_turn = await rpc(ws, 'prompt.submit', session_id=sid, input_id='history', text='RESUME_HISTORY')
+                assert 'result' in next_turn, next_turn
+                async with asyncio.timeout(30):
+                    while query('SELECT status FROM session_admissions WHERE request_id=?', ('history',)) != [('terminal',)]:
+                        await asyncio.sleep(.05)
+                restored = await rpc(ws, 'session.resume', session_id=sid)
+                assert 'MANAGED_HISTORY_DONE' in json.dumps(restored['result']['messages']), restored
+            request = peer.requests[-1]
+            assert request['model'] == 'managed-model'
+            assert request['messages'][0] == peer.requests[0]['messages'][0], 'cached prefix changed'
+            assert request['tools'] == peer.requests[0]['tools'], 'frozen tools changed'
+            assert any(m['role'] == 'tool' and 'MANAGED_TOOL_EFFECT' in m['content'] for m in request['messages'])
+            assert query('SELECT status FROM worker_executions WHERE session_id=?', (sid,)) == [('terminal',), ('terminal',)]
+
 
     try:
         with daemon(root, home, env, barrier=False) as (owner, desc):
