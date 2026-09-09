@@ -112,7 +112,15 @@ class AuthorityConnection:
 
     async def create(self, ref, params):
         from gateway.session_local import create_local_session, local_session_info
-        ref = create_local_session(self.authority, self.actor, params)
+        from gateway.session_local_title import resolve_titled_session, title_new_session, validate_title
+        # ``-c <title> --create-if-missing``: resolve-or-create is one owner step (no await
+        # between lookup and creation), so concurrent programmatic callers converge.
+        title = validate_title(params.pop('title')) if 'title' in params else None
+        ref = title and resolve_titled_session(self.authority, self.actor, title, missing_ok=True)
+        if not ref:
+            ref = create_local_session(self.authority, self.actor, params)
+            if title:
+                title_new_session(self.authority, ref, title)
         result = await self.resume(ref, {})
         result['info'] = local_session_info(self.authority, ref)
         return result
@@ -131,7 +139,7 @@ class AuthorityConnection:
                 'authority_epoch': self.authority.epoch,
                 'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1', 'acp-editor-policy-v1', 'acp-session-mcp-v1'],
                 'session_create': {'sources': ['cli', 'tui', 'gui', 'acp'],
-                                   'parameters': sorted(CREATE_FIELDS)}}
+                                   'parameters': sorted(CREATE_FIELDS | {'title'})}}
 
     async def info(self, ref, params):
         from gateway.session_local import local_session_info
@@ -164,6 +172,9 @@ class AuthorityConnection:
         return {'sessions': sessions[:limit], 'scope': 'live'}
 
     async def resume(self, ref, params):
+        if 'title' in params:
+            from gateway.session_local_title import resolve_titled_session
+            ref = resolve_titled_session(self.authority, self.actor, params['title'])
         if params.get('editor') is not None:
             self.authority.authorize(self.actor, ref, 'session:control')
             from gateway.session_local_mcp import resume_editor_mcp

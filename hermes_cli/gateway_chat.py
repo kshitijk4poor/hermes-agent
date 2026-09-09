@@ -15,7 +15,7 @@ from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 _UNSUPPORTED = (
     "image", "skills", "worktree", "w", "checkpoints", "pass_session_id",
     "yolo", "accept_hooks",
-    "continue_last", "create_if_missing", "no_restore_cwd", "usage_file",
+    "no_restore_cwd", "usage_file",
     "run_budget", "verbose", "compact",
     "list_tools", "list_toolsets",
 )
@@ -28,14 +28,26 @@ def bypass_launch(args) -> bool:
     return bool(getattr(args, "safe_mode", False) or getattr(args, "ignore_user_config", False))
 
 
+def continue_title(args):
+    """``-c <name>`` (classic precedence: ignored when ``--resume`` is given). Bare ``-c`` needs the
+    breadcrumb/MRU lookup the authority does not expose, so it stays refused like ``--resume latest``."""
+    name = getattr(args, "continue_last", None)
+    return name if isinstance(name, str) and not getattr(args, "resume", None) else None
+
+
 def validate_options(args):
     unsupported = [name for name in _UNSUPPORTED if getattr(args, name, None)]
     if getattr(args, "resume", None) == "latest":
         unsupported.append("resume latest")
+    if getattr(args, "continue_last", None) is True:
+        unsupported.append("continue")
+    if getattr(args, "create_if_missing", False) and not continue_title(args):
+        unsupported.append("create-if-missing without -c <name>")
     if unsupported:
         flags = ", ".join("--" + name.replace("_", "-") for name in unsupported)
         raise GatewayClientError(f"Unsupported gateway CLI options: {flags}. No local fallback or policy changes were made.")
-    if getattr(args, "resume", None) and (getattr(args, "in_dir", None) or getattr(args, "source", None) or
+    resuming = getattr(args, "resume", None) or (continue_title(args) and not getattr(args, "create_if_missing", False))
+    if resuming and (getattr(args, "in_dir", None) or getattr(args, "source", None) or
             any(getattr(args, name, None) not in (None, False) for name in _POLICY)):
         raise GatewayClientError("Resume retains gateway session policy; creation overrides are unsupported on resume.")
     if bypass_launch(args) and not getattr(args, "model", None):
@@ -46,8 +58,24 @@ async def run_gateway_chat(args):
     from hermes_cli.gateway_chat_view import GatewayChatView
     async with connect_gateway() as client:
         description = await client.rpc("runtime.describe")
-        if getattr(args, "resume", None):
-            snapshot = await client.rpc("session.resume", session_id=args.resume)
+        title = continue_title(args)
+        create_if_missing = bool(title and getattr(args, "create_if_missing", False))
+        if getattr(args, "resume", None) or (title and not create_if_missing):
+            name = getattr(args, "resume", None) or title
+            try:
+                # Exact id first, then title (latest lineage continuation), as the classic CLI did.
+                snapshot = await client.rpc("session.resume", session_id=name)
+            except GatewayClientError as exc:
+                if str(exc) != "not_found":
+                    raise
+                try:
+                    snapshot = await client.rpc("session.resume", title=name)
+                except GatewayClientError as exc:
+                    if str(exc) != "not_found":
+                        raise
+                    raise GatewayClientError(
+                        f"No session found matching '{name}'. Use 'hermes sessions list' to see available "
+                        "sessions, or pass -c <name> --create-if-missing to start a new session with that title.")
         else:
             contract = description.get("session_create", {})
             source = getattr(args, "source", None) or "cli"
@@ -55,6 +83,8 @@ async def run_gateway_chat(args):
                 raise GatewayClientError(f"Gateway does not support source {source!r}")
             parameters = contract.get("parameters", [])
             policy = {key: getattr(args, key) for key in _POLICY if getattr(args, key, None) not in (None, False)}
+            if create_if_missing:
+                policy["title"] = title
             if isinstance(policy.get("toolsets"), str):
                 policy["toolsets"] = [name.strip() for name in policy["toolsets"].split(",") if name.strip()]
             cwd = str(Path(getattr(args, "in_dir", None) or os.getcwd()).expanduser().resolve())
@@ -77,7 +107,7 @@ async def run_gateway_chat(args):
         oneshot = bool(oneshot_prompt or getattr(args, "oneshot_exit", False) or quiet or
                        (query and not (sys.stdin.isatty() and sys.stdout.isatty())))
         view = GatewayChatView(client, snapshot, quiet=quiet)
-        if getattr(args, "resume", None) and not quiet:
+        if (getattr(args, "resume", None) or title) and not quiet:
             for row in snapshot.get("messages", []):
                 if row.get("role") in {"user", "assistant"} and isinstance(row.get("content"), str):
                     print(f"{row['role']}: {row['content']}")

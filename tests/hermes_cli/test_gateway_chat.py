@@ -8,10 +8,17 @@ def test_unsupported_launch_options_fail_before_connection(monkeypatch, capsys):
     from hermes_cli import gateway_chat
     calls = []
     monkeypatch.setattr(gateway_chat, "connect_gateway", lambda: calls.append(True))
-    for option in ("yolo", "worktree", "continue_last", "usage_file"):
+    for option in ("yolo", "worktree", "usage_file"):
         args = argparse.Namespace(**{option: True})
         assert gateway_chat.launch_from_args(args) == 2
         assert option.replace("_", "-") in capsys.readouterr().err
+    # Bare -c (breadcrumb/MRU) and a nameless --create-if-missing stay refused; only a
+    # titled -c is a gateway-resolvable selector.
+    assert gateway_chat.launch_from_args(argparse.Namespace(continue_last=True)) == 2
+    assert "--continue" in capsys.readouterr().err
+    assert gateway_chat.launch_from_args(argparse.Namespace(create_if_missing=True)) == 2
+    assert "create-if-missing" in capsys.readouterr().err
+    assert gateway_chat.launch_from_args(argparse.Namespace(continue_last="named", model="m", query="x")) == 2
     assert calls == []
     assert gateway_chat.launch_from_args(argparse.Namespace(resume="stored", source="tui", query="x")) == 2
     # Bypass launches read no profile default model, so one must be explicit.
