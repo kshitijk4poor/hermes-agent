@@ -46,22 +46,26 @@ def _result(authority, record):
     if row is None:
         raise RuntimeStoreError('storage_unavailable')
     status = {'queued': 'queued', 'started': 'claimed', 'unknown': 'ambiguous', 'terminal': 'ambiguous'}[row['status']]
-    # A crash between settlement and receipt publication is unknown, not permission
-    # to infer again. Never fabricate the reply from a later transcript message.
-    if record.get('status') in {'settled', 'failed'}:
+    # Read only this admission's committed result, never transcript recency.
+    from gateway.session_results import admission_result
+    saved = admission_result(authority.db, record['admission_id'])
+    reply = record.get('reply', '')
+    if saved is not None:
+        reply = saved['result'].get('final_response', '')
+        status = 'settled' if row['outcome'] == 'completed' else 'failed'
+    elif record.get('status') in {'settled', 'failed'}:
         status = record['status']
     return {k: v for k, v in dict(status=status, delivery_id=record['delivery_id'],
         profile_home=record['profile_home'], session_id=record['session_id'],
-        admission_id=record['admission_id'], reply=record.get('reply', '')).items()}
+        admission_id=record['admission_id'], reply=reply).items()}
 
 
 async def _record_reply(authority, home, key, future):
-    reply = await asyncio.shield(future)
+    await asyncio.shield(future)
     with _locked(home) as root:
         path = root / f'{key}.json'
         record = _read(path)
-        row = get_session_admission(authority.db, admission_id=record['admission_id'])
-        record.update(status='settled' if row['outcome'] == 'completed' else 'failed', reply=reply or '')
+        record.update(_result(authority, record))
         _write(path, record)
 
 
