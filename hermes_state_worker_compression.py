@@ -435,7 +435,20 @@ def worker_compression_append(db, conn, sid, payload):
         {key: msg[key] for key in ('_row_id', '_canonical_content') if key in msg} for msg in payload['messages']]}
 
 
+def worker_turn_cleanup(db, conn, sid, payload):
+    _fields(payload, ('target', 'holder'))
+    target = _text(payload['target'])
+    holder = _text(payload['holder'])
+    CompressionSnapshot(db, conn).authorize(sid, target)
+    key = db._session_turn_lease_key_on_conn(conn, sid)
+    if key != db._session_turn_lease_key_on_conn(conn, target):
+        raise RuntimeStoreError('permission_denied')
+    conn.execute('DELETE FROM session_turn_leases WHERE conversation_id=? AND holder=?', (key, holder))
+    return {'released': True}
+
+
 WORKER_COMPRESSION_HANDLERS = {
+    'turn.cleanup': worker_turn_cleanup,
     'compression.append': worker_compression_append,
     'compression.reopen': worker_reopen,
     'compression.cleanup': worker_compression_cleanup,

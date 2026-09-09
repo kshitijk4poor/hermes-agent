@@ -235,8 +235,8 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
         return self._apply('turn.renew', {'holder': holder, 'ttl_seconds': ttl_seconds})['value']
 
     def release_session_turn_lease(self, session_id, holder):
-        self._session(session_id)
-        self._apply('turn.release', {'holder': holder})
+        # DurableTurnLease retains its admission target across physical rotation.
+        self._apply('turn.cleanup', {'target': session_id, 'holder': holder})
 
     def queue_token_counts(self, session_id, **usage):
         self._session(session_id)
