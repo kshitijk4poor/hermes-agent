@@ -20,7 +20,7 @@ def catalog_sessions(path, cwd=None):
     results = []
     for sid, row in read_catalog_rows(path).items():
         count = int(row.get("message_count") or 0)
-        session_cwd = _parse_model_config(row.get("model_config")).get("cwd", ".")
+        session_cwd = row.get('cwd') or _parse_model_config(row.get("model_config")).get("cwd", ".")
         if count <= 0 or (normalized and _normalize_cwd_for_compare(session_cwd) != normalized):
             continue
         results.append(_session_info(sid, session_cwd, row.get("model") or "", count, row.get("title"),
