@@ -27,6 +27,10 @@ def _relay_root() -> Path:
     from tools.bot_mode_probe import _default_home, _hermes_root
     return _hermes_root(Path(_default_home()))
 
+# Historical Desktop deadline mirrors; no subprocess retry is performed here.
+# Remove with the renderer relay deadline/receipt migration.
+TURN_ATTEMPT_TIMEOUT_SECONDS = 600
+TURN_MAX_ATTEMPTS = 2  # first attempt + the policy-gated re-run
 
 
 @method("bot_relay.roster.sync")

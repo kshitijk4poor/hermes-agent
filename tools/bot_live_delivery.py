@@ -1,9 +1,8 @@
-"""Durable, at-most-once handoff to an existing Bot Chat owner.
+"""Canonical Bot Chat transport and durable legacy delivery receipts.
 
-Adapted from FalconOrtiz's live-owner mailbox (#101564). A single private
-record advances queued -> claimed -> terminal under a process-shared lock.
-Claims never expire: a crashed consumer leaves an inspectable unknown outcome,
-not permission to execute the same input again. Receipts are permanent.
+Only gateway/session_bot.py admits execution. Old claimed/terminal records remain
+inspectable; the legacy UI claim consumer is retired. No authority means refusal.
+Receipt storage derives from FalconOrtiz's live-owner mailbox (#101564).
 """
 from __future__ import annotations
 
