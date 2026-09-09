@@ -54,7 +54,96 @@ def worker_lifecycle(db, conn, session_id, payload):
     return {'value': value}
 
 
+def worker_title(db, conn, session_id, payload):
+    if (set(payload) != {'title', 'source'} or payload['source'] not in ('user', 'derived', 'llm')
+            or not (payload['title'] is None or isinstance(payload['title'], str))):
+        raise RuntimeStoreError('invalid_params')
+    return {'value': bool(db._set_session_title_in_transaction(
+        conn, session_id, payload['title'], source=payload['source']))}
+
+
+def worker_title_source(db, conn, session_id, payload):
+    if set(payload) != {'source'} or payload['source'] not in ('user', 'derived', 'llm'):
+        raise RuntimeStoreError('invalid_params')
+    return {'value': conn.execute(
+        'UPDATE sessions SET title_source=? WHERE id=? AND title IS NOT NULL',
+        (payload['source'], session_id)).rowcount > 0}
+
+
+def worker_next_title(db, conn, session_id, payload):
+    from hermes_state_titles import _NUMBERED_TITLE_RE
+    from hermes_state_common import escape_like
+    if set(payload) != {'base_title'} or not isinstance(payload['base_title'], str):
+        raise RuntimeStoreError('invalid_params')
+    title = conn.execute('SELECT title FROM sessions WHERE id=?', (session_id,)).fetchone()[0]
+    # This is an assigned title continuation, not a profile-wide title oracle.
+    if not title or payload['base_title'] != title:
+        raise RuntimeStoreError('permission_denied')
+    match = _NUMBERED_TITLE_RE.match(title)
+    base = match.group(1) if match else title
+    rows = conn.execute("SELECT title FROM sessions WHERE title=? OR title LIKE ? ESCAPE '\\'",
+                        (base, f'{escape_like(base)} #%')).fetchall()
+    numbers = [int(m.group(2)) for m in (_NUMBERED_TITLE_RE.match(row['title']) for row in rows) if m]
+    return {'value': f'{base} #{max([1, *numbers]) + 1}'}
+
+
+def worker_activity(db, conn, session_id, payload):
+    import math
+    from agent.session_activity import bound_activity_description, normalize_activity_provenance
+    if (set(payload) != {'ts', 'description', 'provenance'}
+            or any(payload[k] is not None and not isinstance(payload[k], str)
+                   for k in ('description', 'provenance'))):
+        raise RuntimeStoreError('invalid_params')
+    when = payload['ts']
+    if when is not None and (type(when) not in (float, int) or not math.isfinite(when)):
+        raise RuntimeStoreError('invalid_params')
+    when = time.time() if when is None else float(when)
+    conn.execute('UPDATE sessions SET last_activity_at=?,last_activity_description=?,last_activity_provenance=? '
+                 'WHERE id=? AND (last_activity_at IS NULL OR last_activity_at<?)',
+                 (when, bound_activity_description(payload['description']),
+                  normalize_activity_provenance(payload['provenance']).value, session_id, when))
+    return {'value': None}
+
+
+def worker_activity_clear(db, conn, session_id, payload):
+    from agent.session_activity import ActivityProvenance
+    if payload:
+        raise RuntimeStoreError('invalid_params')
+    conn.execute('UPDATE sessions SET last_activity_description=?,last_activity_provenance=? WHERE id=?',
+                 ('', ActivityProvenance.UNKNOWN.value, session_id))
+    return {'value': None}
+
+
+def worker_billing_route(db, conn, session_id, payload):
+    if (set(payload) != {'provider', 'base_url', 'billing_mode'}
+            or any(payload[k] is not None and not isinstance(payload[k], str) for k in payload)):
+        raise RuntimeStoreError('invalid_params')
+    conn.execute('UPDATE sessions SET billing_provider=?,billing_base_url=?,billing_mode=COALESCE(?,billing_mode),'
+                 'system_prompt=NULL,system_prompt_hash=NULL WHERE id=?',
+                 (payload['provider'], payload['base_url'], payload['billing_mode'], session_id))
+    db._delete_unreferenced_system_prompts(conn)
+    return {'value': None}
+
+
+def worker_api_content(db, conn, session_id, payload):
+    from hermes_state_messages import _scrub_surrogates
+    if set(payload) != {'content', 'api_content'} or not isinstance(payload['api_content'], str):
+        raise RuntimeStoreError('invalid_params')
+    value = conn.execute(
+        "UPDATE messages SET api_content=? WHERE id=(SELECT id FROM messages WHERE session_id=? "
+        "AND role='user' AND active=1 ORDER BY id DESC LIMIT 1) AND content IS ?",
+        (_scrub_surrogates(payload['api_content']), session_id, db._encode_content(payload['content']))).rowcount
+    return {'value': value}
+
+
 WORKER_LIFECYCLE_HANDLERS = {
+    'session.title': worker_title,
+    'session.title_source': worker_title_source,
+    'session.next_title': worker_next_title,
+    'session.activity': worker_activity,
+    'session.activity_clear': worker_activity_clear,
+    'session.billing_route': worker_billing_route,
+    'session.api_content': worker_api_content,
     'session.create': worker_create,
     'session.end': worker_end,
     'session.lifecycle': worker_lifecycle,
