@@ -40,15 +40,14 @@ hermes chat --provider openrouter  # Force OpenRouter
 # With specific toolsets
 hermes chat --toolsets "web,terminal,skills"
 
-# Start with one or more skills preloaded
-hermes -s hermes-agent-dev,github-auth
-hermes chat -s github-pr-workflow -q "open a draft PR"
+# Start with one or more skills preloaded (TUI; classic `hermes chat` refuses -s)
+hermes --tui -s hermes-agent-dev,github-auth
 
 # Resume previous sessions
-hermes --continue             # Resume the most recent CLI session (-c)
 hermes --resume <session_id>  # Resume a specific session by ID (-r)
-hermes --resume latest        # Resume the most recent session (same as -c)
-hermes --resume latest --in ./dir  # Resume ./dir's latest session, staying in ./dir
+hermes --tui --continue       # Resume the most recent session (-c) — TUI only
+hermes --tui --resume latest  # Same as -c; classic `hermes chat` refuses `latest`/`--continue`
+hermes --tui --resume latest --in ./dir  # Resume ./dir's latest session, staying in ./dir
 
 # Verbose mode (debug output)
 hermes chat --verbose
@@ -140,6 +139,10 @@ loads portable Agent Skills and stdio MCP entries. See the
 for the exact supported subset and trust boundary.
 
 ## Interface Layout
+
+:::info The classic CLI is a gateway client
+`hermes chat` (and the bare `hermes` prompt when `display.interface` is `cli`) no longer runs the agent inside your terminal process. It discovers or starts the profile's gateway (`hermes gateway ensure`), creates or resumes the session there, and attaches over the gateway's local WebSocket — the same session a Desktop window, the TUI, or a Telegram topic can open at the same time. Closing the terminal detaches (`Detached; accepted work continues at the gateway.`); it does not cancel the turn. Your working directory, `--model`, `--provider`, `--reasoning`, `--toolsets`, `--max-turns`, `--ignore-rules`, `--base-url`/`--api-key`, and `--safe-mode`/`--ignore-user-config` are frozen into the session at creation and cannot be changed by `--resume`. Options that only make sense for an in-process agent — `--image`, `--skills`, `--worktree`, `--checkpoints`, `--yolo`, `--pass-session-id`, `--continue`, `--create-if-missing`, `--run-budget`, `--verbose`, `--compact`, `--list-tools`, `--list-toolsets`, and `--resume latest` — are refused up front (`Unsupported gateway CLI options: …`, exit 2); nothing falls back to a local agent. In this mode the slash surface is `/stop`, `/approve <id> <choice>`, `/answer <id> <text>`, `/discard <admission_id>`, `/branch [title]`, `/model <model> [--provider name]`, `/compress [focus]`, `/help` and `/quit`; other slash commands print `Unsupported gateway CLI command; use /help.` Use the TUI (`hermes --tui`) for the full slash registry.
+:::
 
 <img className="docs-terminal-figure" src="/docs/img/docs/cli-layout.svg" alt="Stylized preview of the Hermes CLI layout showing the banner, conversation area, and fixed input prompt." />
 <p className="docs-figure-caption">The Hermes CLI banner, conversation stream, and fixed input prompt rendered as a stable docs figure instead of fragile text art.</p>
