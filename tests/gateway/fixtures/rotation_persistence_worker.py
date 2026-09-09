@@ -47,13 +47,35 @@ def main():
         assert before != agent.session_id, 'actual AIAgent rotation did not publish'
         assert store.scope['session_id'] == agent.session_id
         assert agent.tools == frozen_tools
+        restart_proof = {}
+        if command.get('restart'):
+            Path(command['ready']).write_text(json.dumps(dict(session_id=agent.session_id, epoch=store.scope['epoch'])))
+            assert sys.stdin.readline().strip() == 'outage'
+            try:
+                store.touch_session_activity(agent.session_id, description='surviving rotated worker')
+                raise AssertionError('owner outage accepted a mutation')
+            except Exception:
+                assert len(store.journal['pending']) == 1
+            Path(command['outage']).write_text('pending')
+            assert sys.stdin.readline().strip() == 'adopt'
+            try:
+                store.retry_pending()
+                raise AssertionError('new owner accepted old epoch')
+            except Exception as exc:
+                assert 'stale_epoch' in str(exc), exc
+            assigned = {k: v for k, v in store.scope.items() if k != 'epoch'}
+            adopted = rpc('worker.adopt', **assigned)
+            restart_proof = {'before_epoch': store.scope['epoch'], 'after_epoch': adopted['owner_epoch'],
+                             'pid': os.getpid(), 'pending_sequence': store.journal['pending'][0]['sequence']}
+            store.adopt(adopted['owner_epoch'])
+            assert len(store.retry_pending()) == 1
         result = agent.run_conversation('AFTER_FULL_ROTATION', conversation_history=compressed)
         assert not result.get('failed'), result
         history = store.get_messages_as_conversation(agent.session_id, include_row_ids=True)
         store.finish()
         Path(command['receipt']).write_text(json.dumps(dict(before=before, after=agent.session_id,
             history=history, compressed_count=len(compressed), input_count=len(messages), opens=opens,
-            fds=writable_fds(), negatives={}, result=result['final_response'])))
+            fds=writable_fds(), negatives={}, result=result['final_response'], restart=restart_proof)))
     finally:
         agent._end_session_on_close = False
         agent.close()
