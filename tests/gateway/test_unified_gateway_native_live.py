@@ -477,7 +477,9 @@ def test_native_safe_mode_cli_executes_in_managed_worker(harness):
     managed worker (pid != owner) that opens no writable canonical sqlite."""
     home, env, peer, url, audit = harness['home'], harness['env'], harness['peer'], harness['url'], harness['audit']
 
-    def safe_mode_cli_worker(owner, harness):
+    def safe_mode_cli_worker(owner, desc, harness):
+        # Popen.pid is the venv launcher on Windows; the daemon's own pid comes from identify.
+        gateway_pid = desc['pid']
         command = [sys.executable, '-m', 'hermes_cli.main', 'chat', '--safe-mode', '--provider', 'custom',
                    '--base-url', url, '--model', 'safe-fixture', '--api-key', 'fixture', '-Q', '-q', 'SAFE_PROBE_NATIVE']
         proc = subprocess.Popen(command, cwd=harness['work'], env=env, stdin=subprocess.DEVNULL,
@@ -489,7 +491,7 @@ def test_native_safe_mode_cli_executes_in_managed_worker(harness):
             raise AssertionError(('safe-mode CLI timed out', out, err))
         out, err = out.decode('utf-8', 'replace'), err.decode('utf-8', 'replace')
         starts = [r for r in records(audit) if r['kind'] == 'start' and 'agent.managed_worker' in ' '.join(r['argv'])]
-        evidence = {'owner_pid': owner.pid, 'worker_starts': starts,
+        evidence = {'owner_pid': owner.pid, 'gateway_pid': gateway_pid, 'worker_starts': starts,
                     'worker_errors': [r for r in records(audit) if r['kind'] == 'worker_error'],
                     'worker_executions': query(home, 'SELECT execution_id,status FROM worker_executions'),
                     'gateway_log': (home / 'logs' / 'gateway.log').read_text(encoding='utf-8', errors='replace')[-4000:]}
@@ -506,23 +508,23 @@ def test_native_safe_mode_cli_executes_in_managed_worker(harness):
         policy = json.loads(query(home, 'SELECT value FROM state_meta WHERE key=?', ('gateway.local_policy.v1:' + sid,))[0][0])
         assert policy['policy']['safe_mode'] is True and policy['policy']['ignore_user_config'] is True
         rows = records(audit)
-        # Owner is an ANCESTOR, not necessarily the parent: the uv venv python.exe trampoline
-        # sits between the daemon's Popen and the real interpreter on Windows.
+        # The gateway is an ANCESTOR, not necessarily the parent: the uv venv python.exe trampoline
+        # sits between the daemon's Popen and the real worker interpreter on Windows.
         workers = sorted({r['pid'] for r in rows if r['kind'] == 'start'
-                          and owner.pid in [r['ppid'], *(a[0] for a in r['ancestors'] if isinstance(a, list))]
+                          and gateway_pid in [r['ppid'], *(a[0] for a in r['ancestors'] if isinstance(a, list))]
                           and r['argv'][-2:] == ['-m', 'agent.managed_worker']})
-        assert len(workers) == 1 and workers[0] != owner.pid, [(r['pid'], r['argv'][-3:]) for r in rows if r['kind'] == 'start']
+        assert len(workers) == 1 and workers[0] != gateway_pid, [(r['pid'], r['ppid'], r['argv'][-3:]) for r in rows if r['kind'] == 'start']
         worker = workers[0]
-        # Positive control: the witness is live in the owner, so worker silence is real.
-        assert [r for r in rows if r['kind'] == 'sqlite' and r['pid'] == owner.pid and 'state.db' in r['target']]
+        # Positive control: the witness is live in the gateway, so worker silence is real.
+        assert [r for r in rows if r['kind'] == 'sqlite' and r['pid'] == gateway_pid and 'state.db' in r['target']]
         writable = [r['target'] for r in rows if r['kind'] == 'sqlite' and r['pid'] == worker
                     and 'state.db' in r['target'] and 'mode=ro' not in r['target']]
         assert writable == [], writable
         safe = [r for r in peer.requests if r['text'] == 'SAFE_PROBE_NATIVE' and not r['title_generation']]
         assert len(safe) == 1 and safe[0]['model'] == 'safe-fixture' and safe[0]['auth'] == 'Bearer fixture', peer.requests
-        return {'worker_pid': worker, 'owner_pid': owner.pid, 'session': sid}
+        return {'worker_pid': worker, 'gateway_pid': gateway_pid, 'session': sid}
 
     with daemon(home, {**env, 'UGW_STACK_DUMP_AFTER': '20'}, 'worker.log', fixture='stack_dump_daemon.py') as (owner, desc, _):
-        receipt = safe_mode_cli_worker(owner, harness)
+        receipt = safe_mode_cli_worker(owner, desc, harness)
         assert planned_stop(home, owner, desc) == 0
     print(json.dumps(receipt))
