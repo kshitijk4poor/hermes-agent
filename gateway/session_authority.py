@@ -323,6 +323,9 @@ class SessionAuthority:
                     current = get_session_admission(self.db, admission_id=first['admission_id'])
                     if current is None or current['status'] != 'queued':
                         continue
+                if first is not None and live.source.platform == Platform.API_SERVER:
+                    from gateway.session_api_turn import check_api_turn
+                    check_api_turn(self, ref, first['payload'])
                 self._require_admission_open()
                 row = claim_session_input(self.db, epoch=self.epoch, session_id=ref.session_id)
             except RuntimeStoreError as exc:

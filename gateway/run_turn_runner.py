@@ -546,6 +546,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             _select_cached_agent_history,
         )
         ctx = self._ctx
+        from gateway.session_api_turn import api_execution
+        api = api_execution.get()
+        if api is not None and api['history'] is not None:
+            from gateway.run import _collect_history_media_paths
+            history = api['history']
+            return history, None, _collect_history_media_paths(history)
         # Transcript rows ({role, content, timestamp}) lose timestamps; interrupt-path agent messages
         # (tool_calls/tool_call_id/reasoning) pass through intact so the API sees valid assistant→tool
         # sequences. Telegram observed=True rows are withheld from replayable history and attached to
@@ -708,9 +714,17 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # turn so a restart-interrupted turn is recorded WITH its id for drain-window dedup.
             if ctx.inbound_message_id is not None:
                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
-            from agent.notification_presentation import notification_turn
-            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
-                return agent.run_conversation(api_message, **kwargs)
+            from gateway.session_results import execution_result
+            captured = execution_result.get()
+            before = (getattr(agent, 'session_prompt_tokens', 0) or 0,
+                      getattr(agent, 'session_completion_tokens', 0) or 0)
+            result = agent.run_conversation(api_message, **kwargs)
+            if captured is not None:
+                incoming = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])
+                outgoing = max(0, (getattr(agent, 'session_completion_tokens', 0) or 0) - before[1])
+                captured['usage'] = {'input_tokens': incoming, 'output_tokens': outgoing,
+                                     'total_tokens': incoming + outgoing}
+            return result
         finally:
             unregister_gateway_notify(session_key)
             # Cancel pending clarify entries so blocked agent threads don't hang past the end of the
@@ -829,6 +843,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         """Platform context + YAML channel_prompts hint + channel_overrides system_prompt (or global
         ephemeral) + the gateway ephemeral prompt."""
         ctx = self._ctx
+        from gateway.session_api_turn import api_execution
+        api = api_execution.get()
+        if api is not None:
+            return api['settings'].get('ephemeral_system_prompt') or ''
         combined = ctx.context_prompt or ""
         for extra in (
             (ctx.channel_prompt or "").strip(),
@@ -874,7 +892,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         from gateway.session_policy import policy_for_source, policy_scope
         with policy_scope(policy_for_source(self._runner, self._ctx.source),
                           authority=getattr(self._runner, "session_authority", None)):
-            return self._run_sync_scoped()
+            result = self._run_sync_scoped()
+            from gateway.session_results import execution_result
+            captured = execution_result.get()
+            if captured is not None:
+                captured['result'] = result
+            return result
 
     def _run_sync_scoped(self):
         """Executor-thread body of the turn; returns the gateway result dict.
@@ -906,6 +929,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             model, runtime_kwargs = runner._resolve_session_agent_runtime(
                 source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
             )
+            from gateway.session_api_turn import prepare_api_runtime
+            model, runtime_kwargs = prepare_api_runtime(model, runtime_kwargs)
             if policy and policy.model:
                 model = policy.model
             logger.debug(

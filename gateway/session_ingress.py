@@ -39,17 +39,32 @@ async def execute_admission(authority, ref, row):
         from gateway.session_ingress_context import restore_provenance
         home = restore_provenance(authority.runner, event.source, provenance)
         scope = _profile_runtime_scope(home)
+    from gateway.config import Platform
+    from gateway.session_api_turn import api_execution, prepare_api_execution
+    from gateway.session_results import execution_result, retain_result
+    is_api = live.source.platform == Platform.API_SERVER
+    prepared = prepare_api_execution(authority, ref, row['payload']) if is_api else None
+    if is_api:
+        event.internal = True  # trust comes from the private binding and preclaim, never client JSON
+    api_token = api_execution.set(prepared)
+    captured = {}
+    result_token = execution_result.set(captured)
     token = executing_admission.set(True)
     try:
         with scope:
             response = await authority.runner._handle_message(event)
-            if not native and response:
+            result = captured.get('result') or {'final_response': response or '', 'messages': []}
+            retain_result(authority.db, epoch=authority.epoch, row=row,
+                          result={'result': result, 'usage': captured.get('usage', {})})
+            if not native and not is_api and response:
                 adapter = authority.runner._adapter_for_source(event.source)
                 if adapter is not None:
                     await deliver_response(adapter, event, live.route, response)
             return response
     finally:
         executing_admission.reset(token)
+        execution_result.reset(result_token)
+        api_execution.reset(api_token)
 
 
 async def deliver_response(adapter, event, session_key, response):

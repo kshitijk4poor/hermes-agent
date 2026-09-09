@@ -16,6 +16,8 @@ def bind_api_session(authority, session_id):
     if not isinstance(session_id, str) or not session_id or _is_path_unsafe(session_id):
         raise RuntimeStoreError('invalid_params')
     if session_id in authority.sessions:
+        if authority.sessions[session_id].source.platform != Platform.API_SERVER:
+            raise RuntimeStoreError('permission_denied')
         return SessionRef(authority.profile_id, session_id)
     source = SessionSource(platform=Platform.API_SERVER, chat_id=session_id,
                            user_id='api', chat_type='dm')

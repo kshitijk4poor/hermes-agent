@@ -4,6 +4,9 @@ A crash between retention and settlement remains unknown, not a retryable result
 The public stream keeps its text projection, not tool arguments or raw history.
 """
 import json
+from contextvars import ContextVar
+
+execution_result: ContextVar[dict | None] = ContextVar("execution_result", default=None)
 
 from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, _json, _session
 
