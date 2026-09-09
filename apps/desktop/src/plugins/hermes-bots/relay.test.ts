@@ -84,6 +84,7 @@ interface RelayCall {
   connectionId: string
   method: string
   params: Record<string, unknown>
+  route: ProfileRoute
 }
 
 function respondWith(handler: (call: RelayCall) => unknown) {
@@ -91,7 +92,7 @@ function respondWith(handler: (call: RelayCall) => unknown) {
 
   ;(hostMock.requestProfile as ReturnType<typeof vi.fn>).mockImplementation(
     async (target: ProfileRoute, method: string, params: Record<string, unknown>) => {
-      const call = { connectionId: target.connectionId, method, params: structuredClone(params ?? {}) }
+      const call = { connectionId: target.connectionId, method, params: structuredClone(params ?? {}), route: structuredClone(target) }
 
       calls.push(call)
 
@@ -660,6 +661,22 @@ describe('the drain loop wires drain → deliver → reply', () => {
     // A delivered background DM is this bot's "good turn".
     expect(clearBotAttentionMock).toHaveBeenCalledWith('b::ops')
 
+    stopBotRelay()
+  })
+
+  it('drains every sender profile and delivers on the exact target profile', async () => {
+    const ops = { ...route('a'), profile: 'ops', targetProfile: 'ops' }
+    hostMock.profileRoutes = vi.fn(async () => [route('a'), ops, route('b')])
+    const calls = respondWith(call => {
+      if (call.method === 'bot_relay.outbox.drain') return { envelopes: call.route.profile === 'ops' ? [envelope] : [] }
+      if (call.method === 'bot_relay.deliver') return {status: 'settled', delivery_id: envelope.id, admission_id: 'admission', reply: 'isolated'}
+      return {}
+    })
+    const {startBotRelay, stopBotRelay} = await loadRelay()
+    startBotRelay()
+    await pushAndSettle()
+    expect(calls.find(call => call.method === 'bot_relay.deliver')?.route).toEqual({...route('b'), profile: 'ops', targetProfile: 'ops'})
+    expect(calls.find(call => call.method === 'bot_relay.reply')?.route).toEqual(ops)
     stopBotRelay()
   })
 
