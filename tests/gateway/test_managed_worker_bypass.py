@@ -99,3 +99,15 @@ print(json.dumps({{'max_turns': cfg['agent']['max_turns'], 'raw_model': raw['mod
         assert receipt['plugins'] == [] and receipt['executed'] is False, receipt
     else:
         assert receipt['executed'] is True, receipt  # config-only keeps plugins
+
+
+def test_worker_outbox_directory_is_portable_and_distinct_per_execution(tmp_path):
+    """execution_id ('admission-worker:<hex>') is a durable ledger key, not a path: ':' is
+    illegal in a Windows directory name (WinError 267), so the outbox dir must be derived."""
+    from agent.managed_worker import outbox_dir
+    first = outbox_dir(tmp_path, 'admission-worker:ef7caea811d14c7092fd261cd167b311')
+    second = outbox_dir(tmp_path, 'admission-worker:ef7caea811d14c7092fd261cd167b312')
+    assert first.parent == tmp_path / 'worker-outboxes' and first != second
+    assert not set(first.name).intersection(':\\/<>"|?*'), first.name
+    first.mkdir(parents=True)
+    assert first.is_dir()

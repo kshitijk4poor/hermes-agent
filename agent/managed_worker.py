@@ -149,6 +149,12 @@ class WorkerControls:
             self.channel.send('prompt_settled', prompt_id=prompt_id)
 
 
+def outbox_dir(home, execution_id):
+    """execution_id is a ledger key ('admission-worker:<hex>'); ':' is not a legal Windows path
+    character, so the private outbox directory is a portable spelling of the same identity."""
+    return Path(home) / 'worker-outboxes' / execution_id.replace(':', '-')
+
+
 def execute(frame, channel):
     # The owner RPC below imports gateway/config modules (hermes_cli.config, providers,
     # hermes_cli.plugins) transitively; the policy must already be frozen when they load.
@@ -159,7 +165,7 @@ def execute(frame, channel):
     adopted = rpc('worker.adopt', **{k: v for k, v in scope.items() if k != 'epoch'})
     if adopted['owner_epoch'] != scope['epoch']:
         raise RuntimeError('stale_epoch')
-    store = RuntimeSessionStore(rpc, scope, Path(frame['home']) / 'worker-outboxes' / scope['execution_id'])
+    store = RuntimeSessionStore(rpc, scope, outbox_dir(frame['home'], scope['execution_id']))
     # Store construction binds the delegation ledger before tool discovery.
     from gateway.session_policy import restore_policy, policy_scope
     policy = restore_policy(frame['policy'])
