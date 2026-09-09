@@ -1,5 +1,4 @@
 """Deletion covers live descendants before their durable claim."""
-import asyncio
 from types import SimpleNamespace
 import pytest
 from gateway.session_authority import LiveSession, SessionAuthority
@@ -16,8 +15,12 @@ async def test_delete_cannot_remove_a_live_delegate_without_a_claim(tmp_path):
         epoch = rt.begin_runtime_epoch(db, instance_id='owner')
         authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id='owned', instance_id='owner', db=db, epoch=epoch)
         authority.sessions['s'] = LiveSession(None, 'route')
-        child = authority.sessions['child'] = LiveSession(None, 'child-route')
-        child.task = asyncio.create_task(asyncio.Event().wait())
+        authority.sessions['child'] = LiveSession(None, 'child-route')
+        # The descendant's execution is a ledger row, not an in-memory task: it must
+        # fence the parent's deletion in the same transaction that would delete it.
+        db._execute_write(lambda conn: conn.execute(
+            "INSERT INTO worker_executions(execution_id,session_id,kind,owner_epoch,generation,status,adoption_digest) "
+            "VALUES('child-exec','child','child',?,0,'running','digest')", (epoch,)))
         owner = AuthorityConnection(authority, object(), {'user_id': 'human'})
         try:
             response = await owner.dispatch({'id': 1, 'method': 'session.mutate', 'params': {'session_id': 's',
@@ -26,6 +29,4 @@ async def test_delete_cannot_remove_a_live_delegate_without_a_claim(tmp_path):
             assert response['error']['message'] == 'session_busy'
             assert db.get_session('child') is not None
         finally:
-            child.task.cancel()
-            await asyncio.gather(child.task, return_exceptions=True)
             await owner.close()

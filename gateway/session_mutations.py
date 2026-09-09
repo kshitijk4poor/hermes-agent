@@ -56,10 +56,9 @@ async def mutate_session(authority, actor, ref, params):
         applied = True
         if operation in _METADATA or operation == 'import':
             return
-        for sid in targets:
-            candidate = authority.sessions.get(sid)
-            if candidate is not None and candidate.task is not None and not candidate.task.done():
-                raise RuntimeStoreError('session_busy')
+        # Idleness is the ledger's call (require_idle, same transaction). The drain
+        # task outlives the final settlement by one loop iteration, so its liveness
+        # would refuse a session whose receipt the client already saw as terminal.
         if operation == 'delete':
             store = getattr(authority.runner, 'session_store', None)
             if store is not None and (store._routing_db is None
