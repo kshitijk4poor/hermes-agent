@@ -36,6 +36,8 @@ class AuthorityConnection:
                     'slash.exec': self.slash_exec, 'command.dispatch': self.command_dispatch,
                     'session.list': self.list_sessions, 'session.info': self.info,
                     'session.mutate': self.mutate, 'bot_relay.deliver': self.bot_deliver,
+                    'bot_relay.roster.sync': self.bot_roster, 'bot_relay.outbox.drain': self.bot_outbox,
+                    'bot_relay.reply': self.bot_reply,
                     'worker.register': self.worker_register, 'worker.adopt': self.worker_adopt,
                     'worker.persist': self.worker_persist,
                     'setup.status': self.setup_status, 'setup.runtime_check': self.setup_runtime_check,
@@ -54,6 +56,18 @@ class AuthorityConnection:
         except sqlite3.Error:
             return {'jsonrpc': '2.0', 'id': rid, 'error': {
                 'code': 5001, 'message': 'storage_unavailable', 'data': {'reason': 'storage_unavailable'}}}
+
+    async def bot_roster(self, ref, params):
+        from gateway.session_bot import relay_operation
+        return relay_operation(self, 'roster', params)
+
+    async def bot_outbox(self, ref, params):
+        from gateway.session_bot import relay_operation
+        return relay_operation(self, 'outbox', params)
+
+    async def bot_reply(self, ref, params):
+        from gateway.session_bot import relay_operation
+        return relay_operation(self, 'reply', params)
 
     async def bot_deliver(self, ref, params):
         from gateway.session_bot import deliver

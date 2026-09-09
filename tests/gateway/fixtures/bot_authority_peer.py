@@ -42,6 +42,16 @@ def probe(base):
         async with websocket(home, desc) as ws:
             created = await rpc(ws, 'session.create', request_id='bot', source='gui', toolsets=[], cwd=str(home))
             sid = created['result']['session_id']
+            from tools.bot_relay import enqueue_envelope, relay_root
+            roster = await rpc(ws, 'bot_relay.roster.sync', agents=[{'profile': 'remote', 'handle': 'remote', 'connection_id': 'peer'}])
+            assert roster.get('result', {}).get('count') == 1, roster
+            envelope = enqueue_envelope(home, target={'profile': 'remote', 'handle': 'remote', 'connection_id': 'peer'},
+                message='OUTBOUND', sender_profile='default', sender_handle='sender')
+            drained = await rpc(ws, 'bot_relay.outbox.drain')
+            assert drained['result']['envelopes'][0]['id'] == envelope['id'], drained
+            reply = await rpc(ws, 'bot_relay.reply', id=envelope['id'], reply='REMOTE_ACK')
+            assert reply.get('result', {}).get('ok'), reply
+            assert json.loads((relay_root(home) / 'replies' / (envelope['id'] + '.json')).read_text())['reply'] == 'REMOTE_ACK'
             renamed = await rpc(ws, 'session.mutate', session_id=sid, request_id='name',
                 expected_revision=created['result']['revision'], operation='rename', payload={'title': 'Bot Chat'})
             assert 'result' in renamed, renamed

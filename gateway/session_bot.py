@@ -65,6 +65,29 @@ async def _record_reply(authority, home, key, future):
         _write(path, record)
 
 
+def relay_operation(connection, operation, params):
+    authority, actor = connection.authority, connection.actor
+    home = Path(authority.db.db_path).parent.resolve()
+    name = home.name if home.parent.name == 'profiles' else 'default'
+    _home(authority, actor, name)
+    if 'session:control' not in actor.capabilities:
+        raise RuntimeStoreError('permission_denied')
+    fields = {'roster': {'agents'}, 'outbox': set(), 'reply': {'id', 'reply', 'error', 'reason'}}
+    if set(params) - fields[operation]:
+        raise RuntimeStoreError('invalid_params')
+    from tools.bot_relay import write_remote_roster, claim_pending_envelopes, write_reply
+    if operation == 'roster':
+        return {'count': write_remote_roster(home, params.get('agents'))}
+    if operation == 'outbox':
+        return {'envelopes': claim_pending_envelopes(home)}
+    try:
+        write_reply(home, params.get('id'), reply=params.get('reply', ''),
+                    error=params.get('error', ''), reason=params.get('reason', ''))
+    except ValueError as exc:
+        raise RuntimeStoreError('admission_conflict') from exc
+    return {'ok': True}
+
+
 async def _migrate(authority, actor, home, root):
     records = [(path, _read(path)) for path in root.glob('*.json')]
     legacy = [(path, record) for path, record in records
