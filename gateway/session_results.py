@@ -5,7 +5,7 @@ from contextvars import ContextVar
 from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, settle_session_input
 
 execution_result: ContextVar[dict | None] = ContextVar("execution_result", default=None)
-_RESULT_PREFIX = 'gateway.admission.result.v1.'
+from hermes_state_terminal import RESULT_PREFIX as _RESULT_PREFIX
 
 
 def retain_result(db, *, epoch, row, result):

@@ -46,6 +46,9 @@ def _session(conn, session_id):
 def _admission(conn, admission_id):
     row = conn.execute('SELECT * FROM session_admissions WHERE admission_id=?', (admission_id,)).fetchone()
     if row is None:
+        from hermes_state_terminal import terminal_admission
+        row = terminal_admission(conn, admission_id)
+    if row is None:
         raise RuntimeStoreError('not_found')
     return row
 
@@ -77,6 +80,11 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
     if intent not in ('queue', 'steer', 'redirect'):
         raise RuntimeStoreError('invalid_params')
     encoded = _json(payload)
+    from hermes_state_terminal import retry_terminal_admission
+    retired = retry_terminal_admission(db, epoch=epoch, principal_id=principal_id, session_id=session_id,
+        request_id=request_id, payload=payload, intent=intent)
+    if retired is not None:
+        return retired
     digest = admission_fingerprint(canonical_target=session_id, payload={'input': json.loads(encoded), 'intent': intent})
     def write(conn):
         _epoch(conn, epoch)
@@ -98,7 +106,9 @@ def admit_session_input(db, *, epoch: int, principal_id: str, session_id: str,
 
 def get_session_admission(db, *, admission_id: str) -> dict | None:
     with db._read_ctx() as conn:
-        return _row(conn.execute('SELECT * FROM session_admissions WHERE admission_id=?', (admission_id,)).fetchone())
+        from hermes_state_terminal import terminal_admission
+        row = conn.execute('SELECT * FROM session_admissions WHERE admission_id=?', (admission_id,)).fetchone()
+        return _row(row if row is not None else terminal_admission(conn, admission_id))
 
 
 def list_session_admissions(db, *, session_id: str, pending_only: bool = True) -> list[dict]:
@@ -145,10 +155,10 @@ def settle_session_input(db, *, epoch: int, admission_id: str, generation: int, 
             raise RuntimeStoreError('stale_generation')
         conn.execute("UPDATE worker_executions SET status='terminal' WHERE session_id=? AND generation=? AND owner_epoch=?", (row['target_session_id'], generation, epoch))
         if encoded is not None:
-            from gateway.session_results import _RESULT_PREFIX
+            from hermes_state_terminal import RESULT_PREFIX
             conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?) '
                          'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                         (_RESULT_PREFIX + admission_id, encoded))
+                         (RESULT_PREFIX + admission_id, encoded))
         conn.execute("UPDATE session_admissions SET status='terminal',outcome=? WHERE admission_id=?", (outcome, admission_id))
         conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (row['target_session_id'],))
         return _row(_admission(conn, admission_id))
