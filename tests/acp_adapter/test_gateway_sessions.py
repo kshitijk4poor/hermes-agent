@@ -149,3 +149,53 @@ async def test_acp_transport_shares_canonical_history_and_order(daemon, tmp_path
         assert len([e for e in events if e["type"] == "message.complete"]) == 2
         assert len(model_peer.requests) == 2
         print("ACP_SHARED_RECEIPT=" + json.dumps({"session_id": sid, "events": events, "messages": snapshot["messages"]}))
+
+
+
+@pytest.mark.linux_only
+@pytest.mark.asyncio
+async def test_acp_permission_detach_keeps_canonical_waiter(daemon, tmp_path, model_peer):
+    import shlex
+    from contextlib import suppress
+    from hermes_cli.gateway_client import GatewayClientError
+    from tests.gateway.fixtures.authority_controls_peer import ModelPeer as ApprovalPeer
+
+    target = tmp_path / "owned-removal"
+    target.mkdir()
+    (target / "owned.txt").write_text("disposable")
+    model_peer.command = "rm -r -- " + shlex.quote(str(target))
+    model_peer.RequestHandlerClass = ApprovalPeer
+    async with viewer(daemon) as ws:
+        created = await ws.rpc("session.create", request_id="acp-permission", source="cli", cwd=str(tmp_path))
+        sid = created["session_id"]
+        async with editor(daemon, tmp_path) as acp:
+            await acp.rpc("initialize", protocolVersion=1, clientCapabilities={})
+            assert "result" in await acp.rpc("session/load", cwd=str(tmp_path), sessionId=sid, mcpServers=[])
+            prompt_task = asyncio.create_task(acp.rpc("session/prompt", sessionId=sid,
+                prompt=[{"type": "text", "text": "Remove the owned fixture"}]))
+            try:
+                async with asyncio.timeout(15):
+                    while not any(f.get("method") == "session/request_permission" for f in acp.frames):
+                        await asyncio.sleep(.05)
+                permission = next(f for f in acp.frames if f.get("method") == "session/request_permission")
+                assert target.exists()
+                snapshot = await ws.rpc("session.resume", session_id=sid)
+                pending = snapshot["prompts"][0]
+                with pytest.raises(GatewayClientError, match="stale_generation"):
+                    await ws.rpc("approval.respond", session_id=sid, prompt_id=pending["prompt_id"],
+                        execution_generation=pending["execution_generation"] + 1, choice="once")
+                assert target.exists()
+            finally:
+                prompt_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await prompt_task
+        assert target.exists(), "Editor detach must not synthesize approval or denial"
+        response = await ws.rpc("approval.respond", session_id=sid, prompt_id=pending["prompt_id"],
+            execution_generation=pending["execution_generation"], choice="once")
+        assert response["status"] == "resolved", response
+        async with asyncio.timeout(20):
+            while target.exists():
+                await asyncio.sleep(.05)
+        print("ACP_PERMISSION_RECEIPT=" + json.dumps({"session_id": sid, "permission": permission,
+              "stale_generation_rejected": True, "detached_waiter_resolved_by_ws": True,
+              "real_owned_deletion": not target.exists()}))

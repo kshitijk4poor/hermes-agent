@@ -30,6 +30,7 @@ class GatewayACPAgent(acp.Agent):
         self._streamed = {}
         self._changed = asyncio.Condition()
         self._failure = None
+        self._permissions = {}
 
     def on_connect(self, conn):
         self._conn = conn
@@ -95,6 +96,8 @@ class GatewayACPAgent(acp.Agent):
         if self._conn:
             for update in _history_replay_updates(snapshot["messages"]):
                 await self._conn.session_update(session_id=session_id, update=update)
+        for pending in snapshot.get("prompts", []):
+            self._permission(session_id, pending)
         return snapshot
 
     async def load_session(self, cwd, session_id, mcp_servers=None, **kwargs):
@@ -151,6 +154,14 @@ class GatewayACPAgent(acp.Agent):
     async def _project(self, event):
         sid, kind, payload = event["session_id"], event.get("type"), event.get("payload", {})
         aid = event.get("admission_id")
+        if kind == "approval.request":
+            self._permission(sid, payload)
+            return
+        if kind == "approval.settled":
+            task = self._permissions.pop((sid, payload["prompt_id"], payload["execution_generation"]), None)
+            if task:
+                task.cancel()
+            return
         if kind == "message.delta":
             text = payload.get("text", "")
             self._streamed[aid] = self._streamed.get(aid, "") + text
@@ -168,7 +179,45 @@ class GatewayACPAgent(acp.Agent):
                     self._terminals.pop(next(iter(self._terminals)))
                 self._changed.notify_all()
 
+    def _permission(self, session_id, prompt):
+        if prompt.get("kind") != "approval" or self._conn is None:
+            return
+        key = (session_id, prompt["prompt_id"], prompt["execution_generation"])
+        if key not in self._permissions:
+            self._permissions[key] = asyncio.create_task(self._answer_permission(session_id, prompt))
+
+    async def _answer_permission(self, session_id, prompt):
+        import logging
+        from acp.schema import AllowedOutcome
+        from acp_adapter.permissions import (
+            _build_permission_options, _build_permission_tool_call, _OPTION_ID_TO_HERMES,
+        )
+        choices = prompt["choices"]
+        options = [option for option in _build_permission_options(
+            allow_permanent="always" in choices, allow_session="session" in choices)
+            if _OPTION_ID_TO_HERMES[option.option_id] in choices]
+        try:
+            response = await self._conn.request_permission(session_id=session_id,
+                tool_call=_build_permission_tool_call(prompt.get("command", ""), prompt.get("description", "")),
+                options=options)
+            # Transport loss/cancel is not a denial: the canonical waiter belongs
+            # to the execution and may still be answered by another viewer.
+            if not isinstance(response.outcome, AllowedOutcome):
+                return
+            if response.outcome.option_id not in {option.option_id for option in options}:
+                return
+            await self._gateway.rpc("approval.respond", session_id=session_id,
+                prompt_id=prompt["prompt_id"], execution_generation=prompt["execution_generation"],
+                choice=_OPTION_ID_TO_HERMES[response.outcome.option_id])
+        except Exception:
+            logging.getLogger(__name__).info("ACP permission viewer detached or control expired")
+
     async def aclose(self):
+        for task in self._permissions.values():
+            task.cancel()
+        if self._permissions:
+            await asyncio.gather(*self._permissions.values(), return_exceptions=True)
+            self._permissions.clear()
         if self._event_task:
             self._event_task.cancel()
             with suppress(asyncio.CancelledError):
