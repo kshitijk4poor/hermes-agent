@@ -114,7 +114,7 @@ def _proposal_for_patch_v4a(arguments: dict[str, Any]) -> EditProposal:
     patch_body = arguments.get("patch")
     if not isinstance(patch_body, str) or not patch_body:
         raise ValueError("patch content required")
-    paths = _extract_v4a_patch_paths(patch_body)
+    paths = [_required_path({'path': path}) for path in _extract_v4a_patch_paths(patch_body)]
     if not paths:
         raise ValueError("no file paths found in V4A patch")
     single = len(paths) == 1
