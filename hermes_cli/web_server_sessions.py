@@ -105,6 +105,10 @@ async def _mutate_session_request(request, profile, session_id, *, request_id,
         raise HTTPException(status_code=403, detail='profile_mismatch')
     if native is not None and native['profile_id'] != authority.profile_id:
         raise HTTPException(status_code=403, detail='profile_mismatch')
+    if operation == 'import':
+        _, errors = authority.db._validate_import_payload(payload['sessions'])
+        if errors:
+            raise HTTPException(status_code=400, detail={'errors': errors})
     if request_id is None or expected_revision is None:
         raise HTTPException(status_code=409, detail='mutation_identity_required')
     actor = Principal(subject, authority.profile_id,

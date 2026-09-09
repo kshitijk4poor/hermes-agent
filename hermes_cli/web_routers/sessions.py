@@ -456,9 +456,8 @@ async def import_sessions_endpoint(request: Request):
         raise HTTPException(status_code=400, detail="Invalid session import payload") from exc
 
     from hermes_cli.web_server_sessions import _mutate_session_request
-    if not body.sessions or not isinstance(body.sessions[0].get('id'), str):
-        raise HTTPException(status_code=400, detail='invalid_params')
-    return await _mutate_session_request(request, body.profile, body.sessions[0]['id'],
+    anchor = body.sessions[0].get('id', '') if body.sessions else ''
+    return await _mutate_session_request(request, body.profile, anchor,
         request_id=body.request_id, expected_revision=body.expected_revision,
         operation='import', payload={'sessions': body.sessions})
 
