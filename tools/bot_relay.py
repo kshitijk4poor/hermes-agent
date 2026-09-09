@@ -443,7 +443,16 @@ def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: s
         from tools.bot_failure_reasons import classify_agent_error
 
         code = classify_agent_error(err)
-    _atomic_write_json(path, {"id": safe, "at": int(time.time()), "reply": str(reply or ""), "error": err, "reason": code})
+    from tools.bot_live_delivery import _locked, _read, _write
+    path = base / REPLIES_DIR / f"{safe}.json"
+    outcome = {"reply": str(reply or ""), "error": err, "reason": code}
+    with _locked(root):
+        existing = _read(path)
+        if existing is not None:
+            if any(existing.get(key) != value for key, value in outcome.items()):
+                raise ValueError("delivery already has a different reply")
+            return path
+        _write(path, {"id": safe, "at": int(time.time()), **outcome})
     return path
 
 
