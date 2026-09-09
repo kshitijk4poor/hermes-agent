@@ -506,7 +506,10 @@ def test_native_safe_mode_cli_executes_in_managed_worker(harness):
         policy = json.loads(query(home, 'SELECT value FROM state_meta WHERE key=?', ('gateway.local_policy.v1:' + sid,))[0][0])
         assert policy['policy']['safe_mode'] is True and policy['policy']['ignore_user_config'] is True
         rows = records(audit)
-        workers = sorted({r['pid'] for r in rows if r['kind'] == 'start' and r['ppid'] == owner.pid
+        # Owner is an ANCESTOR, not necessarily the parent: the uv venv python.exe trampoline
+        # sits between the daemon's Popen and the real interpreter on Windows.
+        workers = sorted({r['pid'] for r in rows if r['kind'] == 'start'
+                          and owner.pid in [r['ppid'], *(a[0] for a in r['ancestors'] if isinstance(a, list))]
                           and r['argv'][-2:] == ['-m', 'agent.managed_worker']})
         assert len(workers) == 1 and workers[0] != owner.pid, [(r['pid'], r['argv'][-3:]) for r in rows if r['kind'] == 'start']
         worker = workers[0]
