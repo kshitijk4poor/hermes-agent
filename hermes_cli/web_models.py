@@ -266,6 +266,9 @@ class SessionImport(BaseModel):
     profile: Optional[str] = None
 
 class SessionRename(BaseModel):
+    request_id: Optional[str] = None
+    expected_revision: Optional[int] = None
+    expected_generation: Optional[int] = None
     title: Optional[str] = None
     archived: Optional[bool] = None
     hidden: Optional[bool] = None  # also used by cross-profile reconciliation

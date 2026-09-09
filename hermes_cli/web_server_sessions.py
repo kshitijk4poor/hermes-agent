@@ -75,6 +75,56 @@ def _session_latest_descendant(session_id: str, db):
     return current, path
 
 
+async def _mutate_session_request(request, profile, session_id, *, request_id,
+                                  expected_revision, operation, payload, expected_generation=None):
+    """Resolve the authenticated principal and owner; never open a second writer."""
+    from fastapi import HTTPException
+    from gateway.session_contract import Principal, SessionRef
+    from gateway.session_mutations import mutate_session
+    from hermes_state_runtime import RuntimeStoreError
+    from hermes_cli.web_server import _has_valid_session_token
+    from hermes_cli.web_server_cron import _cron_profile_home
+    from hermes_state import _default_db_path
+    import sqlite3
+
+    native = getattr(request.state, 'native_http_principal', None)
+    session = getattr(request.state, 'session', None)
+    if native is not None:
+        subject = native['subject']
+    elif session is not None:
+        subject = session.user_id
+    elif not getattr(request.app.state, 'auth_required', False) and _has_valid_session_token(request):
+        subject = 'dashboard-token'
+    else:
+        raise HTTPException(status_code=401, detail='Unauthorized')
+    authority = getattr(request.app.state, 'session_authority', None)
+    if authority is None:
+        raise HTTPException(status_code=503, detail='session_authority_unavailable')
+    home = Path(_cron_profile_home(profile)[1]) if profile else Path(_default_db_path()).parent
+    if home.resolve() != Path(authority.db.db_path).parent.resolve():
+        raise HTTPException(status_code=403, detail='profile_mismatch')
+    if native is not None and native['profile_id'] != authority.profile_id:
+        raise HTTPException(status_code=403, detail='profile_mismatch')
+    if request_id is None or expected_revision is None:
+        raise HTTPException(status_code=409, detail='mutation_identity_required')
+    actor = Principal(subject, authority.profile_id,
+        frozenset({'session:read', 'session:control', 'session:create'}), 'http')
+    params = dict(session_id=session_id, request_id=request_id, expected_revision=expected_revision,
+        operation=operation, payload=payload)
+    if expected_generation is not None:
+        params['expected_generation'] = expected_generation
+    try:
+        return await mutate_session(authority, actor, SessionRef(authority.profile_id, session_id), params)
+    except RuntimeStoreError as exc:
+        status = {'permission_denied': 403, 'profile_mismatch': 403, 'not_found': 404,
+                  'invalid_params': 400, 'runtime_draining': 503}.get(exc.reason, 409)
+        raise HTTPException(status_code=status, detail=exc.reason) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except sqlite3.Error as exc:
+        raise HTTPException(status_code=503, detail='storage_unavailable') from exc
+
+
 def _session_db_read_probe_statements() -> tuple:
     """Probe the declared schema without reconciling it on a browsing request."""
     from hermes_state_schema import schema_read_probe_statements
