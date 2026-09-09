@@ -15,6 +15,8 @@ def policy_identity(policy):
     data = asdict(policy)
     data.pop('credential_ref')
     data.pop('config_secret_ref')
+    if data.get('editor_mcp_json') is None:
+        data.pop('editor_mcp_json', None)
     return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
 

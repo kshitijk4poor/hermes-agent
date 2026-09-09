@@ -171,6 +171,7 @@ async def test_native_cold_editor_rebind_refuses_changed_secret(daemon, specs, t
                 assert 'acp_mcp_policy_conflict' in json.dumps(refused), refused
                 loaded = await acp.rpc('session/load', sessionId=sid, cwd=str(tmp_path), mcpServers=[specs[0]])
                 assert 'result' in loaded, loaded
+                acp.frames.clear()  # Old replay is not evidence of new execution.
                 assert 'result' in await prompt(acp, sid, 'Use owned echo after restart')
                 assert 'OWNED_RESULT_A' in json.dumps(acp.frames)
             print('ACP_MCP_COLD_RECEIPT=' + json.dumps({'session_id': sid,

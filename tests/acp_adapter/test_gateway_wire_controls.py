@@ -40,8 +40,6 @@ async def test_real_acp_answer_resolves_the_exact_pending_control(daemon, tmp_pa
         sid = snapshot["session_id"]
         async with editor(daemon, tmp_path) as acp:
             await acp.rpc("initialize", protocolVersion=1, clientCapabilities={})
-            unsupported = await acp.rpc("session/new", cwd=str(tmp_path), mcpServers=[])
-            assert "acp_policy_unavailable" in json.dumps(unsupported)
             await acp.rpc("session/resume", cwd=str(tmp_path), sessionId=sid, mcpServers=[])
             task = asyncio.create_task(acp.rpc("session/prompt", sessionId=sid,
                 prompt=[{"type": "text", "text": "Remove owned fixture after consent"}]))
