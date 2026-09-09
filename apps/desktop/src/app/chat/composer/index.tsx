@@ -30,10 +30,9 @@ import { interceptsTypedVoiceStop } from '@/lib/voice-stop-word'
 import { sessionCompacting } from '@/store/compaction'
 import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
-import { notifyError } from '@/store/notifications'
 import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
 import { $hudMode } from '@/store/hud'
-import { $showsAdvancedChrome } from '@/store/interface-mode'
+import { notifyError } from '@/store/notifications'
 import { sessionBlockingPrompt } from '@/store/prompts'
 import { toggleReview } from '@/store/review'
 import { $gatewayState } from '@/store/session'
@@ -425,6 +424,7 @@ export function ChatBar({
   })
 
   const hasComposerPayload = hasText || attachments.length > 0
+
   const canSubmit =
     (busy || hasComposerPayload) &&
     !(busy && isSteerableText && attachments.length === 0 && !compacting && !blockingPrompt && busyInputMode === null)

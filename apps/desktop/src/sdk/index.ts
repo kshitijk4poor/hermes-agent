@@ -21,8 +21,9 @@
 import { atom, computed, type ReadableAtom } from 'nanostores'
 import type { ReactNode } from 'react'
 
-import { createSessionMutationClient, type SessionMutationSnapshot } from '../../../shared/src/session-http-mutations'
 import { capabilityScoped, getApiRequestConnection } from '@/api/client'
+
+import { createSessionMutationClient, type SessionMutationSnapshot } from '../../../shared/src/session-http-mutations'
 
 const mutatePersistedVisibility = createSessionMutationClient()
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
@@ -1607,6 +1608,7 @@ export const host = {
     const scope = { connectionId: route?.connectionId || getApiRequestConnection() || 'local' }
     const path = `/api/sessions/${encodeURIComponent(options.sessionId)}`
     const payload = { hidden: options.hidden, profile }
+
     return mutatePersistedVisibility(JSON.stringify([scope, options.sessionId, payload]),
       () => hermesApi<SessionMutationSnapshot>({ ...scope,
         path: `${path}/mutation-snapshot?profile=${encodeURIComponent(profile)}` }),

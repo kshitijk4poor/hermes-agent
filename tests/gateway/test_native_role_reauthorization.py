@@ -4,6 +4,11 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
+# The probe drives the real Discord adapter (a `messaging` extra); CI's base venv has no discord.py.
+pytest.importorskip("discord")
+
 
 def _probe(tmp_path, mode):
     tmp_path.mkdir(exist_ok=True)

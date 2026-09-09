@@ -88,8 +88,10 @@ test('acknowledging a turn lost across a restart presents the unknown row\'s own
   expect(protocol.prepare('prompt.resolve_unknown', { session_id: 's', admission_id: 'lost' }))
     .toEqual({ session_id: 's', admission_id: 'lost', execution_generation: 4 })
   expect(() => protocol.prepare('prompt.resolve_unknown', { session_id: 's', admission_id: 'next' })).toThrow('unknown')
+
   const receipt = protocol.result('prompt.resolve_unknown', { session_id: 's', admission_id: 'lost', execution_generation: 4 },
     { admission_id: 'lost', ref: { session_id: 's', profile_id: '/tmp/profile' }, status: 'terminal', outcome: 'interrupted' })
+
   expect(receipt).toMatchObject({ admission_id: 'lost', session_id: 's', status: 'terminal' })
   protocol.event({ type: 'session.info', session_id: 's', payload: { pending: [{ admission_id: 'next', status: 'started', execution_generation: 10, text: 'NEXT' }], execution_generation: 10 } })
   expect(() => protocol.prepare('prompt.resolve_unknown', { session_id: 's', admission_id: 'lost' })).toThrow('unknown')

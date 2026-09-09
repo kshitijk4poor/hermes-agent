@@ -1,4 +1,3 @@
-import { createSessionMutationClient, type SessionMutationSnapshot } from '../../../shared/src/session-http-mutations'
 import { isMissingRestEndpoint } from '@/lib/gateway-rpc'
 import { maybeBackfillLegacySessionOwners } from '@/lib/legacy-session-owner-backfill'
 import { stampRowsWithOwningConnection } from '@/lib/session-owner-stamp'
@@ -11,17 +10,9 @@ import type {
   SessionSearchResponse
 } from '@/types/hermes'
 
-import {
-  ambientOwnerConnectionId,
-  capabilityScoped,
-  connectionScoped,
-  getApiRequestConnection,
-  getApiRequestProfile,
-  hermesApi,
-  type ProfileScope,
-  profileScoped,
-  sessionReadOwnerPin
-} from './client'
+import { createSessionMutationClient, type SessionMutationSnapshot } from '../../../shared/src/session-http-mutations'
+
+import { capabilityScoped, getApiRequestConnection, hermesApi, type ProfileScope, profileScoped } from './client'
 
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 
@@ -378,14 +369,18 @@ function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: R
   const query = new URLSearchParams(scope.profile ? { profile: scope.profile } : {})
   const suffix = query.size ? `?${query}` : ''
   const key = JSON.stringify([scope, id, method, payload])
+
   return runSessionMutation(key,
     () => hermesApi<SessionMutationSnapshot>({ ...scope, path: `${path}/mutation-snapshot${suffix}` }),
     identity => {
       if (method === 'DELETE') {
         const params = new URLSearchParams(query)
+
         for (const [name, value] of Object.entries(identity)) { params.set(name, String(value)) }
+
         return hermesApi<T>({ ...scope, path: `${path}?${params}`, method })
       }
+
       return hermesApi<T>({ ...scope, path, method,
         body: { ...payload, ...identity, ...(scope.profile ? { profile: scope.profile } : {}) } })
     })

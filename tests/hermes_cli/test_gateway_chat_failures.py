@@ -8,12 +8,15 @@ import pytest
 
 def test_direct_query_alias_survives_noninteractive_launch(monkeypatch):
     from hermes_cli import gateway_chat
+    from hermes_cli import gateway_chat_startup
     seen = []
 
     async def run(args):
         seen.append(args.q)
         return 0
 
+    # The alias contract is independent of whether this machine has a provider configured.
+    monkeypatch.setattr(gateway_chat_startup, "ensure_launch_provider", lambda args: True)
     monkeypatch.setattr(gateway_chat, "run_gateway_chat", run)
     assert gateway_chat.launch_from_kwargs({"q": "literal"}) == 0
     assert seen == ["literal"]

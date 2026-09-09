@@ -1,5 +1,6 @@
 """Real SSE execution and authenticated authority observers in a disposable process."""
 import asyncio
+import contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -90,7 +91,11 @@ class Observer:
 
     async def close(self):
         await self.ws.close()
-        await self.task
+        # A deliberately blocked observer may never receive the server's close frame before the
+        # handshake deadline on a loaded runner; teardown is not the invariant under test.
+        import websockets.exceptions
+        with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+            await self.task
 
 
 async def probe(peer, target):

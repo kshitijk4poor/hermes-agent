@@ -76,14 +76,17 @@ test('a dial against a replaced local gateway forgets the cached endpoint once a
   const endpoints = [{ instance_id: 'dead' }, { instance_id: 'alive' }]
   const forgotten: string[] = []
   let ensures = 0
+
   const result = await redialLocalGateway({
     ensure: async () => endpoints[Math.min(ensures++, 1)],
     forget: async () => { forgotten.push('primary') },
     use: async endpoint => {
       if (endpoint.instance_id === 'dead') {throw new Error('Gateway ticket bootstrap failed')}
+
       return `ticket-for-${endpoint.instance_id}`
     }
   })
+
   expect(result).toBe('ticket-for-alive')
   expect(forgotten).toEqual(['primary'])
   expect(ensures).toBe(2)
@@ -94,7 +97,9 @@ test('a dial that keeps failing after one re-ensure surfaces the error instead o
   let ensures = 0
   let forgets = 0
   await expect(redialLocalGateway({
-    ensure: async () => { ensures++; return { instance_id: 'still-dead' } },
+    ensure: async () => { ensures++;
+
+ return { instance_id: 'still-dead' } },
     forget: async () => { forgets++ },
     use: async () => { throw new Error('Invalid gateway ticket response') }
   })).rejects.toThrow('Invalid gateway ticket response')

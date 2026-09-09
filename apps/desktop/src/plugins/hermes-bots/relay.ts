@@ -203,6 +203,7 @@ async function relayConnections(): Promise<RelayConnection[]> {
       const id = String(route?.connectionId || '')
 
       const key = JSON.stringify(route)
+
       if (id && !byConnection.has(key)) {
         byConnection.set(key, route)
       }
@@ -451,9 +452,11 @@ async function drainRelayOutboxes() {
       const senderKey = JSON.stringify(sender.route)
       const pending = pendingRelays.get(senderKey) || new Map<string, RelayEnvelope>()
       pendingRelays.set(senderKey, pending)
+
       for (const envelope of envelopes) {
-        if (envelope.id && !pending.has(envelope.id)) pending.set(envelope.id, structuredClone(envelope))
+        if (envelope.id && !pending.has(envelope.id)) {pending.set(envelope.id, structuredClone(envelope))}
       }
+
       for (const envelope of pending.values()) {
         if (relay.disposed) {
           return
@@ -504,17 +507,23 @@ async function drainRelayOutboxes() {
 
           if (res.delivery_id !== envelopeId || !res.admission_id) {
             noteBotAttention(attentionKey, 'Delivery identity unavailable; retained for recovery')
+
             continue
           }
+
           if (res.status !== 'settled' && res.status !== 'failed') {
-            if (res.status === 'ambiguous') noteBotAttention(attentionKey, 'unknown_execution')
+            if (res.status === 'ambiguous') {noteBotAttention(attentionKey, 'unknown_execution')}
+
             continue
           }
+
           if (res.status === 'failed') {
             noteBotAttention(attentionKey, res.reason || res.error || 'delivery failed')
             await postReply({ error: res.error || res.reply || 'delivery failed', reason: res.reason })
+
             continue
           }
+
           clearBotAttention(attentionKey)
           await postReply({
             reply: String(res?.reply || '')
@@ -527,8 +536,9 @@ async function drainRelayOutboxes() {
           // classified codes beat free-text re-parsing.
           const reason = String(error?.data?.reason || '').trim()
           noteBotAttention(attentionKey, reason || error?.message || error)
+
           // A transport exception can follow a committed admission; never settle it as failure.
-          if (!reason || reason === 'runtime_unavailable') continue
+          if (!reason || reason === 'runtime_unavailable') {continue}
           await postReply({
             error: String(error?.message || error || 'delivery failed'),
             ...(reason

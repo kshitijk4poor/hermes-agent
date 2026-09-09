@@ -1059,10 +1059,13 @@ describe('createBackendSessionForSend profile routing', () => {
     $newChatRoute.set(null)
     $activeGatewayProfile.set('default')
     const calls: Record<string, unknown>[] = []
+
     const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
       if (method === 'session.create') { calls.push(params!); throw new Error('lost create ACK') }
+
       return {} as never
     })
+
     let handle: HarnessHandle | null = null
     render(<Harness onReady={value => { handle = value }} requestGateway={requestGateway} />)
     await waitFor(() => expect(handle).not.toBeNull())

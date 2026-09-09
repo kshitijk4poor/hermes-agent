@@ -15,6 +15,7 @@ export function slashMutation(command: string): { operation: string; payload: Re
 
     return flags.length ? null : { operation: 'model', payload: { model } }
   }
+
   const field = ({ branch: 'title', compress: 'focus' } as Record<string, string>)[name]
 
   if (!field) { return null }
@@ -24,7 +25,9 @@ export function slashMutation(command: string): { operation: string; payload: Re
 
 function mutationSummary(operation: string, value: Record<string, unknown>): string {
   if (operation === 'model') { return `model: ${value.model}${value.provider ? ` (${value.provider})` : ''}` }
+
   if (operation === 'branch') { return `branch: ${value.branched_session_id}` }
+
   if (operation === 'compress') { return `compress: ${value.target_session_id ?? value.session_id}` }
 
   return `${operation}: ok`
@@ -145,7 +148,9 @@ export class CanonicalDesktopProtocol {
 
     if (Array.isArray(payload.pending)) {
       payload.pending_submissions = payload.pending.map(row => ({ ...row, user: row.text }))
+
       for (const [id, lost] of this.unknownAdmissions) { if (lost.session_id === sid) { this.unknownAdmissions.delete(id) } }
+
       for (const row of payload.pending) {
         if (row?.status === 'unknown' && typeof row.admission_id === 'string' && typeof row.execution_generation === 'number') {
           this.unknownAdmissions.set(row.admission_id, { session_id: sid, generation: row.execution_generation })
@@ -213,6 +218,7 @@ export class CanonicalDesktopProtocol {
       if (value.ref?.session_id !== params.session_id || value.admission_id !== params.admission_id) {
         throw new Error('Canonical admission receipt destination mismatch')
       }
+
       this.unknownAdmissions.delete(String(params.admission_id))
 
       return { ...value, session_id: value.ref.session_id }

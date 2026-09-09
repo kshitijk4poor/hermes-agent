@@ -46,6 +46,7 @@ export function useBusyInputMode({
     if (configured !== null || !sessionId || gatewayState !== 'open') {
       return
     }
+
     let cancelled = false
     const ownerRoute = connectionId ? { connectionId, profile: ownerProfile, targetProfile } : ownerProfile
     void requestForSessionProfile<{ value?: unknown }>(ownerRoute, requestGateway, 'config.get', {
