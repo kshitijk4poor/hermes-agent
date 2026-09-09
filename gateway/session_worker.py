@@ -38,18 +38,22 @@ def _claim(connection, ref, params):
         raise RuntimeStoreError('worker_not_live') from exc
     # Reuse the durable adoption digest as the producer claim. Changing any
     # assignment, principal, profile, PID birth or secret cannot adopt it.
-    return admission_fingerprint(canonical_target=ref.session_id, payload={
-        key: params[key] for key in _SCOPE} | {'principal': connection.actor.subject})
+    from hermes_state_worker_compression import worker_claim_origin
+    origin = worker_claim_origin(authority.db, params)
+    return admission_fingerprint(canonical_target=origin, payload={
+        key: params[key] for key in _SCOPE} | {'session_id': origin, 'principal': connection.actor.subject})
 
 
 def _verify(connection, ref, params, claim):
+    from hermes_state_worker_compression import worker_retry_target
     authority = connection.authority
+    target = worker_retry_target(authority.db, params)
     with authority.db._read_ctx() as conn:
         row = conn.execute('SELECT * FROM worker_executions WHERE execution_id=?',
                            (params['execution_id'],)).fetchone()
         if row is None:
             raise RuntimeStoreError('not_found')
-        if row['session_id'] != ref.session_id:
+        if row['session_id'] != target:
             raise RuntimeStoreError('permission_denied')
         if type(params['generation']) is not int or row['generation'] != params['generation']:
             raise RuntimeStoreError('stale_generation')
@@ -58,6 +62,9 @@ def _verify(connection, ref, params, claim):
 
 
 async def worker_request(connection, ref, params, *, operation):
+    if operation == "persist" and isinstance(params.get("operation"), str) and params["operation"].startswith("delegation."):
+        from gateway.session_worker_delegation import worker_delegation_request
+        return await worker_delegation_request(connection, ref, params)
     extra = {'register': {'kind'}, 'adopt': set(), 'persist': {'epoch', 'sequence', 'operation', 'payload'}}[operation]
     if set(params) != _SCOPE | extra:
         raise RuntimeStoreError('invalid_params')

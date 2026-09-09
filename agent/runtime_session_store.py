@@ -82,7 +82,13 @@ class WorkerRPC:
                 return response['result']
 
 
-class RuntimeSessionStore:
+from agent.runtime_session_compression import RuntimeSessionCompressionMixin
+
+
+from agent.runtime_session_lifecycle import RuntimeSessionLifecycleMixin
+
+
+class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycleMixin):
     """Synchronous durable results with a private byte-bounded retry journal.
 
     A failed write remains pending, and failure is sticky until explicit retry or
@@ -176,7 +182,9 @@ class RuntimeSessionStore:
                     entry = self.journal['pending'][0]
                     result = self.rpc('worker.persist', **self.scope, **entry)
                     candidate = dict(self.journal, pending=self.journal['pending'][1:])
+                    candidate = self._compression_receipt_journal(candidate, result)
                     self._save(candidate)
+                    self.scope = candidate['scope']
                     self.journal = candidate
                     results.append(result)
             except Exception as exc:
@@ -197,8 +205,11 @@ class RuntimeSessionStore:
     def append_messages_batch(self, session_id, messages, compression_lock_holder=None,
                               turn_lease_holder=None, chunk_rows=None, turn_lease_ttl_seconds=300.0):
         self._session(session_id)
-        if compression_lock_holder is not None or chunk_rows is not None or turn_lease_ttl_seconds != 300.0:
+        if chunk_rows is not None:
             raise WorkerPersistenceError('unsupported_operation')
+        if compression_lock_holder is not None or turn_lease_ttl_seconds != 300.0:
+            return self._append_compression_messages(session_id, messages, compression_lock_holder,
+                turn_lease_holder, turn_lease_ttl_seconds)
         result = self._apply('transcript.append', {'messages': messages, 'turn_lease_holder': turn_lease_holder})
         for message, annotation in zip(messages, result['annotations'], strict=True):
             message.update(annotation)
@@ -242,10 +253,6 @@ class RuntimeSessionStore:
             if self.journal['pending']:
                 raise WorkerPersistenceError('pending_receipt')
             return True
-
-    def get_session(self, session_id):
-        self._session(session_id)
-        return self._apply('session.context', {})['session']
 
     def get_session_title(self, session_id):
         return self.get_session(session_id).get('title')

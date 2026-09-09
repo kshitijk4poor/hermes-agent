@@ -543,7 +543,11 @@ def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
                             sequence, operation, payload):
     """One closed durable mutation and receipt; never call a self-committing API here."""
     from hermes_state_worker_context import worker_context, worker_prompt, worker_sidecars
+    from hermes_state_worker_compression import WORKER_COMPRESSION_HANDLERS, worker_receipt_assignment
+    from hermes_state_worker_lifecycle import WORKER_LIFECYCLE_HANDLERS
     handlers = {
+        **WORKER_LIFECYCLE_HANDLERS,
+        **WORKER_COMPRESSION_HANDLERS,
         'session.context': worker_context,
         'session.prompt': worker_prompt,
         'session.sidecars': worker_sidecars,
@@ -563,7 +567,7 @@ def mutate_worker_execution(db, *, epoch, execution_id, session_id, generation,
                                   payload={'operation': operation, 'payload': json.loads(encoded)})
     def write(conn):
         _epoch(conn, epoch)
-        row = _worker_assignment(conn, execution_id, session_id, generation)
+        row = worker_receipt_assignment(conn, execution_id, session_id, generation, sequence, digest)
         if row['owner_epoch'] != epoch:
             raise RuntimeStoreError('stale_epoch')
         old = conn.execute('SELECT * FROM worker_receipts WHERE execution_id=? AND sequence=?',
