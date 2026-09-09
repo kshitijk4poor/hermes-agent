@@ -29,36 +29,53 @@ _OWNER_KEYS = ("profile_home", "session_id", "lease_id", "live_session_id")
 _TERMINAL = frozenset({"settled", "failed", "cancelled", "ambiguous"})
 
 
-def find_canonical_owner(profile_home: Path | str) -> dict[str, Any] | None:
-    """Return the exact Bot Chat tip's lease, including unsupported CLI owners."""
-    from hermes_cli.active_sessions import active_session_registry_snapshot
+def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None:
+    """Discover the profile authority and exact Bot Chat without acquiring a lease."""
+    from hermes_cli.gateway_runtime import discover_gateway_endpoint
     from hermes_state import SessionDB
 
     home = Path(profile_home).resolve()
-    if not (home / "state.db").is_file():
+    discovery = discover_gateway_endpoint(home, timeout=5)
+    if discovery.state != 'ready' or discovery.endpoint is None:
+        raise ValueError('profile authority is not ready')
+    if not (home / 'state.db').is_file():
         return None
-    db = SessionDB(db_path=home / "state.db", read_only=True)
+    db = SessionDB(db_path=home / 'state.db', read_only=True)
     try:
-        row = db.get_session_by_title("Bot Chat")
-        session_id = db.get_compression_tip(row["id"]) if row else None
+        row = db.get_session_by_title('Bot Chat')
+        tip = db.get_compression_tip(row['id']) if row else None
     finally:
         db.close()
-    if not session_id:
+    if not tip:
         return None
-    for entry in active_session_registry_snapshot(registry_home=home):
-        if entry["session_id"] == session_id:
-            return {**entry, "profile_home": str(home)}
-    return None
+    return dict(profile_home=str(home), session_id=tip, canonical=True,
+                lease_id=discovery.endpoint.instance_id, live_session_id=tip)
 
 
-def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None:
-    """Only advertised consumers may receive owner-pinned mailbox deliveries."""
-    entry = find_canonical_owner(profile_home)
-    meta = (entry or {}).get("metadata") or {}
-    if entry and meta.get("bot_live_delivery_consumer") is True and meta.get("live_session_id"):
-        return {key: entry[key] for key in ("profile_home", "session_id", "lease_id")} | {
-            "live_session_id": meta["live_session_id"]}
-    return None
+def authority_delivery(home, params):
+    """Call only this home's already-running authority; never start a fallback."""
+    import asyncio
+    from hermes_cli.gateway_runtime import discover_gateway_endpoint
+    from hermes_cli.gateway_client import GatewayClient, _session_ticket
+    from websockets.asyncio.client import connect
+
+    home = Path(home).resolve()
+
+    async def request():
+        discovery = await asyncio.to_thread(discover_gateway_endpoint, home, timeout=5)
+        if discovery.state != 'ready' or discovery.endpoint is None:
+            raise ValueError('profile authority is not ready')
+        endpoint = discovery.endpoint
+        ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
+        url = endpoint.api_origin.replace('http:', 'ws:').replace('https:', 'wss:') + '/api/ws'
+        async with connect(url, subprotocols=['hermes-gateway-v1', 'hermes-gateway-ticket.' + ticket],
+                           open_timeout=10) as ws:
+            if ws.subprotocol != 'hermes-gateway-v1':
+                raise ValueError('authority protocol mismatch')
+            async with GatewayClient(ws) as client:
+                return await client.rpc('bot_relay.deliver', **params)
+
+    return asyncio.run(request())
 
 
 def _owner(home: Path | str, owner: dict[str, Any]) -> dict[str, str]:
@@ -205,6 +222,11 @@ def deliver_to_live_owner(
     state. Reusing an id with a different payload is an error, never an overwrite.
     """
     pinned = _owner(profile_home, owner)
+    if owner.get("canonical"):
+        home = Path(profile_home).resolve()
+        return authority_delivery(home, dict(id=_delivery_id(delivery_id or uuid.uuid4().hex),
+            profile=home.name if home.parent.name == "profiles" else "default",
+            message=message, session_id=pinned["session_id"]))
     if not isinstance(message, str):
         raise ValueError("message must be a string")
     key = _delivery_id(delivery_id if delivery_id is not None else uuid.uuid4().hex)
@@ -294,53 +316,9 @@ def complete_delivery(
 
 def read_delivery_result(profile_home: Path | str, delivery_id: str) -> dict[str, Any] | None:
     """Read admission/claim/terminal state without waiting or deleting its receipt."""
-    return _read(_root(profile_home) / f"{_delivery_id(delivery_id)}.json")
-
-
-_PENDING = ("queued", "claimed")
-_POLL_SECONDS = 0.5
-
-
-def await_delivery(
-    profile_home: Path | str, delivery_id: str, timeout: float | None,
-    *, should_stop: Callable[[], bool] | None = None,
-) -> dict[str, Any] | None:
-    """Poll a receipt until the owner settles it, ``timeout`` lapses, or ``should_stop`` says so.
-
-    Every transport that hands a turn to a live Bot Chat owner (local ``message_agent``, the
-    Desktop relay, ``hermes peer dm`` and ``hermes peer run``) waits on the same receipt; keeping
-    the loop here is what stops the lanes drifting (one lane returned a receipt sentence instead
-    of the reply, two never waited at all). Returns the last record read — still pending when the
-    budget lapsed, None when the receipt was never readable.
-    """
-    deadline = None if timeout is None else time.monotonic() + timeout
-    while True:
-        record = read_delivery_result(profile_home, delivery_id)
-        if record is None or record["status"] not in _PENDING:
-            return record
-        if should_stop is not None and should_stop():
-            return record
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining <= 0:
-            return record
-        time.sleep(_POLL_SECONDS if remaining is None else min(_POLL_SECONDS, remaining))
-
-
-async def await_delivery_async(
-    profile_home: Path | str, delivery_id: str, timeout: float | None,
-    *, should_stop: Callable[[], bool] | None = None,
-) -> dict[str, Any] | None:
-    """``await_delivery`` for an event loop: never blocks a worker thread for the whole budget."""
-    import asyncio
-
-    deadline = None if timeout is None else time.monotonic() + timeout
-    while True:
-        record = await asyncio.to_thread(read_delivery_result, profile_home, delivery_id)
-        if record is None or record["status"] not in _PENDING:
-            return record
-        if should_stop is not None and should_stop():
-            return record
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining <= 0:
-            return record
-        await asyncio.sleep(_POLL_SECONDS if remaining is None else min(_POLL_SECONDS, remaining))
+    record = _read(_root(profile_home) / f"{_delivery_id(delivery_id)}.json")
+    if record is not None and record.get('admission_id'):
+        home = Path(profile_home).resolve()
+        return authority_delivery(home, dict(id=delivery_id,
+            profile=home.name if home.parent.name == 'profiles' else 'default', message=record['message']))
+    return record

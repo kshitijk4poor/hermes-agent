@@ -495,10 +495,9 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
         assert profile_home is not None
         owner = find_canonical_live_owner(profile_home)
         if owner is None:
-            return None
-        intent = dict(owner=owner, message=Path(dm_file).read_text(encoding="utf-8-sig"),
-                      delivery_id=_dm_delivery_id(dm_file),
-                      **({"author": author} if author else {}))
+            raise ValueError("canonical Bot Chat target is unavailable; no local fallback")
+        intent = dict(owner=owner, message=Path(dm_file).read_text(encoding="utf-8"),
+                      delivery_id=hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest())
         try:
             fd = os.open(intent_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -511,7 +510,7 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
             fsync_directory(intent_path.parent)
     home = intent["owner"]["profile_home"]
     record = read_delivery_result(home, intent["delivery_id"])
-    if record is None:
+    if record is None or intent["owner"].get("canonical"):
         record = deliver_to_live_owner(home, intent["owner"], intent["message"],
                                        delivery_id=intent["delivery_id"], author=intent.get("author"))
     return record

@@ -68,7 +68,7 @@ async def _record_reply(authority, home, key, future):
 async def deliver(connection, params):
     authority, actor = connection.authority, connection.actor
     home = _home(authority, actor, params.get('profile'))
-    if set(params) - {'id', 'profile', 'message'}:
+    if set(params) - {'id', 'profile', 'message', 'session_id'}:
         raise RuntimeStoreError('invalid_params')
     try:
         key = _delivery_id(params.get('id'))
@@ -89,6 +89,8 @@ async def deliver(connection, params):
         if record is not None:
             raise RuntimeStoreError('unknown_execution')
         ref, live, entry = _target(authority, actor)
+        if params.get('session_id', entry.session_id) != entry.session_id:
+            raise RuntimeStoreError('admission_conflict')
         event = MessageEvent(text=message, source=live.source, internal=True,
             message_id='bot:' + key, metadata={'gateway_session_key': live.route,
                                              'gateway_session_id': entry.session_id})

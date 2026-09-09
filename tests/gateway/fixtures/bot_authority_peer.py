@@ -49,6 +49,13 @@ def probe(base):
             await wait(lambda: rows()[0]['status'] == 'terminal')
             await rpc(ws, 'prompt.submit', session_id=sid, input_id='hold', text='HOLD_AUTOMATION')
             assert await asyncio.to_thread(model.blocked.wait, 20)
+            from tools.bot_mode_dm import _admit_live_dm
+            dm = home / 'local-dm.txt'
+            dm.write_text('[Message from @local-sender] LOCAL_DM_ONCE')
+            local = await asyncio.to_thread(_admit_live_dm, home, str(dm))
+            assert local is not None and local['status'] == 'queued', local
+            same = await asyncio.to_thread(_admit_live_dm, home, str(dm))
+            assert same['admission_id'] == local['admission_id'], same
             params = {'id': 'a' * 32, 'profile': 'default', 'message': '[Message from @sender] BOT_DM_ONCE'}
             wrong = await rpc(ws, 'bot_relay.deliver', **{**params, 'profile': 'wrong-profile'})
             assert wrong['error']['message'] == 'profile_mismatch', wrong
