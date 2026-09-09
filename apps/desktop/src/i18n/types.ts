@@ -3272,6 +3272,9 @@ export interface Translations {
     queueSend: string
     queueSteer: string
     queueDelete: string
+    queueLostNote: string
+    queueLostDiscard: string
+    queueLostDiscardTip: string
     queueResume: string
     queueResumeTip: string
     queueStuckTitle: string

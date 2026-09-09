@@ -30,6 +30,7 @@ import { interceptsTypedVoiceStop } from '@/lib/voice-stop-word'
 import { sessionCompacting } from '@/store/compaction'
 import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } from '@/store/composer-input-history'
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
+import { notifyError } from '@/store/notifications'
 import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
 import { $hudMode } from '@/store/hud'
 import { $showsAdvancedChrome } from '@/store/interface-mode'
@@ -1349,39 +1350,45 @@ export function ChatBar({
               queue). An in-flow dock child: the dock is bottom-anchored, so it
               grows upward over the thread and the dock's own measurement covers
               it. Collapses to nothing when every status is empty. */}
-          <StatusDrawerContent collapsed={statusDrawerCollapsed} id={statusDrawerId}>
-            <ComposerStatusStack
-              onSubmit={onSubmit}
-              queue={
-                activeQueueSessionKey && queuedPrompts.length > 0 ? (
-                  <QueuePanel
-                    busy={busy}
-                    editingId={queueEdit?.entryId ?? null}
-                    entries={queuedPrompts}
-                    onDelete={id => {
-                      if (removeQueuedPrompt(activeQueueSessionKey, id) && queueEdit?.entryId === id) {
-                        exitQueuedEdit('cancel')
-                      }
-                    }}
-                    onEdit={beginQueuedEdit}
-                    onResume={() => {
-                      unparkQueuedPrompts(activeQueueSessionKey)
+          <ComposerStatusStack
+            onSubmit={onSubmit}
+            queue={
+              activeQueueSessionKey && queuedPrompts.length > 0 ? (
+                <QueuePanel
+                  busy={busy}
+                  editingId={queueEdit?.entryId ?? null}
+                  entries={queuedPrompts}
+                  onDelete={id => {
+                    if (removeQueuedPrompt(activeQueueSessionKey, id) && queueEdit?.entryId === id) {
+                      exitQueuedEdit('cancel')
+                    }
+                  }}
+                  onDiscardLost={gateway ? id => {
+                    // Server-owned row: the authority's pending fanout retires it
+                    // from the queue once the acknowledgement commits. Canonical
+                    // local sessions key the queue by their own session id, so the
+                    // stored key stands in when the runtime id is not bound yet.
+                    gateway.request('prompt.resolve_unknown', { session_id: sessionId ?? activeQueueSessionKey, admission_id: id })
+                      .catch((error: unknown) => notifyError(error, t.composer.queueLostDiscard))
+                  } : undefined}
+                  onEdit={beginQueuedEdit}
+                  onResume={() => {
+                    unparkQueuedPrompts(activeQueueSessionKey)
 
-                      // Idle → kick the head immediately; busy → the settle drain
-                      // takes over now that the park is lifted.
-                      if (!busy) {
-                        void drainNextQueued()
-                      }
-                    }}
-                    onSendNow={id => void sendQueuedNow(id)}
-                    onSteerNow={id => void steerQueuedNow(id)}
-                    parked={queueParked}
-                  />
-                ) : null
-              }
-              sessionId={statusSessionId}
-            />
-          </StatusDrawerContent>
+                    // Idle → kick the head immediately; busy → the settle drain
+                    // takes over now that the park is lifted.
+                    if (!busy) {
+                      void drainNextQueued()
+                    }
+                  }}
+                  onSendNow={id => void sendQueuedNow(id)}
+                  onSteerNow={id => void steerQueuedNow(id)}
+                  parked={queueParked}
+                />
+              ) : null
+            }
+            sessionId={statusSessionId}
+          />
           <ComposerPrimitive.Root
             className={cn(
               'group/composer relative w-full overflow-visible rounded-2xl',

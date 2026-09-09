@@ -36,6 +36,10 @@ export class CanonicalDesktopProtocol {
   private mutations = new Map<string, Record<string, unknown>>()
   private generations = new Map<string, number>()
   private prompts = new Map<string, Record<string, unknown>>()
+  // admission_id → generation of a turn the authority recovered as `unknown`
+  // (owner died mid-turn). Only these rows may be acknowledged, and only with
+  // the generation the authority stamped on them, never the live one.
+  private unknownAdmissions = new Map<string, { session_id: string; generation: number }>()
 
   failure(params: Record<string, unknown>, error: unknown) {
     if ((error as { data?: { reason?: string } })?.data?.reason !== 'revision_conflict') { return }
@@ -108,6 +112,14 @@ export class CanonicalDesktopProtocol {
       return { session_id: params.session_id, execution_generation: generation }
     }
 
+    if (method === 'prompt.resolve_unknown') {
+      const lost = this.unknownAdmissions.get(String(params.admission_id))
+
+      if (!lost || lost.session_id !== params.session_id) { throw new Error('Admission is not an unknown lost turn; reopen the session before acknowledging') }
+
+      return { session_id: params.session_id, admission_id: params.admission_id, execution_generation: lost.generation }
+    }
+
     if (method === 'approval.respond' || method === 'clarify.respond') {
       const id = String(params.prompt_id ?? params.request_id ?? '')
       const prompt = this.prompts.get(id)
@@ -133,6 +145,12 @@ export class CanonicalDesktopProtocol {
 
     if (Array.isArray(payload.pending)) {
       payload.pending_submissions = payload.pending.map(row => ({ ...row, user: row.text }))
+      for (const [id, lost] of this.unknownAdmissions) { if (lost.session_id === sid) { this.unknownAdmissions.delete(id) } }
+      for (const row of payload.pending) {
+        if (row?.status === 'unknown' && typeof row.admission_id === 'string' && typeof row.execution_generation === 'number') {
+          this.unknownAdmissions.set(row.admission_id, { session_id: sid, generation: row.execution_generation })
+        }
+      }
     }
 
     if (typeof payload.execution_generation === 'number') {
@@ -189,6 +207,15 @@ export class CanonicalDesktopProtocol {
       }
 
       return { ...value, session_id: value.ref.session_id, submission_id: params.submission_id ?? params.input_id }
+    }
+
+    if (method === 'prompt.resolve_unknown') {
+      if (value.ref?.session_id !== params.session_id || value.admission_id !== params.admission_id) {
+        throw new Error('Canonical admission receipt destination mismatch')
+      }
+      this.unknownAdmissions.delete(String(params.admission_id))
+
+      return { ...value, session_id: value.ref.session_id }
     }
 
     if (method === 'session.resume' || method === 'session.create') {
