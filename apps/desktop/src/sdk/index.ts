@@ -21,7 +21,10 @@
 import { atom, computed, type ReadableAtom } from 'nanostores'
 import type { ReactNode } from 'react'
 
-import { capabilityScoped } from '@/api/client'
+import { createSessionMutationClient, type SessionMutationSnapshot } from '../../../shared/src/session-http-mutations'
+import { capabilityScoped, getApiRequestConnection } from '@/api/client'
+
+const mutatePersistedVisibility = createSessionMutationClient()
 import { PRIMARY_SESSION_VIEW } from '@/app/chat/session-view'
 import { openSession, type OpenSessionIntent } from '@/app/open-session'
 import { syncWorkspaceRoute } from '@/app/routes'
@@ -1604,12 +1607,14 @@ export const host = {
       throw new Error('Persisted session updates require a profile and session id')
     }
 
-    return hermesApi<{ ok: boolean; hidden: boolean }>({
-      ...(route ? { connectionId: route.connectionId } : {}),
-      path: `/api/sessions/${encodeURIComponent(options.sessionId)}`,
-      method: 'PATCH',
-      body: { hidden: options.hidden, profile }
-    })
+    const scope = { connectionId: route?.connectionId || getApiRequestConnection() || 'local' }
+    const path = `/api/sessions/${encodeURIComponent(options.sessionId)}`
+    const payload = { hidden: options.hidden, profile }
+    return mutatePersistedVisibility(JSON.stringify([scope, options.sessionId, payload]),
+      () => hermesApi<SessionMutationSnapshot>({ ...scope,
+        path: `${path}/mutation-snapshot?profile=${encodeURIComponent(profile)}` }),
+      identity => hermesApi<{ ok: boolean; hidden: boolean }>({ ...scope, path,
+        method: 'PATCH', body: { ...payload, ...identity } }))
   },
 
   /** Gateway JSON-RPC — sessions, config, skills, cron, kanban, everything
