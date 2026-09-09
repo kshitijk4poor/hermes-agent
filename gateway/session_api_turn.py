@@ -75,7 +75,7 @@ def admit_api_turn(adapter, **kwargs):
     if adapter._ensure_session_db() is not authority.db:
         raise RuntimeStoreError('profile_mismatch')
     sid = kwargs.get('session_id') or uuid.uuid4().hex
-    ref = bind_api_session(authority, sid)
+    ref = bind_api_session(authority, sid, hosted_dispatch=kwargs.get("room_dispatch"))
     settings = {key: kwargs.get(key) for key in _SETTING_KEYS}
     # Route credentials remain in the server's configuration, never admission JSON.
     route = settings.get('route')
