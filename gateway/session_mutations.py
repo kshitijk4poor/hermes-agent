@@ -24,6 +24,12 @@ async def mutate_session(authority, actor, ref, params):
             raise RuntimeStoreError('profile_mismatch')
         if 'session:create' not in actor.capabilities:
             raise RuntimeStoreError('permission_denied')
+        from hermes_state_mutations import validate_action
+        validate_action(operation, params['payload'])
+        normalized, errors = authority.db._validate_import_payload(params['payload']['sessions'])
+        if errors:
+            raise RuntimeStoreError('invalid_params')
+        imported_ids = tuple(item['session']['id'] for item in normalized)
     else:
         from hermes_state_mutation_retirement import has_mutation_receipt
         if actor.profile_id != authority.profile_id or ref.profile_id != authority.profile_id:
@@ -65,7 +71,10 @@ async def mutate_session(authority, actor, ref, params):
         live_guard([ref.session_id])
         raise RuntimeStoreError('runtime_coordination_required')
     def authorize_write(conn):
-        from hermes_state_mutation_binding import authorize_history
+        from hermes_state_mutation_binding import authorize_history, import_history_control
+        if operation == 'import':
+            import_history_control(conn, actor, imported_ids)
+            return
         if not authorize_history(conn, actor, ref.session_id, claim=True):
             raise RuntimeStoreError('permission_denied')
 
@@ -73,7 +82,7 @@ async def mutate_session(authority, actor, ref, params):
         principal_id=actor.subject, session_id=ref.session_id, request_id=params['request_id'],
         expected_revision=params['expected_revision'], expected_generation=params.get('expected_generation'),
         operation=operation, payload=params['payload'], _live_guard=live_guard,
-        _authorize_write=authorize_write if cold_history else None)
+        _authorize_write=authorize_write if cold_history or operation == 'import' else None)
     if operation == 'reset' and applied:
         from gateway.session_local_recovery import restore_local_session
         restore_local_session(authority, ref.session_id)
