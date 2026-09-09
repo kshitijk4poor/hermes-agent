@@ -94,6 +94,30 @@ def admit_api_turn(adapter, **kwargs):
     return authority, ref, row
 
 
+def recover_api_turns(adapter):
+    """Recover committed work only after the real API adapter is published."""
+    authority = getattr(adapter.gateway_runner, 'session_authority', None)
+    if authority is None:
+        return
+    from hermes_state_runtime import list_session_admissions
+    import logging
+    with authority.db._read_ctx() as conn:
+        targets = [row[0] for row in conn.execute(
+            "SELECT DISTINCT target_session_id FROM session_admissions WHERE principal_id='api' AND status='queued'")]
+    for sid in targets:
+        try:
+            ref = restore_api_session(authority, sid)
+            pending = list_session_admissions(authority.db, session_id=sid)
+            if any(row['status'] == 'unknown' for row in pending):
+                continue
+            for row in pending:
+                if row['status'] == 'queued':
+                    check_api_turn(authority, ref, row['payload'])
+            authority._schedule(ref)
+        except RuntimeStoreError as exc:
+            logging.getLogger(__name__).warning('API session %s paused: %s', sid, exc.reason)
+
+
 async def run_api_turn(adapter, **kwargs):
     admitted = admit_api_turn(adapter, **kwargs)
     return await observe_api_turn(admitted, **kwargs)
