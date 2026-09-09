@@ -18,6 +18,40 @@ def _media_root():
     return get_document_cache_dir().resolve() / 'native-inputs'
 
 
+# Public ``prompt.submit`` attachments: a local client stages image bytes in the
+# profile image cache (where messaging adapters stage downloads), the authority
+# commits them as immutable bytes at admission so no later mutation or cache
+# cleanup of the staging file can change what executes.
+_ATTACHMENT_MIMES = frozenset({'image/png', 'image/jpeg', 'image/gif', 'image/webp'})
+_ATTACHMENT_LIMIT = 10
+
+
+def admit_attachments(attachments):
+    """Wire ``attachments: [{path, mime}]`` -> committed payload fields (``{}`` when absent)."""
+    if attachments is None:
+        return {}
+    if (not isinstance(attachments, list) or not attachments or len(attachments) > _ATTACHMENT_LIMIT
+            or any(not isinstance(item, dict) or set(item) != {'path', 'mime'}
+                   or not isinstance(item['path'], str) or item['mime'] not in _ATTACHMENT_MIMES
+                   for item in attachments)):
+        raise RuntimeStoreError('invalid_params')
+    from gateway.platforms.base import get_image_cache_dir
+    staging = get_image_cache_dir().resolve()
+    paths = [Path(item['path']) for item in attachments]
+    if any(not path.is_absolute() or path.resolve().parent != staging for path in paths):
+        raise RuntimeStoreError('invalid_params')
+    return {'attachments_v1': {'media': capture_native_media(paths),
+                               'media_types': [item['mime'] for item in attachments]}}
+
+
+def restore_attachments(payload):
+    """Committed attachment fields -> ``MessageEvent`` media kwargs (``{}`` for text-only rows)."""
+    data = payload.get('attachments_v1')
+    if not data:
+        return {}
+    return {'media_urls': restore_native_media(data['media']), 'media_types': list(data['media_types'])}
+
+
 def _sync_directory(path):
     # Windows cannot open directories through os.open; file fsync still precedes ACK.
     if os.name != 'nt':

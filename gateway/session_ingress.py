@@ -31,8 +31,9 @@ async def execute_admission(authority, ref, row):
     if 'native_text_v1' in row['payload']:
         event = restore_native(row['payload'], authority.runner)
     else:
+        from gateway.session_ingress_media import restore_attachments
         event = MessageEvent(text=row['payload']['text'], source=live.source,
-                             message_id=row['admission_id'])
+                             message_id=row['admission_id'], **restore_attachments(row['payload']))
         if 'local_automation_v1' in row['payload']:
             from gateway.session_automation import restore_local_automation
             event = restore_local_automation(authority, ref, row)
