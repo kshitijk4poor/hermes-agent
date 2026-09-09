@@ -76,9 +76,12 @@ class RuntimeSessionCompressionMixin:
         self._session(session_id)
         return self._apply('compression.lock.renew', {'holder': holder, 'ttl_seconds': ttl_seconds})['value']
 
-    def release_compression_lock(self, session_id, holder):
+    def reopen_orphaned_compression_session(self, session_id):
         self._session(session_id)
-        self._apply('compression.lock.release', {'holder': holder})
+        return self._apply('compression.reopen', {})['value']
+
+    def release_compression_lock(self, session_id, holder):
+        self._apply('compression.cleanup', {'target': session_id, 'holder': holder})
 
     def get_compression_lock_holder(self, session_id):
         self._session(session_id)

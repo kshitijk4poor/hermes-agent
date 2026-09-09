@@ -384,7 +384,47 @@ def worker_retry_target(db, params):
     return row['session_id']
 
 
+from hermes_state_common import _ENDED_ROW_SQL, _ended_by_compression
+
+def reopen_on_connection(db, conn, session_id):
+    if not _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (session_id,)).fetchone()):
+        return False
+    child = conn.execute('\n                SELECT 1\n                FROM sessions\n                WHERE parent_session_id = ?\n                ' + db._NON_CONTINUATION_CHILD_FILTER_SQL.format(alias='') + '\n                LIMIT 1\n                ', (session_id, session_id, session_id)).fetchone()
+    if child is not None:
+        return False
+    now = time.time()
+    lock_row = conn.execute(_LOCK_ROW_SQL, (session_id,)).fetchone()
+    if lock_row is not None:
+        expires_at = lock_row['expires_at']
+        if expires_at is None or float(expires_at) >= now:
+            return False
+        deleted = conn.execute('DELETE FROM compression_locks WHERE session_id = ? AND holder = ? AND expires_at = ?', (session_id, lock_row['holder'], expires_at))
+        if deleted.rowcount != 1:
+            return False
+    updated = conn.execute("UPDATE sessions SET ended_at = NULL, end_reason = NULL WHERE id = ? AND ended_at IS NOT NULL AND end_reason = 'compression'", (session_id,))
+    return updated.rowcount == 1
+
+
+def worker_reopen(db, conn, sid, payload):
+    _fields(payload, ())
+    return {'value': reopen_on_connection(db, conn, sid)}
+
+
+def worker_compression_cleanup(db, conn, sid, payload):
+    _fields(payload, ('target', 'holder'))
+    target = _text(payload['target'])
+    holder = _text(payload['holder'])
+    view = CompressionSnapshot(db, conn)
+    view.authorize(sid, target)
+    if db._session_turn_lease_key_on_conn(conn, sid) != db._session_turn_lease_key_on_conn(conn, target):
+        raise RuntimeStoreError('permission_denied')
+    conn.execute('DELETE FROM compression_locks WHERE session_id=? AND holder=?', (target, holder))
+    return {'value': None}
+
+
 WORKER_COMPRESSION_HANDLERS = {
+    'compression.reopen': worker_reopen,
+    'compression.cleanup': worker_compression_cleanup,
     'compression.watermark': worker_watermark,
     'compression.archive': worker_archive,
     'compression.publish': worker_publish,
