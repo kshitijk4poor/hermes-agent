@@ -16,9 +16,12 @@ def run_worker(tmp_path, body, mode="safe"):
     env = dict(os.environ, HERMES_HOME=str(home), HOME=str(home), PROBE_MODE=mode)
     for key in ("HERMES_SAFE_MODE", "HERMES_IGNORE_USER_CONFIG", "HERMES_IGNORE_RULES"):
         env.pop(key, None)
+    root = Path(__file__).resolve().parents[2]
+    script = home / "worker_probe.py"
+    script.write_text(f"import sys; sys.path.insert(0, {str(root)!r})\n" + textwrap.dedent(body))
     result = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(body)], env=env,
-        cwd=Path(__file__).resolve().parents[2], stdin=subprocess.DEVNULL,
+        [sys.executable, str(script)], env=env,
+        cwd=root, stdin=subprocess.DEVNULL,
         capture_output=True, text=True, timeout=45,
     )
     assert result.returncode == 0, result.stdout + result.stderr
@@ -159,3 +162,60 @@ def test_safe_worker_never_discovers_or_invokes_customizations(tmp_path, mode):
     else:
         assert {"plugin-import", "plugin-register", "plugin-hook", "model-providers/nested", "flat", "direct-hook", "middleware", "observer", "shell", "outbound"} <= set(result["events"])
         assert result["reads"] and result["injected"]
+
+
+@pytest.mark.parametrize("mode", ["safe", "config", "ordinary"])
+def test_safe_worker_bypasses_rule_readers_even_without_cli_flags(tmp_path, mode):
+    result = run_worker(tmp_path, r"""
+        import json, os, sys
+        from pathlib import Path
+        mode = os.environ["PROBE_MODE"]
+        home = Path(os.environ["HERMES_HOME"])
+        project = home / "project"; project.mkdir()
+        (project / "AGENTS.md").write_text("PROJECT_SENTINEL")
+        sub = project / "sub"; sub.mkdir()
+        (sub / "AGENTS.md").write_text("SUB_SENTINEL")
+        (home / "SOUL.md").write_text("SOUL_SENTINEL")
+        mem = home / "memories"; mem.mkdir()
+        (mem / "MEMORY.md").write_text("MEMORY_SENTINEL")
+        skill = home / "skills" / "probe"; skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: probe\ndescription: SKILL_SENTINEL\n---\nSKILL_SENTINEL\n")
+        if mode != "ordinary":
+            from agent.safe_worker_policy import _bind_safe_worker_policy
+            _bind_safe_worker_policy(safe_mode=mode == "safe", ignore_user_config=True, config={})
+        reads = []
+        selected = {"SOUL.md", "AGENTS.md", "MEMORY.md", "USER.md", "SKILL.md"}
+        def audit(event, args):
+            if event == "open" and Path(str(args[0])).name in selected and args[1] != "w":
+                reads.append(Path(str(args[0])).name)
+        sys.addaudithook(audit)
+        from agent.prompt_builder import build_context_files_prompt, load_soul_md, build_skills_system_prompt
+        from agent.skill_commands import build_preloaded_skills_prompt
+        from agent.subdirectory_hints import SubdirectoryHintTracker
+        context = build_context_files_prompt(cwd=str(project))
+        soul = load_soul_md()
+        skills = build_skills_system_prompt()
+        preloaded = build_preloaded_skills_prompt(["probe"])
+        hints = SubdirectoryHintTracker(str(project)).check_tool_call("read_file", {"path": str(sub / "file.py")})
+        from agent.agent_init import _init_memory, _select_context_engine
+        from types import SimpleNamespace
+        agent = SimpleNamespace(enabled_toolsets=["memory"], disabled_toolsets=[])
+        _init_memory(agent, {"memory": {"memory_enabled": True, "user_profile_enabled": True}}, False, "cli")
+        # Explicit custom-engine selection must not escape the process policy.
+        import plugins.context_engine
+        engines = []
+        plugins.context_engine.load_context_engine = lambda name: engines.append(name)
+        _select_context_engine({"context": {"engine": "sentinel"}})
+        print(json.dumps({"context": context, "soul": soul, "skills": skills,
+            "preloaded": preloaded, "hints": hints, "reads": reads, "engines": engines,
+            "memory": agent._memory_store is not None}))
+    """, mode)
+    if mode == "safe":
+        assert result == {"context": "", "soul": None, "skills": "", "preloaded": ["", [], ["probe"]],
+                          "hints": None, "reads": [], "engines": [], "memory": False}
+    else:
+        assert "PROJECT_SENTINEL" in result["context"] and "SOUL_SENTINEL" in result["soul"]
+        assert "SKILL_SENTINEL" in result["skills"] and "SKILL_SENTINEL" in result["preloaded"][0]
+        assert "SUB_SENTINEL" in result["hints"]
+        assert {"AGENTS.md", "SOUL.md", "SKILL.md", "MEMORY.md"} <= set(result["reads"])
+        assert result["engines"] == ["sentinel"] and result["memory"]
