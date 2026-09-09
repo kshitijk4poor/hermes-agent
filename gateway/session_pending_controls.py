@@ -28,6 +28,9 @@ class PendingControls:
                       'command': _redact_approval_command(data.get('command', '')),
                       'description': _redact_approval_command(data.get('description', '')),
                       'choices': choices}
+            if 'edit' in data:
+                prompt['edit'] = deepcopy(data['edit'])
+                prompt['choices'] = ['once', 'deny']
             self.pending[prompt_id] = (route, prompt)
             self.events.publish(session_id, prompt, event_type='approval.request')
 

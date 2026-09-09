@@ -7,8 +7,8 @@ from pathlib import Path
 from hermes_state_runtime import RuntimeStoreError
 
 CREATE_FIELDS = frozenset({'request_id', 'source', 'cwd', 'model', 'toolsets',
-                           'provider', 'base_url', 'reasoning', 'max_turns', 'ignore_rules', 'api_key'})
-SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop'}
+                           'provider', 'base_url', 'reasoning', 'max_turns', 'ignore_rules', 'api_key', 'editor'})
+SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'acp': 'acp'}
 
 
 @dataclass(frozen=True)
@@ -80,6 +80,8 @@ def build_policy(params, config, *, private_secrets=None):
     cwd = params.get('cwd', str(resolve_agent_cwd()))
     if not isinstance(cwd, str) or not Path(cwd).is_absolute() or not Path(cwd).is_dir():
         raise RuntimeStoreError('invalid_params')
+    from gateway.session_local_editor import validate_editor
+    validate_editor(source, params.get('editor'))
     config = json.loads(json.dumps(config))
     from urllib.parse import urlsplit
     from hermes_constants import parse_reasoning_effort
@@ -112,15 +114,15 @@ def build_policy(params, config, *, private_secrets=None):
         if (not isinstance(explicit, list) or any(not isinstance(x, str) or not validate_toolset(x) for x in explicit)
                 or ('desktop_ui' in explicit and source != 'gui')):
             raise RuntimeStoreError('invalid_params')
-        config.setdefault('platform_toolsets', {})['cli'] = explicit
-    enabled = _get_platform_tools(config, 'cli')
+        config.setdefault('platform_toolsets', {})['acp' if source == 'acp' else 'cli'] = explicit
+    enabled = _get_platform_tools(config, 'acp' if source == 'acp' else 'cli')
     if explicit is not None:
         from toolsets import resolve_toolset
         requested = {t for name in explicit for t in resolve_toolset(name)}
         effective = {t for name in enabled for t in resolve_toolset(name)}
         if not requested <= effective:
             raise RuntimeStoreError('invalid_params')
-    elif source != 'cli':
+    elif source in {'tui', 'gui'}:
         # Same surface toolsets as the native TUI factory, without its env inference.
         enabled.add('project')
         if source == 'gui':
@@ -252,8 +254,10 @@ def policy_scope(policy, *, authority=None):
                 terminal[path[1]] = value
     cwd_token = set_session_cwd(policy.cwd)
     terminal_token = set_terminal_scope(terminal)
+    from gateway.session_local_editor import editor_scope
     try:
-        yield
+        with editor_scope(policy):
+            yield
     finally:
         reset_terminal_scope(terminal_token)
         cwd_token.var.reset(cwd_token)
