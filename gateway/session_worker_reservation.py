@@ -10,25 +10,54 @@ import subprocess
 from gateway.session_admission import admission_fingerprint
 from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, _secret_digest, _session
 
+# A venv launcher (uv's Windows python.exe, pip's exe shim) sits between the owner's
+# handle and the interpreter; the real worker is never further away than this.
+MAX_LAUNCHER_HOPS = 3
 
-def reserve_admission_worker(authority, *, admission_id, process, principal_id):
+
+def verify_worker_identity(process, hello):
+    """Return the verified ``(pid, birth)`` of the interpreter behind ``process``.
+
+    ``Popen.pid`` may be a launcher trampoline, so the worker reports its own pid and
+    birth in a ``hello`` frame; the OWNER proves that pid is alive, carries that birth,
+    and descends from (or is) the reserved handle. The worker never decides equality.
+    """
+    import psutil
+    if not isinstance(process, subprocess.Popen) or process.poll() is not None:
+        raise RuntimeStoreError('worker_not_live')
+    if (not isinstance(hello, dict) or hello.get('type') != 'hello' or type(hello.get('pid')) is not int
+            or type(hello.get('birth')) not in (int, float) or not isinstance(hello.get('ancestors'), list)
+            or any(type(p) is not int for p in hello['ancestors'])):
+        raise RuntimeStoreError('invalid_worker_frame')
+    pid = hello['pid']
+    if pid <= 0 or pid == os.getpid():
+        raise RuntimeStoreError('permission_denied')
+    try:
+        handle = psutil.Process(process.pid)
+        if handle.ppid() != os.getpid() or handle.status() == psutil.STATUS_ZOMBIE:
+            raise RuntimeStoreError('permission_denied')
+        worker = psutil.Process(pid)
+        birth = worker.create_time()
+        if birth != hello['birth'] or not worker.is_running() or worker.status() == psutil.STATUS_ZOMBIE:
+            raise RuntimeStoreError('permission_denied')
+        # psutil's parent() already refuses a recycled ppid (parent born after child).
+        chain = [p.pid for p in worker.parents()[:MAX_LAUNCHER_HOPS]]
+    except psutil.Error as exc:
+        raise RuntimeStoreError('worker_not_live') from exc
+    if pid != process.pid and process.pid not in chain:
+        raise RuntimeStoreError('permission_denied')
+    return pid, birth
+
+
+def reserve_admission_worker(authority, *, admission_id, process, principal_id, hello):
     """Return a private bootstrap scope; never accept caller-selected kind/target.
 
     Only the owner process may reserve its live direct exec child. The admission
     supplies physical session and generation; its durable principal must match
     the producer. Do not publish the returned secret on any client event stream.
     """
-    import psutil
     authority._require_admission_open()
-    if not isinstance(process, subprocess.Popen) or process.poll() is not None:
-        raise RuntimeStoreError('worker_not_live')
-    try:
-        child = psutil.Process(process.pid)
-        if child.ppid() != os.getpid() or child.status() == psutil.STATUS_ZOMBIE:
-            raise RuntimeStoreError('permission_denied')
-        birth = child.create_time()
-    except psutil.Error as exc:
-        raise RuntimeStoreError('worker_not_live') from exc
+    pid, birth = verify_worker_identity(process, hello)
     secret = secrets.token_urlsafe(32)
 
     def write(conn):
@@ -47,7 +76,7 @@ def reserve_admission_worker(authority, *, admission_id, process, principal_id):
         if conn.execute("SELECT 1 FROM worker_executions WHERE session_id=? AND status!='terminal'", (sid,)).fetchone():
             raise RuntimeStoreError('stale_generation')
         scope = dict(profile_id=authority.profile_id, session_id=sid, execution_id=execution_id,
-                     generation=generation, pid=process.pid, birth=birth, secret=secret)
+                     generation=generation, pid=pid, birth=birth, secret=secret)
         claim = admission_fingerprint(canonical_target=sid, payload=scope | {'principal': principal_id})
         conn.execute("INSERT INTO worker_executions(execution_id,session_id,kind,owner_epoch,generation,status,adoption_digest) "
                      "VALUES(?,?,'compute',?,?,'registered',?)",

@@ -210,10 +210,20 @@ def execute(frame, channel):
         store.close()
 
 
+def hello():
+    """Identity the owner verifies before it reserves: this interpreter's pid and birth plus
+    the ancestor chain it observes. Launchers (uv's venv python.exe) put the owner's Popen
+    handle one or two hops above; the owner, never this process, decides whether they match."""
+    import psutil
+    me = psutil.Process()
+    return {'pid': me.pid, 'birth': me.create_time(), 'ancestors': [p.pid for p in me.parents()[:3]]}
+
+
 def main():
     channel = WorkerChannel(os.fdopen(os.dup(sys.stdout.fileno()), 'wb', buffering=0))  # windows-footgun: ok — binary frames
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
     try:
+        channel.send('hello', **hello())
         frame = validate_bootstrap(read_frame(sys.stdin.buffer))
         execute(frame, channel)
     except Exception:

@@ -1,13 +1,20 @@
 """Loss is not success; delayed parent results cannot revive an admission."""
 from contextlib import closing
+import os
 import subprocess
 import sys
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from hermes_state import SessionDB
 from hermes_state_runtime import admit_session_input, begin_runtime_epoch, claim_session_input
+
+
+def hello(process):
+    """A direct child's self-introduction (no launcher: chain length 0)."""
+    return {'type': 'hello', 'pid': process.pid, 'birth': psutil.Process(process.pid).create_time(), 'ancestors': [os.getpid()]}
 
 
 def test_worker_loss_fences_same_generation_parent_result(tmp_path):
@@ -22,7 +29,7 @@ def test_worker_loss_fences_same_generation_parent_result(tmp_path):
         child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
-            scope = reserve_admission_worker(authority, admission_id=row['admission_id'], process=child, principal_id='human')
+            scope = reserve_admission_worker(authority, admission_id=row['admission_id'], process=child, principal_id='human', hello=hello(child))
             child.kill()
             child.wait(timeout=5)
             lose_admission_worker(authority, row, scope)

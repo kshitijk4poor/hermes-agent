@@ -55,6 +55,8 @@ def _bootstrap(authority, ref, row, policy, scope):
 class ManagedWorker:
     def __init__(self, process):
         self.process = process
+        # Verified interpreter behind the handle (a launcher trampoline may sit between).
+        self.worker = None
         self.write_lock = threading.Lock()
         self.commands = queue.Queue(maxsize=16)
         self.closed = threading.Event()
@@ -87,15 +89,32 @@ class ManagedWorker:
             self.process.stdin.write(encode_frame(frame))
             self.process.stdin.flush()
 
+    def _signal_worker(self, kill):
+        """Signal the verified interpreter, not only the handle: a launcher that exec-chained
+        or exited leaves the real worker outside the Popen's reach."""
+        import psutil
+        if self.worker is None or self.worker[0] == self.process.pid:
+            return
+        try:
+            proc = psutil.Process(self.worker[0])
+            if proc.create_time() == self.worker[1]:
+                (proc.kill if kill else proc.terminate)()
+        except psutil.Error:
+            pass
+
     def close(self):
         self.closed.set()
         if self.process.poll() is None:
+            self._signal_worker(kill=False)
             self.process.terminate()
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            self._signal_worker(kill=True)
             self.process.kill()
             self.process.wait(timeout=5)
+        else:
+            self._signal_worker(kill=True)
         if self.writer.ident is not None:
             self.writer.join(timeout=5)
         self.process.stdin.close()
@@ -165,8 +184,12 @@ async def execute_managed(authority, ref, row, policy):
     accepted = None
     scope = None
     try:
+        # The interpreter behind the handle introduces itself first; the owner verifies that
+        # identity (alive, same birth, descends from the handle) before reserving for it.
+        hello = await asyncio.to_thread(read_frame, process.stdout)
         scope = reserve_admission_worker(authority, admission_id=row['admission_id'],
-                    process=process, principal_id=row['principal_id'])
+                    process=process, principal_id=row['principal_id'], hello=hello)
+        worker.worker = (scope['pid'], scope['birth'])
         # The child reads nothing else until the exact reservation has committed.
         await asyncio.to_thread(worker.send, _bootstrap(authority, ref, row, policy, scope))
         worker.writer.start()
@@ -177,7 +200,7 @@ async def execute_managed(authority, ref, row, policy):
                 if _prompt_frame(authority, ref, row, worker, frame):
                     continue
             kind = frame.get('type')
-            if kind == 'ready' and set(frame) == {'type', 'pid'} and frame['pid'] == process.pid:
+            if kind == 'ready' and set(frame) == {'type', 'pid'} and frame['pid'] == scope['pid']:
                 continue
             if kind == 'delta' and set(frame) == {'type', 'text'} and isinstance(frame['text'], str):
                 authority.publish_execution(ref.session_id, row['generation'], 'message.delta', {'text': frame['text']})

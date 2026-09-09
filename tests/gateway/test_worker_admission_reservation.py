@@ -1,13 +1,20 @@
 """Owner-issued admission reservations never weaken idle public registration."""
+import os
 import subprocess
 import sys
 from types import SimpleNamespace
 
+import psutil
 import pytest
 
 from hermes_state import SessionDB
 from hermes_state_runtime import (admit_session_input, begin_runtime_epoch, claim_session_input,
                                   register_worker_execution, settle_session_input)
+
+
+def hello(process):
+    """A direct child's self-introduction (no launcher: chain length 0)."""
+    return {'type': 'hello', 'pid': process.pid, 'birth': psutil.Process(process.pid).create_time(), 'ancestors': [os.getpid()]}
 
 
 def test_started_admission_binds_only_exact_owned_process_and_principal(tmp_path):
@@ -20,7 +27,7 @@ def test_started_admission_binds_only_exact_owned_process_and_principal(tmp_path
         epoch = begin_runtime_epoch(db, instance_id='owner')
         authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
         admitted = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
-        kwargs = dict(admission_id=admitted['admission_id'], process=process, principal_id='human')
+        kwargs = dict(admission_id=admitted['admission_id'], process=process, principal_id='human', hello=hello(process))
         with pytest.raises(Exception, match='producer_not_started'):
             reserve_admission_worker(authority, **kwargs)
         claim = claim_session_input(db, epoch=epoch, session_id='owned')
@@ -58,7 +65,7 @@ async def test_reserved_process_uses_existing_authenticated_adoption_and_persist
         authority = SimpleNamespace(db=db, epoch=epoch, profile_id=str(tmp_path), _require_admission_open=lambda: None)
         admitted = admit_session_input(db, epoch=epoch, principal_id='human', session_id='owned', request_id='input', payload={})
         claim_session_input(db, epoch=epoch, session_id='owned')
-        scope = reserve_admission_worker(authority, admission_id=admitted['admission_id'], process=process, principal_id='human')
+        scope = reserve_admission_worker(authority, admission_id=admitted['admission_id'], process=process, principal_id='human', hello=hello(process))
         actor = SimpleNamespace(subject='human', profile_id=str(tmp_path), capabilities={'worker:adopt'})
         connection = SimpleNamespace(authority=authority, actor=actor)
         identity = {k: v for k, v in scope.items() if k != 'epoch'}
