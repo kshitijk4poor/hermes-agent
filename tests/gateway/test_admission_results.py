@@ -4,7 +4,7 @@ import pytest
 from hermes_state import SessionDB
 from hermes_state_runtime import (
     RuntimeStoreError, admit_session_input, begin_runtime_epoch,
-    claim_session_input, recover_session_inputs, settle_session_input,
+    claim_session_input, recover_session_inputs,
 )
 
 
@@ -19,9 +19,7 @@ def test_result_survives_restart_without_reexecuting(tmp_path):
     row = claim_session_input(db, epoch=epoch, session_id='api-session')
     result = {'final_response': 'reply', 'messages': [], 'usage': {'input_tokens': 7, 'output_tokens': 3}}
     retain_result(db, epoch=epoch, row=row, result=result)
-    assert admission_result(db, admitted['admission_id']) is None
-    settle_session_input(db, epoch=epoch, admission_id=row['admission_id'],
-                         generation=row['generation'], outcome='completed')
+    assert admission_result(db, admitted['admission_id']) == result
     db.close()
     db = SessionDB(path)
     try:
@@ -46,8 +44,6 @@ def test_stale_result_cannot_overwrite_settled_or_unknown_claim(tmp_path):
                             request_id='one', payload={'text': 'hello'})
         row = claim_session_input(db, epoch=epoch, session_id='api-session')
         retain_result(db, epoch=epoch, row=row, result={'final_response': 'first'})
-        settle_session_input(db, epoch=epoch, admission_id=row['admission_id'],
-                             generation=row['generation'], outcome='completed')
         with pytest.raises(RuntimeStoreError, match='stale_generation'):
             retain_result(db, epoch=epoch, row=row, result={'final_response': 'late'})
         assert admission_result(db, row['admission_id']) == {'final_response': 'first'}

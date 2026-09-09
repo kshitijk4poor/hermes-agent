@@ -18,7 +18,7 @@ from gateway.session_pending_controls import PendingControls
 from hermes_state_runtime import (
     RuntimeStoreError, admit_session_input, begin_runtime_epoch,
     cancel_session_input, claim_session_input, get_session_admission,
-    list_session_admissions, recover_session_inputs, settle_session_input,
+    list_session_admissions, recover_session_inputs,
 )
 
 
@@ -350,8 +350,9 @@ class SessionAuthority:
                 response = 'The admitted turn failed.'
                 outcome = 'failed'
             with live.event_stream.lock:
-                settled = settle_session_input(self.db, epoch=self.epoch, admission_id=admission_id,
-                                               generation=row['generation'], outcome=outcome)
+                from gateway.session_results import finish_result
+                settled, response = finish_result(self.db, epoch=self.epoch, row=row,
+                                                   response=response, outcome=outcome)
                 live.controls.snapshot(ref.session_id, None)
                 self._publish_pending(ref)
                 live.event_stream.publish(ref.session_id, {

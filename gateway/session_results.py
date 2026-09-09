@@ -1,33 +1,36 @@
-"""Private structured turn results; terminal receipts never precede retention.
-
-A crash between retention and settlement remains unknown, not a retryable result.
-The public stream keeps its text projection, not tool arguments or raw history.
-"""
+"""Exact execution results commit with settlement, before delivery/publication."""
 import json
 from contextvars import ContextVar
 
+from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, settle_session_input
+
 execution_result: ContextVar[dict | None] = ContextVar("execution_result", default=None)
-
-from hermes_state_runtime import RuntimeStoreError, _admission, _epoch, _json, _session
-
 _RESULT_PREFIX = 'gateway.admission.result.v1.'
 
 
 def retain_result(db, *, epoch, row, result):
-    encoded = _json(result)
+    return settle_session_input(db, epoch=epoch, admission_id=row['admission_id'],
+                                generation=row['generation'], outcome='completed', result=result)
 
-    def write(conn):
+
+def finish_result(db, *, epoch, row, response, outcome):
+    """Delivery failure cannot rewrite an already committed execution outcome."""
+    with db._read_ctx() as conn:
         _epoch(conn, epoch)
         current = _admission(conn, row['admission_id'])
-        session = _session(conn, current['target_session_id'])
-        if (current['status'] != 'started' or current['owner_epoch'] != epoch
-                or current['generation'] != row['generation']
-                or session['runtime_generation'] != row['generation']):
+        if current['owner_epoch'] != epoch or current['generation'] != row['generation']:
             raise RuntimeStoreError('stale_generation')
-        conn.execute('INSERT INTO state_meta(key,value) VALUES(?,?) '
-                     'ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                     (_RESULT_PREFIX + row['admission_id'], encoded))
-    db._execute_write(write)
+        if current['status'] == 'terminal':
+            saved = conn.execute('SELECT value FROM state_meta WHERE key=?',
+                                 (_RESULT_PREFIX + row['admission_id'],)).fetchone()
+            if saved is None:
+                raise RuntimeStoreError('storage_unavailable')
+            result = json.loads(saved[0])
+            return dict(current), result['result'].get('final_response') or ''
+    settled = settle_session_input(db, epoch=epoch, admission_id=row['admission_id'],
+        generation=row['generation'], outcome=outcome,
+        result={'result': {'final_response': response or '', 'messages': []}, 'usage': {}})
+    return settled, response
 
 
 def admission_result(db, admission_id):
