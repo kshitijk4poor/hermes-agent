@@ -644,11 +644,11 @@ class ProcessRegistry(ProcessCheckpointMixin):
         # process_loop and the gateway drain it after each agent turn to trigger new turns.
         import queue as _queue_mod
         self.completion_queue: _queue_mod.Queue = _queue_mod.Queue()
-        # Durable delegation completions are rehydrated by restore_completions(), NOT here: the
-        # module-level singleton runs __init__ on `import model_tools`, and the replay opens
-        # (creates, migrates) the launch profile's state.db (#123265). Importing the module is
-        # side-effect free and keeps its import-order contract for later completion writers.
-        import tools.async_delegation  # noqa: F401
+        # Durable delegation completions are NOT rehydrated here: this constructor runs at
+        # import time in every process that touches the tools graph (cron clients, `hermes
+        # sessions list`, workers), and restoring means writing the canonical ledger. Only
+        # the runtime that owns delegation state calls restore_undelivered_completions,
+        # explicitly (GatewayRunner._start_recover_previous_run).
         # Completions the agent already consumed via wait()/read_log() (output in
         # hand): drain loops AND gateway/tui watchers skip them.
         self._completion_consumed: set = set()
