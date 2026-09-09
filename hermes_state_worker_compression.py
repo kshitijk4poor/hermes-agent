@@ -422,7 +422,21 @@ def worker_compression_cleanup(db, conn, sid, payload):
     return {'value': None}
 
 
+def worker_compression_append(db, conn, sid, payload):
+    _fields(payload, ('messages', 'compression_lock_holder', 'turn_lease_holder', 'turn_lease_ttl_seconds'))
+    _handoff_messages(conn, sid, payload['messages'])
+    for key in ('compression_lock_holder', 'turn_lease_holder'):
+        if payload[key] is not None:
+            _text(payload[key])
+    if not 0.1 <= _number(payload['turn_lease_ttl_seconds']) <= 3600:
+        raise RuntimeStoreError('invalid_params')
+    count = db._append_messages_in_transaction(conn, sid, **payload)
+    return {'count': count, 'annotations': [
+        {key: msg[key] for key in ('_row_id', '_canonical_content') if key in msg} for msg in payload['messages']]}
+
+
 WORKER_COMPRESSION_HANDLERS = {
+    'compression.append': worker_compression_append,
     'compression.reopen': worker_reopen,
     'compression.cleanup': worker_compression_cleanup,
     'compression.watermark': worker_watermark,

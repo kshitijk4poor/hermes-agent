@@ -2,6 +2,16 @@
 
 
 class RuntimeSessionCompressionMixin:
+    def _append_compression_messages(self, session_id, messages, compression_lock_holder,
+                                     turn_lease_holder, turn_lease_ttl_seconds):
+        self._session(session_id)
+        result = self._apply('compression.append', dict(messages=messages,
+            compression_lock_holder=compression_lock_holder, turn_lease_holder=turn_lease_holder,
+            turn_lease_ttl_seconds=turn_lease_ttl_seconds))
+        for message, annotation in zip(messages, result['annotations'], strict=True):
+            message.update(annotation)
+        return result['count']
+
     def get_session(self, session_id):
         if session_id != self.scope['session_id']:
             from agent.runtime_session_store import WorkerPersistenceError
