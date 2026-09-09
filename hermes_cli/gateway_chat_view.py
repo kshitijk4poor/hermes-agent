@@ -18,6 +18,8 @@ class GatewayChatView:
         self.completions = {}
         self.changed = asyncio.Event()
         self.failure = None
+        from hermes_cli.gateway_mutations import PreparedMutations
+        self.mutations = PreparedMutations()
 
     def show_prompt(self, prompt):
         print(f"\n{prompt.get('description') or prompt.get('question') or 'Approval required'}", file=sys.stderr)
@@ -95,8 +97,21 @@ class GatewayChatView:
                 execution_generation=prompt["execution_generation"], prompt_id=prompt_id,
                 **({"choice": answer} if expected == "approval" else {"answer": answer}))
             return True
+        if command in {'/branch', '/model', '/compress'}:
+            from hermes_cli.gateway_mutations import slash_mutation
+            operation, payload = slash_mutation(command, rest.strip())
+            original = self.session_id
+            result = await self.mutations.apply(self.client, original, operation, payload)
+            target = result.get('branched_session_id', original)
+            snapshot = await self.client.rpc('session.resume', session_id=target)
+            self.session_id = target
+            self.generation = snapshot['execution_generation']
+            self.prompts = {p['prompt_id']: p for p in snapshot.get('prompts', [])}
+            self.mutations.acknowledge(original, operation, payload)
+            print(f"{operation}: {target}")
+            return True
         if command == "/help":
-            print("/stop, /approve <id> <choice>, /answer <id> <text>, /quit (detach). Other slash commands are not yet supported.")
+            print("/stop, /approve <id> <choice>, /answer <id> <text>, /quit (detach). /branch [title], /model <model> [--provider name], /compress [focus].")
             return True
         raise GatewayClientError("Unsupported gateway CLI command; use /help. No local command was run.")
 

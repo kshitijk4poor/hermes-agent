@@ -31,6 +31,8 @@ class GatewayACPAgent(acp.Agent):
         self._changed = asyncio.Condition()
         self._failure = None
         self._permissions = {}
+        from hermes_cli.gateway_mutations import PreparedMutations
+        self._mutations = PreparedMutations()
 
     def on_connect(self, conn):
         self._conn = conn
@@ -121,10 +123,26 @@ class GatewayACPAgent(acp.Agent):
                          execution_generation=snapshot["execution_generation"])
 
     async def fork_session(self, cwd, session_id, mcp_servers=None, **kwargs):
-        raise GatewayClientError("acp_fork_mutation_unavailable")
+        from acp.schema import ForkSessionResponse
+        client = await self._client()
+        info = await client.rpc('session.info', session_id=session_id)
+        if (mcp_servers or _normalize_cwd_for_compare(info.get('cwd', '')) !=
+                _normalize_cwd_for_compare(_translate_acp_cwd(cwd))):
+            raise GatewayClientError('cwd_policy_conflict')
+        result = await self._mutations.apply(client, session_id, 'branch', {})
+        child = result['branched_session_id']
+        self._snapshots[child] = await client.rpc('session.resume', session_id=child)
+        self._mutations.acknowledge(session_id, 'branch', {})
+        return ForkSessionResponse(session_id=child)
 
     async def set_session_model(self, model_id, session_id, **kwargs):
-        raise GatewayClientError("acp_model_mutation_unavailable")
+        from acp.schema import SetSessionModelResponse
+        client = await self._client()
+        payload = {'model': model_id}
+        await self._mutations.apply(client, session_id, 'model', payload)
+        self._snapshots[session_id] = await client.rpc('session.resume', session_id=session_id)
+        self._mutations.acknowledge(session_id, 'model', payload)
+        return SetSessionModelResponse()
 
     async def set_session_mode(self, mode_id, session_id, **kwargs):
         raise GatewayClientError("acp_edit_policy_mutation_unavailable")
@@ -149,8 +167,17 @@ class GatewayACPAgent(acp.Agent):
         if any(getattr(block, "type", None) != "text" for block in prompt):
             raise GatewayClientError("acp_content_unavailable")
         text = "\n".join(block.text for block in prompt)
-        if text.lstrip().startswith("/"):
-            raise GatewayClientError("acp_command_unavailable")
+        if text.lstrip().startswith('/'):
+            from hermes_cli.gateway_mutations import slash_mutation
+            parts = text.strip().split(None, 1)
+            operation, payload = slash_mutation(parts[0], parts[1] if len(parts) > 1 else '')
+            if operation == 'branch':
+                raise GatewayClientError('use_acp_fork_session')
+            client = await self._client()
+            await self._mutations.apply(client, session_id, operation, payload)
+            self._snapshots[session_id] = await client.rpc('session.resume', session_id=session_id)
+            self._mutations.acknowledge(session_id, operation, payload)
+            return PromptResponse(stop_reason='end_turn')
         client = await self._client()
         receipt = await client.rpc("prompt.submit", session_id=session_id,
                                    input_id=uuid.uuid4().hex, text=text)
