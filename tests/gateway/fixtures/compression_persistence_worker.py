@@ -56,8 +56,32 @@ def main():
         store.release_compression_lock(agent.session_id, 'stale-holder')
         assert store.get_compression_lock_holder(agent.session_id) == 'live-holder'
         store.release_compression_lock(agent.session_id, 'live-holder')
+        parent = agent.session_id
+        assert store.try_acquire_compression_lock(parent, 'rotation-holder')
+        watermark = store.get_active_message_watermark(parent)
+        store.append_messages_batch(parent, [{'role': 'user', 'content': 'CONCURRENT_TAIL',
+            'api_content': ' exact wire tail ', 'display_metadata': {'_accepted_input_id': 'tail-delivery'}}])
+        def lost_ack(method, **params):
+            rpc(method, **params)
+            raise TimeoutError('lost-ack')
+        store.rpc = lost_ack
+        try:
+            store.publish_compression_child(parent_session_id=parent, child_session_id='worker-rotated-child',
+                source='cli', messages=[{'role': 'assistant', 'content': 'ROTATED_SUMMARY'}],
+                system_prompt=prompt, compression_lock_holder='rotation-holder', watermark=watermark)
+            raise AssertionError('expected lost ack')
+        except TimeoutError:
+            pass
+        store.rpc = rpc
+        store.retry_pending()
+        assert store.scope['session_id'] == 'worker-rotated-child'
+        history = store.get_messages_as_conversation('worker-rotated-child', include_row_ids=True)
+        assert [m['content'] for m in history] == ['ROTATED_SUMMARY', 'CONCURRENT_TAIL']
+        assert history[-1]['api_content'] == ' exact wire tail '
+        assert history[-1]['display_metadata'] == {'_accepted_input_id': 'tail-delivery'}
+        assert store.get_compression_lineage('worker-rotated-child')[0] == before
         finished = store.finish()
-        proof = dict(before=before, after=agent.session_id, prompt=prompt, history=history,
+        proof = dict(before=before, after=store.scope['session_id'], prompt=prompt, history=history,
                      compressed_count=len(compressed), input_count=len(messages), opens=opens,
                      fds=writable_fds(), negatives=negatives, finished=finished)
         Path(command['receipt']).write_text(json.dumps(proof))
