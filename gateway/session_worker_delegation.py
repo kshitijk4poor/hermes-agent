@@ -184,3 +184,46 @@ def worker_delegation_handlers(execution_id, worker_pid, worker_birth):
     handlers['dispatch'] = partial(_dispatch, execution_id=execution_id, worker_pid=worker_pid, worker_birth=worker_birth)
     handlers.update({name: partial(_delivery, execution_id=execution_id, action=name) for name in _DELIVERY_UPDATES})
     return {'delegation.' + name: handler for name, handler in handlers.items()}
+
+
+def persist_worker_delegation(db, *, epoch, execution_id, session_id, generation,
+                              sequence, operation, payload, worker_pid, worker_birth):
+    """Closed ledger sibling of mutate_worker_execution, sharing its receipt stream.
+
+    Gateway calls this ONLY after its ordinary worker claim verification. The
+    verified process identity is deliberately separate from the operation payload.
+    """
+    from gateway.session_admission import admission_fingerprint
+    from hermes_state_runtime import _epoch, _worker_assignment, _json
+    handlers = worker_delegation_handlers(execution_id, worker_pid, worker_birth)
+    if type(sequence) is not int or sequence < 1 or not isinstance(operation, str) or operation not in handlers:
+        raise RuntimeStoreError('invalid_params')
+    encoded = _json(payload)
+    if len(encoded.encode('utf-8', errors='surrogatepass')) > 4 * 1024 * 1024:
+        raise RuntimeStoreError('invalid_params')
+    digest = admission_fingerprint(canonical_target=session_id,
+        payload={'operation': operation, 'payload': json.loads(encoded)})
+
+    def write(conn):
+        _epoch(conn, epoch)
+        row = _worker_assignment(conn, execution_id, session_id, generation)
+        if row['owner_epoch'] != epoch:
+            raise RuntimeStoreError('stale_epoch')
+        old = conn.execute('SELECT * FROM worker_receipts WHERE execution_id=? AND sequence=?',
+                           (execution_id, sequence)).fetchone()
+        if old is not None:
+            if old['payload_digest'] != digest:
+                raise RuntimeStoreError('admission_conflict')
+            return json.loads(old['result_json'])
+        if row['status'] not in ('registered', 'running'):
+            raise RuntimeStoreError('stale_generation')
+        if sequence != row['last_sequence'] + 1:
+            raise RuntimeStoreError('invalid_params')
+        result = handlers[operation](db, conn, session_id, json.loads(encoded))
+        conn.execute('INSERT INTO worker_receipts(execution_id,sequence,payload_digest,result_json) VALUES(?,?,?,?)',
+                     (execution_id, sequence, digest, json.dumps(result, ensure_ascii=True, allow_nan=False)))
+        conn.execute("UPDATE worker_executions SET last_sequence=?,status='running' WHERE execution_id=?",
+                     (sequence, execution_id))
+        conn.execute('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?', (session_id,))
+        return result
+    return db._execute_write(write, patience_s=db._TRANSCRIPT_WRITE_PATIENCE_S)
