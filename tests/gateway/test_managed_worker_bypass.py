@@ -41,7 +41,8 @@ def test_bypass_policy_routes_to_managed_worker_and_bootstrap_carries_flags(tmp_
     frame = smw._bootstrap(authority, ref, row, safe, scope)
     assert frame['safe_mode'] is True and frame['ignore_user_config'] is True
     assert isinstance(frame['policy']['config_json'], str)
-    assert validate_bootstrap(json.loads(json.dumps(frame))) == frame
+    wire = json.loads(json.dumps(frame))
+    assert validate_bootstrap(wire) is wire
     frame = smw._bootstrap(authority, ref, row, config_only, scope)
     assert frame['safe_mode'] is False and frame['ignore_user_config'] is True
     for bad in ({'safe_mode': 1}, {'ignore_user_config': 'yes'}, {'safe_mode': True, 'ignore_user_config': False}):
@@ -56,11 +57,11 @@ def test_worker_binds_bypass_policy_before_runtime_imports(tmp_path, mode):
     root = Path(__file__).resolve().parents[2]
     home = tmp_path / 'home'
     home.mkdir()
-    (home / 'config.yaml').write_text('model: [unterminated\n')
+    (home / 'config.yaml').write_text('model: [unterminated\n', encoding='utf-8')
     plugin = home / 'plugins' / 'sentinel'
     plugin.mkdir(parents=True)
-    (plugin / 'plugin.yaml').write_text('name: sentinel\nversion: 1.0.0\nkind: standalone\n')
-    (plugin / '__init__.py').write_text("import os; from pathlib import Path\nPath(os.environ['HERMES_HOME'], 'plugin-executed').touch()\ndef register(ctx): pass\n")
+    (plugin / 'plugin.yaml').write_text('name: sentinel\nversion: 1.0.0\nkind: standalone\n', encoding='utf-8')
+    (plugin / '__init__.py').write_text("import os; from pathlib import Path\nPath(os.environ['HERMES_HOME'], 'plugin-executed').touch()\ndef register(ctx): pass\n", encoding='utf-8')
     script = tmp_path / 'probe.py'
     script.write_text(f'''
 import json, os, sys, threading
@@ -84,7 +85,7 @@ with ThreadPoolExecutor(1) as pool:
 print(json.dumps({{'max_turns': cfg['agent']['max_turns'], 'raw_model': raw['model'], 'helper': helper,
     'opened': opened, 'plugins': sorted(get_plugin_manager()._plugins),
     'executed': os.path.exists(os.path.join(home, 'plugin-executed'))}}))
-''')
+''', encoding='utf-8')
     env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
     env.update(HOME=str(tmp_path), HERMES_HOME=str(home), PYTHONPATH=str(root))
     result = subprocess.run([sys.executable, str(script)], cwd=root, env=env, stdin=subprocess.DEVNULL,

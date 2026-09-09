@@ -11,7 +11,8 @@ import sys
 import threading
 
 MAX_FRAME = 4 * 1024 * 1024
-BOOTSTRAP_FIELDS = {'version', 'home', 'scope', 'policy', 'api_key', 'text', 'route', 'user_id', 'chat_id'}
+BOOTSTRAP_FIELDS = {'version', 'home', 'scope', 'policy', 'api_key', 'text', 'route', 'user_id', 'chat_id',
+                    'safe_mode', 'ignore_user_config'}
 
 
 def read_frame(stream):
@@ -42,9 +43,24 @@ def validate_bootstrap(frame):
             or scope['profile_id'] != frame['home'] or not Path(frame['home']).is_absolute()
             or not isinstance(frame['policy'], dict)
             or any(not isinstance(frame[k], str) for k in ('text', 'route', 'user_id', 'chat_id'))
+            or type(frame['safe_mode']) is not bool or type(frame['ignore_user_config']) is not bool
+            or (frame['safe_mode'] and not frame['ignore_user_config'])
             or (frame['api_key'] is not None and not isinstance(frame['api_key'], str))):
         raise ValueError('invalid_managed_worker_bootstrap')
     return frame
+
+
+def bind_bypass_policy(frame):
+    """Freeze the owner's bypass assignment process-wide before any config/provider/agent import.
+
+    Ordinary assignments bind nothing; the frozen explicit config (never the profile) is what
+    every config reader in this process returns afterwards.
+    """
+    if not frame['ignore_user_config']:
+        return
+    from agent.safe_worker_policy import _bind_safe_worker_policy
+    _bind_safe_worker_policy(safe_mode=frame['safe_mode'], ignore_user_config=True,
+                             config=json.loads(frame['policy']['config_json']))
 
 
 class WorkerChannel:
@@ -134,6 +150,9 @@ class WorkerControls:
 
 
 def execute(frame, channel):
+    # The owner RPC below imports gateway/config modules (hermes_cli.config, providers,
+    # hermes_cli.plugins) transitively; the policy must already be frozen when they load.
+    bind_bypass_policy(frame)
     from agent.runtime_session_store import RuntimeSessionStore, WorkerRPC
     scope = dict(frame['scope'])
     rpc = WorkerRPC(frame['home'])

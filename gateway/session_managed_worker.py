@@ -15,14 +15,18 @@ from hermes_state_runtime import RuntimeStoreError
 
 
 def managed_policy(authority, ref):
-    """Initial opt-in slice: explicit local custom-provider sessions only.
+    """Bypass (safe / config-only) sessions always execute out of process; other local
+    sessions only under the explicit custom-provider opt-in.
 
     The frozen creation snapshot, not current profile config, chooses execution.
-    Safe-mode policy can reuse execute_managed after its early-import gates land.
     """
     from gateway.session_policy import policy_for_source
     policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
-    if policy is None or policy.config().get('gateway', {}).get('managed_workers') is not True:
+    if policy is None:
+        return None
+    if policy.ignore_user_config:
+        return policy
+    if policy.config().get('gateway', {}).get('managed_workers') is not True:
         return None
     request = json.loads(policy.request_json)
     if policy.source != 'cli' or request.get('provider') != 'custom' or not request.get('base_url'):
@@ -44,7 +48,8 @@ def _bootstrap(authority, ref, row, policy, scope):
     return {'version': 1, 'home': authority.profile_id, 'scope': scope,
             'policy': asdict(hydrated), 'api_key': launch_key(authority, policy),
             'text': row['payload']['text'], 'route': live.route,
-            'user_id': live.source.user_id, 'chat_id': live.source.chat_id}
+            'user_id': live.source.user_id, 'chat_id': live.source.chat_id,
+            'safe_mode': policy.safe_mode, 'ignore_user_config': policy.ignore_user_config}
 
 
 class ManagedWorker:
