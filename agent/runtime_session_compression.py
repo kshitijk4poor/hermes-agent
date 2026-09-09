@@ -37,6 +37,37 @@ class RuntimeSessionCompressionMixin:
             include_inactive=include_inactive, repair_alternation=repair_alternation,
             include_row_ids=include_row_ids, include_compacted=include_compacted))['messages']
 
+    def get_active_message_watermark(self, session_id):
+        self._session(session_id)
+        return self._apply('compression.watermark', {})['value']
+
+    def archive_and_compact(self, session_id, compacted_messages, model_config_patch=None,
+                            watermark=None, lock_holder=None, tail_count=0):
+        self._session(session_id)
+        return self._apply('compression.archive', dict(messages=compacted_messages,
+            model_config_patch=model_config_patch, watermark=watermark, lock_holder=lock_holder,
+            tail_count=tail_count))['value']
+
+    def publish_compression_child(self, *, parent_session_id, child_session_id, source, messages,
+            model=None, model_config=None, system_prompt=None, cwd=None, profile_name=None,
+            compression_lock_holder=None, require_compression_lease=True, require_lease_refresh=False,
+            lease_ttl_seconds=300.0, watermark=None, watermark_ceiling=None):
+        self._session(parent_session_id)
+        self._apply('compression.publish', dict(child_session_id=child_session_id, source=source,
+            messages=messages, model=model, model_config=model_config, system_prompt=system_prompt,
+            cwd=cwd, profile_name=profile_name, compression_lock_holder=compression_lock_holder,
+            require_compression_lease=require_compression_lease, require_lease_refresh=require_lease_refresh,
+            lease_ttl_seconds=lease_ttl_seconds, watermark=watermark, watermark_ceiling=watermark_ceiling))
+
+    def _compression_receipt_journal(self, candidate, result):
+        assignment = result.get('worker_assignment')
+        if assignment:
+            from agent.runtime_session_store import WorkerPersistenceError
+            if assignment['parent'] != self.scope['session_id']:
+                raise WorkerPersistenceError('outbox_scope_mismatch')
+            candidate = dict(candidate, scope=dict(self.scope, session_id=assignment['session_id']))
+        return candidate
+
     def try_acquire_compression_lock(self, session_id, holder, ttl_seconds=300.0):
         self._session(session_id)
         return self._apply('compression.lock.acquire', {'holder': holder, 'ttl_seconds': ttl_seconds})['value']
