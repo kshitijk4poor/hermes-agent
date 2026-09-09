@@ -50,12 +50,23 @@ def probe(base):
             await rpc(ws, 'prompt.submit', session_id=sid, input_id='hold', text='HOLD_AUTOMATION')
             assert await asyncio.to_thread(model.blocked.wait, 20)
             from tools.bot_mode_dm import _admit_live_dm
+            from tools.bot_live_delivery import _locked, _write, _read
+            legacy_owner = dict(profile_home=str(home), session_id=sid, lease_id='departed', live_session_id='old-ui')
+            with _locked(home) as mailbox:
+                for key, status, text in [('b' * 32, 'queued', 'LEGACY_QUEUED_ONCE'),
+                                          ('c' * 32, 'claimed', 'LEGACY_CLAIMED_NEVER')]:
+                    _write(mailbox / f'{key}.json', dict(delivery_id=key, id=key, owner=legacy_owner,
+                        **legacy_owner, message=text, status=status, created_at=1, sequence=1))
             dm = home / 'local-dm.txt'
             dm.write_text('[Message from @local-sender] LOCAL_DM_ONCE')
             local = await asyncio.to_thread(_admit_live_dm, home, str(dm))
             assert local is not None and local['status'] == 'queued', local
             same = await asyncio.to_thread(_admit_live_dm, home, str(dm))
             assert same['admission_id'] == local['admission_id'], same
+            with _locked(home) as mailbox:
+                migrated = _read(mailbox / ('b' * 32 + '.json'))
+                unknown = _read(mailbox / ('c' * 32 + '.json'))
+            assert migrated.get('admission_id') and unknown['status'] == 'ambiguous', (migrated, unknown)
             params = {'id': 'a' * 32, 'profile': 'default', 'message': '[Message from @sender] BOT_DM_ONCE'}
             wrong = await rpc(ws, 'bot_relay.deliver', **{**params, 'profile': 'wrong-profile'})
             assert wrong['error']['message'] == 'profile_mismatch', wrong
@@ -79,6 +90,9 @@ def probe(base):
         texts = [next((m.get('content', '') for m in reversed(r['messages']) if m['role'] == 'user'), '')
                  for r in model.requests if r.get('messages')]
         assert sum('BOT_DM_ONCE' in str(t) for t in texts) == 1, texts
+        assert sum('LOCAL_DM_ONCE' in str(t) for t in texts) == 1, texts
+        assert sum('LEGACY_QUEUED_ONCE' in str(t) for t in texts) == 1, texts
+        assert not any('LEGACY_CLAIMED_NEVER' in str(t) for t in texts), texts
         print(json.dumps({'ledger': rows(), 'inputs': texts, 'lost_ack': True, 'same_target': sid}))
 
     try:

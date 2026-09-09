@@ -65,6 +65,28 @@ async def _record_reply(authority, home, key, future):
         _write(path, record)
 
 
+async def _migrate(authority, actor, home, root):
+    records = [(path, _read(path)) for path in root.glob('*.json')]
+    legacy = [(path, record) for path, record in records
+              if record and 'owner' in record and not record.get('admission_id')
+              and record['status'] in {'queued', 'claimed'}]
+    if not legacy:
+        return
+    ref, live, entry = _target(authority, actor)
+    for path, record in sorted(legacy, key=lambda item: (item[1].get('sequence', item[1]['created_at']), item[0].name)):
+        owner = record['owner']
+        if owner['profile_home'] != str(home):
+            continue
+        if record['status'] == 'claimed':
+            record.update(status='ambiguous', reason='unknown_execution')
+            _write(path, record)
+            continue
+        if authority.db.get_compression_tip(owner['session_id']) != entry.session_id:
+            continue
+        await _admit(authority, actor, home, root, _delivery_id(record['delivery_id']),
+                     record['message'], ref, live, entry, legacy=record)
+
+
 async def deliver(connection, params):
     authority, actor = connection.authority, connection.actor
     home = _home(authority, actor, params.get('profile'))
@@ -79,6 +101,7 @@ async def deliver(connection, params):
         raise RuntimeStoreError('invalid_params')
     authority._require_admission_open()
     with _locked(home) as root:
+        await _migrate(authority, actor, home, root)
         path = root / f'{key}.json'
         record = _read(path)
         if record is not None and record.get('admission_id'):
@@ -91,24 +114,29 @@ async def deliver(connection, params):
         ref, live, entry = _target(authority, actor)
         if params.get('session_id', entry.session_id) != entry.session_id:
             raise RuntimeStoreError('admission_conflict')
-        event = MessageEvent(text=message, source=live.source, internal=True,
-            message_id='bot:' + key, metadata={'gateway_session_key': live.route,
-                                             'gateway_session_id': entry.session_id})
-        # Pin the physical target before committing. A process death in this
-        # two-store window leaves an explicit unknown record, never a new target.
-        record = dict(delivery_id=key, profile_home=str(home), session_id=ref.session_id,
-            principal_id=actor.subject, message=message, status='ambiguous')
-        _write(path, record)
-        receipt = await authority.admit_automation(authority.runner._adapter_for_source(live.source), event, 'bot:' + key)
-        record.update(status='canonical', admission_id=receipt.admission_id)
-        _write(path, record)
-        if receipt.status in {'queued', 'started'}:
-            future = authority.waiters.setdefault(receipt.admission_id, asyncio.get_running_loop().create_future())
-            task = asyncio.create_task(_record_reply(authority, home, key, future))
-            # Keep receipt publication independent of the requesting WebSocket.
-            tasks = getattr(authority, '_bot_receipt_tasks', None)
-            if tasks is None:
-                tasks = authority._bot_receipt_tasks = set()
-            tasks.add(task)
-            task.add_done_callback(tasks.discard)
-        return _result(authority, record)
+        return await _admit(authority, actor, home, root, key, message, ref, live, entry)
+
+
+async def _admit(authority, actor, home, root, key, message, ref, live, entry, legacy=None):
+    path = root / f'{key}.json'
+    event = MessageEvent(text=message, source=live.source, internal=True,
+        message_id='bot:' + key, metadata={'gateway_session_key': live.route,
+                                         'gateway_session_id': entry.session_id})
+    # Pin the physical target before committing. A process death in this
+    # two-store window leaves an explicit unknown record, never a new target.
+    record = dict(legacy or {}, delivery_id=key, profile_home=str(home), session_id=ref.session_id,
+        principal_id=actor.subject, message=message, status='ambiguous')
+    _write(path, record)
+    receipt = await authority.admit_automation(authority.runner._adapter_for_source(live.source), event, 'bot:' + key)
+    record.update(status='canonical', admission_id=receipt.admission_id)
+    _write(path, record)
+    if receipt.status in {'queued', 'started'}:
+        future = authority.waiters.setdefault(receipt.admission_id, asyncio.get_running_loop().create_future())
+        task = asyncio.create_task(_record_reply(authority, home, key, future))
+        # Keep receipt publication independent of the requesting WebSocket.
+        tasks = getattr(authority, '_bot_receipt_tasks', None)
+        if tasks is None:
+            tasks = authority._bot_receipt_tasks = set()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+    return _result(authority, record)
