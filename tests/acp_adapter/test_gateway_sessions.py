@@ -17,7 +17,7 @@ from tests.gateway.test_normal_runtime_boot import control, model_peer  # noqa: 
 
 
 @pytest.fixture
-def daemon(tmp_path, model_peer):
+def daemon(tmp_path, model_peer, request):
     home = tmp_path / "state"
     home.mkdir(mode=0o700)
     user = tmp_path / "user"
@@ -35,9 +35,25 @@ def daemon(tmp_path, model_peer):
                PYTHONPATH=str(root), PYTHONUNBUFFERED="1",
                OPENAI_API_KEY="loopback-only", OPENAI_BASE_URL=model_url,
                HERMES_ACP_SKIP_CONFIGURED_MCP="1")
+    command = [sys.executable, "-m", "gateway.run"]
+    if getattr(request, 'param', None) == 'proposed-acp-descriptor':
+        # API-owner handoff only: execution/create/policy stay unmodified. This
+        # fixture explicitly distinguishes the proposed advert from shipped HEAD.
+        command = [sys.executable, '-c', '''
+from gateway.session_controls import AuthorityConnection
+original = AuthorityConnection.describe
+async def describe(self, ref, params):
+    result = await original(self, ref, params)
+    result['session_create']['sources'].append('acp')
+    result['capabilities'].append('acp-editor-policy-v1')
+    return result
+AuthorityConnection.describe = describe
+import runpy
+runpy.run_module('gateway.run', run_name='__main__')
+''']
     log_path = tmp_path / "gateway.log"
     with log_path.open("w") as log:
-        process = subprocess.Popen([sys.executable, "-m", "gateway.run"], cwd=root, env=env,
+        process = subprocess.Popen(command, cwd=root, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 40
