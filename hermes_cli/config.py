@@ -1941,20 +1941,11 @@ def _raw_config_cache_hit(path_key: str, cache_key: Tuple[Any, ...]) -> Optional
 
 
 def _read_raw_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
-    # Lock-free fast path for cache hits — same shape as `_load_config_impl`. `_RAW_CONFIG_CACHE`
-    # publishes each entry as ONE `(*sig, data)` tuple replaced wholesale, so a reader sees either
-    # the complete old entry or the complete new one; `_CONFIG_LOCK` only serializes the re-parse
-    # and the writers (`save_config()` holds it across an atomic YAML write, which used to stall
-    # every cached read for the duration). A lost race just falls through to the locked re-check.
-    try:
-        config_path = get_config_path()
-        cache_key = file_signature(config_path.stat())
-        hit = _raw_config_cache_hit(str(config_path), cache_key)
-        if hit is not None:
-            return copy.deepcopy(hit) if want_deepcopy else hit
-    except Exception:
-        pass
+    from agent.safe_worker_policy import worker_config_snapshot
 
+    snapshot = worker_config_snapshot()
+    if snapshot is not None:
+        return snapshot
     with _CONFIG_LOCK:
         config_path = get_config_path()
         try:
@@ -2355,23 +2346,11 @@ def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[Dict[str, 
 
 
 def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
-    # Lock-free fast path for cache hits — same publication contract as `_read_raw_config_impl`
-    # above (whole-tuple replace, `_CONFIG_LOCK` only serializes rebuilds and writers). A hit costs
-    # ~0.024ms; behind a lock held by `save_config()` the same read measured 10010ms, and on a
-    # gateway that stalls every inbound message's hook path. A lost race falls through to the lock.
-    try:
-        config_path = get_config_path()
-        path_key = str(config_path)
-        if path_key in _LOAD_CONFIG_CACHE:
-            _, fast_sig = _load_config_cache_sig(config_path)
-            hit = _load_config_cache_hit(path_key, fast_sig)
-            if hit is not None:
-                return copy.deepcopy(hit) if want_deepcopy else hit
-    except Exception:
-        # Any surprise here falls through to the locked path, which is the
-        # original fully-defensive implementation.
-        pass
+    from agent.safe_worker_policy import worker_config_snapshot
 
+    snapshot = worker_config_snapshot()
+    if snapshot is not None:
+        return _deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot)
     with _CONFIG_LOCK:
         ensure_hermes_home()
         config_path = get_config_path()
