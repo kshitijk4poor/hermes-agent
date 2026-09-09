@@ -90,6 +90,9 @@ def _import(db, conn, session_id, payload):
     for item in normalized:
         raw = item['session']
         sid = raw['id']
+        from hermes_state_mutation_retirement import RETIRED_PREFIX
+        if conn.execute('SELECT 1 FROM state_meta WHERE key=?', (RETIRED_PREFIX + sid,)).fetchone():
+            raise RuntimeStoreError('admission_conflict')
         if conn.execute('SELECT 1 FROM sessions WHERE id=?', (sid,)).fetchone():
             skipped.append(sid)
             continue
