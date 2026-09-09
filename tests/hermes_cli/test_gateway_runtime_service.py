@@ -237,7 +237,9 @@ def test_native_task_query_uses_installed_xml_and_vendor_launcher(wrong, tmp_pat
     home.mkdir()
     monkeypatch.setenv('HERMES_HOME', str(home))
     script = home / 'gateway.vbs'
-    script.write_text(_build_gateway_vbs_script(sys.executable, str(home), str(home), ''), encoding='utf-8')
+    # newline='' mirrors the installer's _atomic_write: the template is already CRLF and
+    # Windows text mode would otherwise double it to \r\r\n, which is not the vendor template.
+    script.write_text(_build_gateway_vbs_script(sys.executable, str(home), str(home), ''), encoding='utf-8', newline='')
     original = script.read_bytes()
     # whoami is read-only native account evidence; no task-manager mutation.
     identity = subprocess.run(['whoami.exe', '/USER', '/FO', 'CSV', '/NH'], stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
