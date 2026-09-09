@@ -363,6 +363,8 @@ class SessionAuthority:
                 response = await execute_admission(self, ref, row)
                 outcome = 'completed'
             except Exception:
+                import logging
+                logging.getLogger(__name__).exception('Admitted turn %s failed', admission_id)
                 response = 'The admitted turn failed.'
                 outcome = 'failed'
             with live.event_stream.lock:

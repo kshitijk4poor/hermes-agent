@@ -83,7 +83,8 @@ async def deliver_response(adapter, event, session_key, response):
     if extracted.text_content:
         await adapter._send_final_text(event, session_key, extracted.text_content,
                                        metadata, ttl > 0, ttl, results.append)
-    await adapter._deliver_attachments(event, extracted, metadata, anything_sent=bool(results))
+    await adapter._deliver_attachments(event, extracted, metadata, anything_sent=bool(results),
+                                       record_delivery=results.append)
 
 
 async def dispatch_shared_busy(adapter, event, session_key):
