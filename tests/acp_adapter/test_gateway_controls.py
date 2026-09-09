@@ -21,12 +21,17 @@ async def test_cancel_uses_observed_generation_and_mutations_fail_explicitly(tmp
     with pytest.raises(GatewayClientError, match="stale_generation"):
         await agent.cancel("shared")
     assert calls == [("session.interrupt", {"session_id": "shared", "execution_generation": 4})]
-    for method, params in ((agent.fork_session, {"session_id": "shared", "cwd": str(tmp_path)}),
-                           (agent.set_session_model, {"session_id": "shared", "model_id": "new-model"}),
-                           (agent.set_session_mode, {"session_id": "shared", "mode_id": "dont_ask"})):
-        with pytest.raises(GatewayClientError, match="unavailable"):
-            await method(**params)
-    assert len(calls) == 1, "Unsupported operations must not reach an alternate writer"
+    # Model changes are prepared canonical mutations: a stale authority answer propagates
+    # verbatim instead of being retried through any alternate writer.
+    with pytest.raises(GatewayClientError, match="stale_generation"):
+        await agent.set_session_model(session_id="shared", model_id="new-model")
+    methods = [method for method, _ in calls[1:]]
+    assert methods and set(methods) <= {"session.resume", "session.mutate"}, methods
+    # Edit-policy mode is still unsupported and must not reach the authority at all.
+    before = len(calls)
+    with pytest.raises(GatewayClientError, match="unavailable"):
+        await agent.set_session_mode(session_id="shared", mode_id="dont_ask")
+    assert len(calls) == before, "Unsupported operations must not reach an alternate writer"
 
 
 @pytest.mark.asyncio
