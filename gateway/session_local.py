@@ -129,4 +129,4 @@ def local_session_info(authority, ref):
     policy = policy_for_source(authority.runner, live.source)
     return {'source': policy.source if policy else live.source.platform.value,
             'model': getattr(agent, 'model', policy.model if policy else None), 'lazy': agent is None,
-            'profile_id': authority.profile_id}
+            'profile_id': authority.profile_id, **({'cwd': policy.cwd} if policy else {})}

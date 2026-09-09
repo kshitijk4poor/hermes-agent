@@ -228,9 +228,13 @@ class GatewayACPAgent(acp.Agent):
             allow_permanent="always" in choices, allow_session="session" in choices)
             if _OPTION_ID_TO_HERMES[option.option_id] in choices]
         try:
+            if 'edit' in prompt:
+                from acp_adapter.edit_approval import EditProposal, build_acp_edit_tool_call
+                tool_call = build_acp_edit_tool_call(EditProposal(**prompt['edit']))
+            else:
+                tool_call = _build_permission_tool_call(prompt.get('command', ''), prompt.get('description', ''))
             response = await self._conn.request_permission(session_id=session_id,
-                tool_call=_build_permission_tool_call(prompt.get("command", ""), prompt.get("description", "")),
-                options=options)
+                tool_call=tool_call, options=options)
             # Transport loss/cancel is not a denial: the canonical waiter belongs
             # to the execution and may still be answered by another viewer.
             if not isinstance(response.outcome, AllowedOutcome):
