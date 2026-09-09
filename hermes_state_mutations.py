@@ -13,6 +13,8 @@ def validate_action(operation, payload):
         return
     if operation == 'branch' and (not payload or (set(payload) == {'title'} and isinstance(payload['title'], str))):
         return
+    if operation == 'compress' and (not payload or (set(payload) == {'focus'} and isinstance(payload['focus'], str))):
+        return
     if operation in {'delete', 'reset'} and not payload:
         return
     if operation == 'import' and set(payload) == {'sessions'} and isinstance(payload['sessions'], list):
@@ -32,6 +34,9 @@ def validate_action(operation, payload):
 
 
 def apply_action(db, conn, session_id, operation, payload, *, prepared=None):
+    if operation == 'compress':
+        from hermes_state_mutation_compress import compress_in_transaction
+        return compress_in_transaction(db, conn, session_id, payload, prepared)
     if operation == 'model':
         from hermes_state_mutation_prepared import model_in_transaction
         return model_in_transaction(db, conn, session_id, payload, prepared)

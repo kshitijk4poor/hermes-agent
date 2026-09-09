@@ -7,7 +7,6 @@ branch/compress/model still require their own prepared runtime publication.
 from hermes_state_runtime import RuntimeStoreError, mutate_runtime_session
 
 _METADATA = frozenset({'rename', 'archive', 'sidebar'})
-_RUNTIME_ACTIONS = frozenset({'compress'})
 _FIELDS = frozenset({'session_id', 'request_id', 'expected_revision', 'operation', 'payload'})
 
 
@@ -69,9 +68,6 @@ async def mutate_session(authority, actor, ref, params):
         if operation in {'rewind', 'reset'} and not callable(getattr(authority.runner, '_evict_cached_agent', None)):
             raise RuntimeStoreError('runtime_coordination_required')
 
-    if operation in _RUNTIME_ACTIONS:
-        live_guard([ref.session_id])
-        raise RuntimeStoreError('runtime_coordination_required')
     def authorize_write(conn):
         from hermes_state_mutation_binding import authorize_history, import_history_control
         if operation == 'import':
@@ -81,7 +77,7 @@ async def mutate_session(authority, actor, ref, params):
             raise RuntimeStoreError('permission_denied')
 
     prepared = None
-    if operation == 'model':
+    if operation in {'model', 'compress'}:
         prepared = mutate_runtime_session(authority.db, epoch=authority.epoch,
             principal_id=actor.subject, session_id=ref.session_id, request_id=params['request_id'],
             expected_revision=params['expected_revision'], expected_generation=params.get('expected_generation'),
@@ -89,7 +85,9 @@ async def mutate_session(authority, actor, ref, params):
         if 'snapshot' not in prepared:
             return prepared
         from gateway.session_mutation_model import prepare_model
-        prepared = await prepare_model(authority, live, params['payload'], prepared)
+        from gateway.session_mutation_compress import prepare_compress
+        prepare = {'model': prepare_model, 'compress': prepare_compress}[operation]
+        prepared = await prepare(authority, live, params['payload'], prepared)
         applied = False
     result = mutate_runtime_session(authority.db, epoch=authority.epoch,
         principal_id=actor.subject, session_id=ref.session_id, request_id=params['request_id'],
@@ -102,7 +100,7 @@ async def mutate_session(authority, actor, ref, params):
     if operation == 'branch':
         from gateway.session_local_recovery import restore_local_session
         restore_local_session(authority, result['branched_session_id'])
-    if operation == 'reset' and applied:
+    if operation in {'reset', 'compress'} and applied:
         from gateway.session_local_recovery import restore_local_session
         restore_local_session(authority, ref.session_id)
         authority.runner._evict_cached_agent(authority.sessions[ref.session_id].route)
