@@ -4,15 +4,15 @@ import runpy
 import signal
 from gateway import session_results
 
-retain = session_results.retain_result
+finish = session_results.finish_result
 
 
-def stop_after_commit(db, *, epoch, row, result):
-    receipt = retain(db, epoch=epoch, row=row, result=result)
+def stop_after_commit(db, *, epoch, row, response, outcome, result=None):
+    receipt = finish(db, epoch=epoch, row=row, response=response, outcome=outcome, result=result)
     if row['payload'].get('text') == 'BLOCK_STARTED':
         os.kill(os.getpid(), signal.SIGSTOP)
     return receipt
 
 
-session_results.retain_result = stop_after_commit
+session_results.finish_result = stop_after_commit
 runpy.run_module('gateway.run', run_name='__main__')

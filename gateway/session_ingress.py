@@ -45,7 +45,7 @@ async def execute_admission(authority, ref, row):
         scope = _profile_runtime_scope(home)
     from gateway.config import Platform
     from gateway.session_api_turn import api_execution, prepare_api_execution
-    from gateway.session_results import execution_result, retain_result
+    from gateway.session_results import execution_result
     is_api = live.source.platform == Platform.API_SERVER
     prepared = prepare_api_execution(authority, ref, row['payload']) if is_api else None
     if is_api:
@@ -58,8 +58,9 @@ async def execute_admission(authority, ref, row):
         with scope:
             response = await authority.runner._handle_message(event)
             result = captured.get('result') or {'final_response': response or '', 'messages': []}
-            retain_result(authority.db, epoch=authority.epoch, row=row,
-                          result={'result': result, 'usage': captured.get('usage', {})})
+            # The drain commits this under the stream lock so no viewer reads `terminal`
+            # before the completion event exists in the replay ring.
+            authority.pending_results[row['admission_id']] = {'result': result, 'usage': captured.get('usage', {})}
             if not native and not is_api and response:
                 adapter = authority.runner._adapter_for_source(event.source)
                 if adapter is not None:

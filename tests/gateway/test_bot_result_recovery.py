@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from hermes_state import SessionDB
 from hermes_state_runtime import (
     admit_session_input, begin_runtime_epoch, claim_session_input,
-    recover_session_inputs, settle_session_input,
+    recover_session_inputs,
 )
 from gateway.session_results import retain_result
 from gateway.session_bot import _result
@@ -22,10 +22,9 @@ def test_bot_reply_recovery_uses_exact_terminal_admission(tmp_path):
         admission = admit_session_input(db, epoch=epoch, principal_id='owner', session_id='bot',
                                        request_id=key, payload={'text': key})
         row = claim_session_input(db, epoch=epoch, session_id='bot')
-        retain_result(db, epoch=epoch, row=row, result={'result': {'final_response': reply}, 'usage': {}})
+        # retain_result IS the settlement: the result commits with terminal status or not at all.
         if settle:
-            settle_session_input(db, epoch=epoch, admission_id=row['admission_id'],
-                                 generation=row['generation'], outcome='completed')
+            retain_result(db, epoch=epoch, row=row, result={'result': {'final_response': reply}, 'usage': {}})
         records.append(dict(status='canonical', admission_id=admission['admission_id'],
                             delivery_id=key, profile_home=str(tmp_path), session_id='bot'))
     db.close()

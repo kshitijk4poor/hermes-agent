@@ -46,6 +46,7 @@ class SessionAuthority:
         self.waiters = {}
         self.events = {}
         self.native_waiters = set()
+        self.pending_results = {}
 
     def authorize(self, actor, ref, capability):
         if actor.profile_id != self.profile_id or ref.profile_id != self.profile_id:
@@ -352,7 +353,8 @@ class SessionAuthority:
             with live.event_stream.lock:
                 from gateway.session_results import finish_result
                 settled, response = finish_result(self.db, epoch=self.epoch, row=row,
-                                                   response=response, outcome=outcome)
+                    response=response, outcome=outcome,
+                    result=self.pending_results.pop(admission_id, None))
                 live.controls.snapshot(ref.session_id, None)
                 self._publish_pending(ref)
                 live.event_stream.publish(ref.session_id, {
