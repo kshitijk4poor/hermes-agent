@@ -14,12 +14,18 @@ from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 # the authority. Reject them, rather than mutate process-wide gateway settings.
 _UNSUPPORTED = (
     "image", "skills", "worktree", "w", "checkpoints", "pass_session_id",
-    "ignore_user_config", "safe_mode", "yolo", "accept_hooks",
+    "yolo", "accept_hooks",
     "continue_last", "create_if_missing", "no_restore_cwd", "usage_file",
     "run_budget", "verbose", "compact",
     "list_tools", "list_toolsets",
 )
-_POLICY = ("model", "provider", "reasoning", "toolsets", "max_turns", "base_url", "ignore_rules", "api_key")
+_POLICY = ("model", "provider", "reasoning", "toolsets", "max_turns", "base_url", "ignore_rules", "api_key",
+           "safe_mode", "ignore_user_config")
+
+
+def bypass_launch(args) -> bool:
+    """--safe-mode / --ignore-user-config: the owner freezes code defaults, the client reads no profile."""
+    return bool(getattr(args, "safe_mode", False) or getattr(args, "ignore_user_config", False))
 
 
 def validate_options(args):
@@ -32,6 +38,8 @@ def validate_options(args):
     if getattr(args, "resume", None) and (getattr(args, "in_dir", None) or getattr(args, "source", None) or
             any(getattr(args, name, None) not in (None, False) for name in _POLICY)):
         raise GatewayClientError("Resume retains gateway session policy; creation overrides are unsupported on resume.")
+    if bypass_launch(args) and not getattr(args, "model", None):
+        raise GatewayClientError("--safe-mode / --ignore-user-config read no profile default: pass --model explicitly.")
 
 
 async def run_gateway_chat(args):
@@ -46,7 +54,7 @@ async def run_gateway_chat(args):
             if source not in contract.get("sources", []):
                 raise GatewayClientError(f"Gateway does not support source {source!r}")
             parameters = contract.get("parameters", [])
-            policy = {key: getattr(args, key) for key in _POLICY if getattr(args, key, None) is not None}
+            policy = {key: getattr(args, key) for key in _POLICY if getattr(args, key, None) not in (None, False)}
             if isinstance(policy.get("toolsets"), str):
                 policy["toolsets"] = [name.strip() for name in policy["toolsets"].split(",") if name.strip()]
             cwd = str(Path(getattr(args, "in_dir", None) or os.getcwd()).expanduser().resolve())

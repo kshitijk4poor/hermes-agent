@@ -2128,10 +2128,24 @@ def _bridge_config_to_env(_cfg: dict) -> None:
 
 
 def _load_bridge_config(config_path: Path) -> dict:
-    """Effective USER config (no defaults) for the presence-sensitive env bridge: only keys the user
-    or the managed layer wrote get bridged, else all of DEFAULT_CONFIG would be exported."""
-    from hermes_cli.config_effective import load_user_config_effective
-    return load_user_config_effective(config_path)
+    """Raw config read for the presence-sensitive env bridge, with the managed overlay applied. Raw (not
+    defaults-merged) so only keys the user wrote are bridged, else all of DEFAULT_CONFIG would be
+    exported; the overlay applies BEFORE bridging so pinned values win in env too. A bypass worker
+    bridges its frozen explicit snapshot instead: the profile file is exactly what it must not read."""
+    from agent.safe_worker_policy import worker_config_snapshot
+    snapshot = worker_config_snapshot()
+    if snapshot is not None:
+        return snapshot
+    from hermes_cli.config import _expand_env_vars, read_user_config_raw
+    cfg = _expand_env_vars(read_user_config_raw(config_path))
+    if not isinstance(cfg, dict):
+        cfg = {}
+    try:
+        from hermes_cli import managed_scope
+        cfg = managed_scope.apply_managed_overlay(cfg)
+    except Exception:
+        pass
+    return cfg
 
 
 _config_path = _hermes_home / 'config.yaml'

@@ -1827,7 +1827,7 @@ _CHAT_PASSTHROUGH = (
 
 def cmd_chat(args):
     """Run interactive chat CLI."""
-    if not _resolve_use_tui(args):
+    if _bypass_chat_launch(args) or not _resolve_use_tui(args):
         from hermes_cli.gateway_chat_startup import launch_gateway_chat
         sys.exit(launch_gateway_chat(args))
     _apply_safe_mode(args)
@@ -2969,6 +2969,8 @@ _AGENT_SUBCOMMANDS = {
 
 
 def _is_tui_chat_launch(args) -> bool:
+    if _bypass_chat_launch(args):
+        return False
     if getattr(args, "tui", False) or os.environ.get("HERMES_TUI") == "1":
         return True
     # The chat path decides TUI-vs-classic via _resolve_use_tui (--cli/--tui
@@ -2982,6 +2984,14 @@ def _is_tui_chat_launch(args) -> bool:
     if getattr(args, "command", None) not in {None, "chat"}:
         return False
     return _resolve_use_tui(args)
+
+
+def _bypass_chat_launch(args) -> bool:
+    """--safe-mode / --ignore-user-config chat: the gateway owner freezes code defaults and runs
+    the turn out of process, so the profile's display.interface must not pick a surface and the
+    client performs no discovery. Explicit --tui is refused later by the TUI's own option gate."""
+    return bool(getattr(args, "safe_mode", False) or getattr(args, "ignore_user_config", False)) \
+        and not getattr(args, "tui", False)
 
 
 def _agent_subcommand_selected(args) -> bool:
@@ -3010,6 +3020,11 @@ def _prepare_agent_startup(args) -> None:
     # See #7994.
     if getattr(args, "yolo", False):
         os.environ["HERMES_YOLO_MODE"] = "1"
+    if args.command in {None, "chat"} and _bypass_chat_launch(args):
+        # Bypass launches are frozen by the gateway owner and executed out of process. This
+        # client is a transport: no env mutation (it would ride into an authority spawn),
+        # no plugin/MCP/hook discovery, and no profile read of the config under suspicion.
+        return
     _apply_safe_mode(args)
     _apply_user_config_bypass(args)
     _guard_noninteractive_user_config(args)

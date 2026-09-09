@@ -140,8 +140,9 @@ Common options:
 | `--pass-session-id` | Pass the session ID into the system prompt. |
 | `--ignore-user-config` | Ignore `~/.hermes/config.yaml` and use built-in defaults. Credentials in `.env` are still loaded. Useful for isolated CI runs, reproducible bug reports, and third-party integrations. |
 | `--ignore-rules` | Skip auto-injection of `AGENTS.md`, `SOUL.md`, `.cursorrules`, persistent memory, and preloaded skills. Combine with `--ignore-user-config` for a fully isolated run. |
-| `--safe-mode` | Troubleshooting mode: disable ALL customizations — user config, rules/memory injection, plugins, shell hooks, and MCP servers (implies `--ignore-user-config` and `--ignore-rules`). Use to isolate whether a problem comes from your setup or from Hermes itself. |
-| `--source <tag>` | Session source tag for filtering (default: `cli`; one-shot runs default to `oneshot`, which pickers hide). Use `tool` for third-party integrations that should not appear in user session lists. An explicit `--source` is always stored as given, even for a one-shot run launched from inside a TUI or Desktop session. |
+| `--safe-mode` | Troubleshooting mode: disable ALL customizations — user config, rules/memory injection, plugins, shell hooks, and MCP servers (implies `--ignore-user-config` and `--ignore-rules`). The gateway freezes code defaults plus your explicit options into the session and runs the turn in an isolated worker process that never reads the profile, so a broken `config.yaml` cannot block it. Requires an explicit `--model` (there is no profile default to inherit); pair with `--provider custom --base-url <url> --api-key <key>` for a fully explicit endpoint. |
+| `--base-url <url>` / `--api-key <key>` | Explicit OpenAI-compatible endpoint and launch-only key for `--provider custom`. The key is held in the running gateway's memory for this session and never written to disk. |
+| `--source <tag>` | Session source tag for filtering (default: `cli`). Use `tool` for third-party integrations that should not appear in user session lists. |
 | `--max-turns <N>` | Maximum tool-calling iterations per conversation turn (default: 500, or `agent.max_turns` in config). |
 
 Examples:
@@ -156,7 +157,8 @@ hermes chat --quiet -q "Return only JSON"
 hermes chat -q "Inspect this repository" --format stream-json
 hermes chat --worktree -q "Review this repo and open a PR"
 hermes chat --ignore-user-config --ignore-rules -q "Repro without my personal setup"
-hermes chat --safe-mode -q "Is this bug mine or Hermes'?"
+hermes chat --safe-mode --model gpt-4.1 -q "Is this bug mine or Hermes'?"
+hermes chat --safe-mode --provider custom --base-url http://127.0.0.1:8000/v1 --model local -q "Isolate against a local server"
 ```
 
 ### `--format stream-json` — structured JSONL output
