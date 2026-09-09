@@ -275,7 +275,7 @@ def _handoff_messages(conn, sid, messages):
     if not isinstance(messages, list) or len(messages) > 1000:
         raise RuntimeStoreError('invalid_params')
     for msg in messages:
-        if not isinstance(msg, dict) or set(msg) - _MESSAGE_FIELDS or msg.get('role') not in ('user', 'assistant', 'system', 'tool'):
+        if not isinstance(msg, dict) or set(msg) - _MESSAGE_FIELDS - {'_compressed_summary_has_user_turn'} or msg.get('role') not in ('user', 'assistant', 'system', 'tool'):
             raise RuntimeStoreError('invalid_params')
         if '_row_id' in msg and not conn.execute('SELECT 1 FROM messages WHERE session_id=? AND id=?',
                                                  (sid, msg['_row_id'])).fetchone():
