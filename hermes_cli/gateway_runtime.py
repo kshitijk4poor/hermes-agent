@@ -41,8 +41,11 @@ def _endpoint(payload: dict, home: Path) -> GatewayDiscovery:
     profiles = payload.get("served_profiles")
     if not isinstance(profiles, list):
         return GatewayDiscovery("inaccessible", reason_code="profile_mismatch")
+    # Canonicalize BOTH sides: on Windows normcase lower-cases the served spelling, so a
+    # caller's mixed-case Path (WorkerRPC) never matched and every worker saw owner_unavailable.
+    wanted = _canonical_home(home)
     matches = [p for p in profiles if isinstance(p, dict)
-               and isinstance(p.get("home"), str) and _canonical_home(p["home"]) == str(home)]
+               and isinstance(p.get("home"), str) and _canonical_home(p["home"]) == wanted]
     if len(matches) != 1 or not isinstance(matches[0].get("profile_id"), str) or not matches[0]["profile_id"]:
         return GatewayDiscovery("inaccessible", reason_code="profile_mismatch")
     state = payload.get("state")
