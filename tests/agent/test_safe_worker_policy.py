@@ -258,3 +258,62 @@ def test_bare_agent_constructor_cannot_restore_safe_customizations(tmp_path, mod
             assert result["reads"]
         else:
             assert result["reads"] == []
+
+
+@pytest.mark.parametrize("mode", ["safe", "config", "ordinary"])
+def test_direct_secret_hydration_cannot_read_bypassed_yaml(tmp_path, mode):
+    result = run_worker(tmp_path, r"""
+        import json, os, sys
+        from pathlib import Path
+        mode = os.environ["PROBE_MODE"]
+        home = Path(os.environ["HERMES_HOME"])
+        if mode != "ordinary":
+            from agent.safe_worker_policy import _bind_safe_worker_policy
+            _bind_safe_worker_policy(safe_mode=mode == "safe", ignore_user_config=True, config={})
+        reads = []
+        def audit(event, args):
+            if event == "open" and str(args[0]).endswith("config.yaml") and args[1] != "w":
+                reads.append(str(args[0]))
+        sys.addaudithook(audit)
+        from hermes_cli.env_loader import hydrate_profile_secret_sources
+        assert hydrate_profile_secret_sources(home) == {}
+        other = home / "other"; other.mkdir()
+        (other / "config.yaml").write_text("agent: {}")
+        assert hydrate_profile_secret_sources(other) == {}
+        print(json.dumps({"reads": reads}))
+    """, mode)
+    assert bool(result["reads"]) == (mode == "ordinary")
+
+
+@pytest.mark.linux_only
+def test_private_policy_refuses_late_binding_and_fork_inheritance(tmp_path):
+    late = run_worker(tmp_path, r"""
+        import json
+        import hermes_cli.config
+        from agent.safe_worker_policy import _bind_safe_worker_policy
+        try:
+            _bind_safe_worker_policy(safe_mode=True, ignore_user_config=True, config={})
+        except RuntimeError as exc:
+            assert "before runtime imports" in str(exc)
+        else:
+            raise AssertionError("late binding accepted")
+        print(json.dumps({"refused": True}))
+    """, "late")
+    assert late == {"refused": True}
+    fork = run_worker(tmp_path, r"""
+        import json, os
+        from agent.safe_worker_policy import _bind_safe_worker_policy, safe_worker_enabled
+        _bind_safe_worker_policy(safe_mode=True, ignore_user_config=True, config={})
+        pid = os.fork()
+        if pid == 0:
+            try:
+                safe_worker_enabled()
+            except RuntimeError as exc:
+                os._exit(0 if "fresh exec" in str(exc) else 2)
+            os._exit(3)
+        _, status = os.waitpid(pid, 0)
+        assert os.waitstatus_to_exitcode(status) == 0
+        assert safe_worker_enabled()
+        print(json.dumps({"refused": True}))
+    """, "fork")
+    assert fork == {"refused": True}

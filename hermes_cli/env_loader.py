@@ -175,6 +175,10 @@ def hydrate_profile_secret_sources(hermes_home: str | os.PathLike) -> dict[str, 
 
 def _hydrate_profile_secret_sources(home: Path) -> dict[str, str]:
     """Locked implementation for :func:`hydrate_profile_secret_sources`."""
+    from agent.safe_worker_policy import worker_config_snapshot
+
+    if worker_config_snapshot() is not None:
+        return {}
     home_key = str(home.resolve())
     if home_key in _APPLIED_HOMES:
         return get_secret_source_values(home)
