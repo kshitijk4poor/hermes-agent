@@ -135,10 +135,15 @@ def test_managed_worker_completes_through_interpreter_trampoline(tmp_path):
             workers = [json.loads(l) for l in launches.read_text(encoding='utf-8').splitlines()
                        if json.loads(l)['argv'][-2:] == ['-m', 'agent.managed_worker']]
             assert len(workers) == 1 and workers[0]['launcher'] != workers[0]['child'], evidence
-            # The launcher chain is fully reaped: neither the launcher nor the real worker survives.
-            leftovers = [(p.pid, p.cmdline()) for p in psutil.Process(owner.pid).children(recursive=True)
-                         if p.is_running() and p.status() != psutil.STATUS_ZOMBIE]
-            assert leftovers == [], leftovers
+            # The launcher chain is fully reaped: neither the launcher nor the real worker survives
+            # the owner's close (which runs after the admission commits terminal; bounded wait).
+            def leftovers():
+                return [(p.pid, p.cmdline()) for p in psutil.Process(owner.pid).children(recursive=True)
+                        if p.is_running() and p.status() != psutil.STATUS_ZOMBIE]
+            async with asyncio.timeout(15):
+                while leftovers():
+                    await asyncio.sleep(.1)
+            assert leftovers() == []
             print(json.dumps({'owner_pid': owner.pid, 'launcher_pid': workers[0]['launcher'], 'worker_pid': workers[0]['child']}))
 
     try:
