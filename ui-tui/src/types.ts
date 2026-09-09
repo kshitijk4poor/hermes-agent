@@ -204,6 +204,7 @@ export interface SessionInfo {
   reasoning_effort?: string
   pending_submissions?: Array<{
     admission_id: string
+    input_id?: string
     target_session_id: string
     target_profile_home: string
     status: string

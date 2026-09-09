@@ -33,6 +33,7 @@ import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
 import { applyGoalSnapshot } from './goalStatus.js'
 import type { GatewayEventHandlerContext, NoticeLevel } from './interfaces.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
+import { markBubbleShown, newlyStartedRows } from './pendingBubbles.js'
 import { flashGoodVibes, flashPet } from './petFlashStore.js'
 import { captureDestination, isCurrentDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
@@ -868,6 +869,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         }
 
         const info = { ...current, ...incoming }
+
+        // A busy-time admission painted no bubble at submit; paint it when the
+        // authority starts it, so it lands after the previous assistant reply.
+        for (const started of newlyStartedRows(current?.pending_submissions, incoming.pending_submissions)) {
+          markBubbleShown(started.input_id)
+          appendMessage({ role: 'user', text: started.user })
+        }
 
         // A replayed snapshot can be the only terminal signal after reconnect.
         // Missing running on older gateways must not clear a live turn.

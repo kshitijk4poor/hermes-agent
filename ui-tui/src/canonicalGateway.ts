@@ -44,9 +44,23 @@ export function canonicalResult(method: string, value: any, request: Record<stri
         : row) : value.messages
     return { ...value, messages, info: { ...value.info, stored_session_id: value.stored_session_id,
       execution_epoch: String(value.authority_epoch), execution_generation: value.execution_generation,
-      running: value.running } }
+      running: value.running, pending_submissions: pendingSubmissions(value.pending) } }
   }
   return value
+}
+
+// The authority's durable FIFO rows (`pending` on snapshots and session.info
+// fanout) projected onto the client's receipt shape: one translation, so the
+// queue panel, the receipt matcher and Desktop all read the same list.
+export function pendingSubmissions(pending: unknown) {
+  if (!Array.isArray(pending)) { return undefined }
+  return pending.filter(row => row && typeof row === 'object').map(row => ({
+    ...row, user: row.text, target_profile_home: row.ref?.profile_id, target_session_id: row.ref?.session_id }))
+}
+
+export function canonicalEvent<T extends { type: string; payload?: any }>(event: T): T {
+  const pending = pendingSubmissions(event.payload?.pending)
+  return pending ? { ...event, payload: { ...event.payload, pending_submissions: pending } } : event
 }
 
 export function localCreationOptions(env = process.env): Record<string, unknown> {

@@ -139,6 +139,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
     stage,
     queueRef,
     queueEditRef,
+    queueDraft,
     queuedDisplay,
     queueEditIdx,
     enqueue,
@@ -147,7 +148,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
     removeQ,
     setQueueEdit,
     takeQ
-  } = useQueue()
+  } = useQueue(gw)
 
   const { historyRef, historyIdx, setHistoryIdx, historyDraftRef, pushHistory } = useInputHistory()
   const { completions, compIdx, setCompIdx, compReplace } = useCompletion(input, isBlocked, gw)
@@ -515,6 +516,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
       openEditor,
       prependQueue: prependQ,
       pushHistory,
+      queueDraft,
       removeQueue: removeQ,
       setCompIdx,
       setComposerTokens,
@@ -536,6 +538,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
       openEditor,
       prependQ,
       pushHistory,
+      queueDraft,
       removeQ,
       setCompIdx,
       setComposerTokens,

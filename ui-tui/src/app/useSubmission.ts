@@ -105,7 +105,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       showUserMessage = true,
       displayText?: string,
       expandOverride?: (value: string) => string,
-      submitOpts: { skipDetectDrop?: boolean; destination?: SubmissionDestination; queueItem?: QueueItem } = {}
+      submitOpts: { skipDetectDrop?: boolean; destination?: SubmissionDestination; queueItem?: QueueItem; behindTurn?: boolean } = {}
     ) => {
       // Read tokens off the ref, not render state: a paste immediately followed
       // by Enter submits before React has re-rendered with the new token.
@@ -255,6 +255,14 @@ export function useSubmission(opts: UseSubmissionOptions) {
       }
 
       if (mode === 'queue') {
+        // Canonical authority: admit now so the input is crash-durable and in
+        // every viewer's pending list; the server FIFO orders it behind the
+        // running turn. Legacy gateways keep the renderer-side queue.
+        if (gw.isCanonical) {
+          return send(item.text, true, item.display, value => value, {
+            destination, behindTurn: true, queueItem: item.settle ? item : undefined })
+        }
+
         return enqueueText()
       }
 
@@ -268,7 +276,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       // and file-drop interpolation exactly once.
       send(item.text, true, item.display, value => value, { destination, queueItem: item.settle ? item : undefined })
     },
-    [composerActions, send]
+    [composerActions, gw, send]
   )
 
   const dispatchSubmission = useCallback(
@@ -349,7 +357,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
           // 'interrupt' / 'steer' should reach the live turn instead of
           // silently going back to the queue.  handleBusyInput resolves
           // mode-specific behavior (interrupt-and-send, steer, or queue).
-          if (getUiState().busyInputMode === 'queue') {
+          if (getUiState().busyInputMode === 'queue' && !gw.isCanonical) {
             return composerActions.prependQueue(picked)
           }
 

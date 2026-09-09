@@ -4,6 +4,7 @@ import type { QueueItem } from '../hooks/useQueue.js'
 import { pendingInputOwner, savePendingInput } from '../lib/pendingInputs.js'
 import type { Msg } from '../types.js'
 
+import { markBubbleShown } from './pendingBubbles.js'
 import { captureDestination, isCurrentDestination, type SubmissionDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
 import { getUiState, patchUiState } from './uiStore.js'
@@ -53,12 +54,16 @@ export function submitPrompt(
   deps: SubmitPromptDeps,
   showUserMessage = true,
   displayOverride?: string,
-  opts: { skipDetectDrop?: boolean; destination?: SubmissionDestination; queueItem?: QueueItem } = {}
+  opts: { skipDetectDrop?: boolean; destination?: SubmissionDestination; queueItem?: QueueItem; behindTurn?: boolean } = {}
 ): void {
   const destination = opts.destination ?? captureDestination()
   const owner = pendingInputOwner(opts.queueItem?.ownerDestination ?? destination)
   const { sid } = owner
   const focused = () => isCurrentDestination(owner)
+  // A busy-time admission joins the authority FIFO behind the running turn:
+  // it must not touch the in-flight stream buffer, status or transcript. Its
+  // user bubble is painted when the fanout reports the row started.
+  const ownsTurn = () => focused() && !opts.behindTurn
 
   if (!sid) {
     return deps.sys('session not ready yet')
@@ -77,12 +82,12 @@ export function submitPrompt(
   }
 
   // Close the async-busy gap up front, before the detect_drop round-trip.
-  if (focused()) {
+  if (ownsTurn()) {
     markSubmitting()
   }
 
   const startSubmit = (displayText: string, submitText: string, show = true) => {
-    if (focused()) {
+    if (ownsTurn()) {
       turnController.clearStatusTimer()
       deps.setLastUserMsg(text)
 
@@ -99,6 +104,8 @@ export function submitPrompt(
 
     if (item) {
       item.preparedText ??= submitText
+      if (opts.behindTurn) { item.queued = true }
+      if (ownsTurn() && show) { markBubbleShown(item.submissionId) }
       savePendingInput(item)
     }
 

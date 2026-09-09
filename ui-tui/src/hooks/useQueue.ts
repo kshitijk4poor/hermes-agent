@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto'
 import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import { isServerQueued } from '../app/pendingBubbles.js'
 import { captureDestination, type SubmissionDestination } from '../app/submissionDestination.js'
 import { $uiState, getUiState } from '../app/uiStore.js'
 import {
@@ -70,7 +71,10 @@ interface PendingQueue {
   items: QueueItem[]
 }
 
-export function useQueue() {
+// `gw` owns server-queued rows: the authority's pending fanout is rendered
+// after this client's unconfirmed local items, and deleting/editing one goes
+// through `prompt.cancel` — the next fanout, not a local splice, retires it.
+export function useQueue(gw?: { request: (method: string, params: Record<string, unknown>) => Promise<unknown> }) {
   const ui = useStore($uiState)
   const queues = useRef(new Map<string, PendingQueue>())
   const unbound = useRef<PendingQueue>({ edit: null, items: [] })
@@ -175,10 +179,35 @@ export function useQueue() {
     [getQueue]
   )
 
+  const serverRows = (ui.info?.pending_submissions ?? []).filter(isServerQueued)
+
   const queuedDisplay = [
     ...queueRef.current.map(item => `${item.failed ? '[unconfirmed · Alt+K retry] ' : ''}${item.display}`),
-    ...(ui.info?.pending_submissions ?? []).map(item => `[${item.status} · ${item.admission_id}] ${item.user}`)
+    ...serverRows.map(row => `[${row.status}] ${row.user}`)
   ]
+
+  // Indexes past the local items address server rows (read live, not from
+  // render state: key handlers run between renders).
+  const serverRowAt = useCallback(
+    (index: number) => {
+      const local = queueRef.current.length
+
+      return index >= local ? (getUiState().info?.pending_submissions ?? []).filter(isServerQueued)[index - local] : undefined
+    },
+    [queueRef]
+  )
+
+  const queueDraft = useCallback(
+    (index: number) => serverRowAt(index)?.user ?? queueRef.current[index]?.display ?? '',
+    [queueRef, serverRowAt]
+  )
+
+  const cancelServerRow = useCallback(
+    (row: { admission_id: string }) => {
+      void gw?.request('prompt.cancel', { session_id: getUiState().sid, admission_id: row.admission_id }).catch(() => {})
+    },
+    [gw]
+  )
 
   const queueEditIdx = queueEditRef.current
   const syncQueue = useCallback(() => refresh(version => version + 1), [])
@@ -277,7 +306,7 @@ export function useQueue() {
     for (const receipt of getUiState().info?.pending_submissions ?? []) {
       const item = queue.items.find(
         item =>
-          item.submissionId === receipt.admission_id &&
+          item.submissionId === (receipt.input_id ?? receipt.admission_id) &&
           Boolean(item.destination?.storedSid) &&
           item.destination?.storedSid === receipt.target_session_id &&
           item.destination?.profileHome === receipt.target_profile_home
@@ -324,6 +353,17 @@ export function useQueue() {
   const takeQ = useCallback(
     (i: number, editedDisplay?: string) => {
       const queue = getQueue()
+      const server = serverRowAt(i)
+
+      // Editing a durable row re-admits the edited text as a new input; the
+      // authority retires the original.
+      if (server) {
+        cancelServerRow(server)
+        const item = queueItem(editedDisplay ?? server.user)
+        queue.items.push(item)
+
+        return claim(queue, item)
+      }
 
       if (queue.items[i]?.inFlight) {
         return undefined
@@ -344,11 +384,17 @@ export function useQueue() {
 
       return claim(queue, item)
     },
-    [getQueue, claim]
+    [getQueue, claim, cancelServerRow, serverRowAt]
   )
 
   const removeQ = useCallback(
     (i: number) => {
+      const server = serverRowAt(i)
+
+      if (server) {
+        return cancelServerRow(server)
+      }
+
       if (queueRef.current[i]?.inFlight) {
         return
       }
@@ -362,7 +408,7 @@ export function useQueue() {
       removeAtInPlace(queueRef.current, i)
       syncQueue()
     },
-    [queueRef, syncQueue]
+    [queueRef, syncQueue, cancelServerRow, serverRowAt]
   )
 
   return {
@@ -370,6 +416,7 @@ export function useQueue() {
     stage,
     enqueue,
     prependQ,
+    queueDraft,
     queueEditIdx,
     queueEditRef,
     queueRef,

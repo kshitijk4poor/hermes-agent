@@ -400,6 +400,8 @@ export interface ComposerActions {
   openEditor: () => Promise<void>
   prependQueue: (item: QueueItem, destination?: SubmissionDestination) => void
   pushHistory: (text: string) => void
+  /** Composer text for queue-edit slot `index` (local items first, then server-queued rows). */
+  queueDraft: (index: number) => string
   removeQueue: (index: number) => void
   setCompIdx: StateSetter<number>
   setComposerTokens: StateSetter<ComposerToken[]>

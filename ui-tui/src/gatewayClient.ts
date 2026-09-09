@@ -15,7 +15,7 @@ import {
 import { reconnectBackoffDelayMs } from '@hermes/shared/reconnect-backoff'
 import { WebSocket as UndiciWebSocket } from 'undici'
 
-import { canonicalRequest, canonicalResult, type CreationContract } from './canonicalGateway.js'
+import { canonicalEvent, canonicalRequest, canonicalResult, type CreationContract } from './canonicalGateway.js'
 
 import type { GatewayEvent } from './gatewayTypes.js'
 import { CircularBuffer } from './lib/circularBuffer.js'
@@ -663,7 +663,7 @@ export class GatewayClient extends EventEmitter {
         if (this.isCanonical && ev.type === 'gateway.ready') { return }
         if (this.isCanonical) {
           const shared = ev as GatewayEvent & { authority_epoch?: number; execution_generation?: number }
-          ev.payload = { ...ev.payload, execution_epoch: String(shared.authority_epoch),
+          ev.payload = { ...canonicalEvent(ev).payload, execution_epoch: String(shared.authority_epoch),
             execution_generation: shared.execution_generation } as any
         }
         this.publish(ev)
