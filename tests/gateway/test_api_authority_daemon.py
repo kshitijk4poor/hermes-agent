@@ -11,7 +11,7 @@ import threading
 import aiohttp
 
 from tests.gateway.fixtures.local_recovery_probe import daemon, websocket, rpc
-from tests.gateway.fixtures.shared_authority_peer import ModelPeer
+from tests.gateway.fixtures.api_usage_peer import UsageModelPeer
 
 
 def test_ordinary_daemon_api_ws_fifo_retry(tmp_path):
@@ -19,7 +19,7 @@ def test_ordinary_daemon_api_ws_fifo_retry(tmp_path):
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
     user.mkdir()
-    peer = ThreadingHTTPServer(('127.0.0.1', 0), ModelPeer)
+    peer = ThreadingHTTPServer(('127.0.0.1', 0), UsageModelPeer)
     peer.requests, peer.metadata_requests = [], []
     peer.blocked, peer.release = threading.Event(), threading.Event()
     threading.Thread(target=peer.serve_forever, daemon=True).start()
@@ -66,7 +66,8 @@ def test_ordinary_daemon_api_ws_fifo_retry(tmp_path):
                     while not any(row['request_id'] == 'chat:daemon-retry' and row['status'] == 'queued' for row in rows()):
                         await asyncio.sleep(.02)
                 peer.release.set()
-                await pending
+                completed = json.loads(await pending)
+                assert completed['usage'] == {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}, completed
                 before = len(peer.requests)
                 streamed = await follow(True)
                 assert 'LOCAL_ACK' in streamed and 'data: [DONE]' in streamed, streamed
