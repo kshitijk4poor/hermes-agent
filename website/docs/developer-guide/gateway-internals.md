@@ -33,6 +33,23 @@ row is refused with `stale_generation`. Desktop shows such a row in the queue pa
 "Turn lost during restart" with a **Discard** button; the gateway CLI exposes it as
 `/discard <admission_id>`. The lost input stays in the transcript for the user to resend.
 
+## Shared authority prompt attachments
+
+`prompt.submit` accepts an optional `attachments: [{path, mime}]` list beside `text`.
+The client stages image bytes in the profile image cache (`cache/images/` under the
+served `HERMES_HOME`, the same place messaging adapters stage downloads); paths must be
+regular files directly in that directory, `mime` must be an image type
+(`image/png`, `image/jpeg`, `image/gif`, `image/webp`), at most 10 per submission, each
+under `gateway.max_inbound_media_bytes`. The authority copies the bytes into its
+immutable `native-inputs` store at admission and stores the sha256-checked reference in
+the private payload, so later mutation or cache cleanup of the staging file cannot
+change what executes, including after an owner restart. Execution restores them onto
+`MessageEvent.media_urls`/`media_types`, and the ordinary image routing
+(`agent.image_input_mode`, native `image_url` parts vs. text pre-analysis) applies.
+Text-only submissions keep the `{text}` payload and fingerprint. The ACP transport
+agent uses this for image, image resource-link and embedded-image prompt blocks;
+Ink and Desktop still attach through the legacy `image.attach`/`file.attach` RPCs.
+
 ## Shared authority local slash commands
 
 Authenticated local sessions accept `slash.exec({session_id, command})` and
