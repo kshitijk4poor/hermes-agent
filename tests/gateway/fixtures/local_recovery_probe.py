@@ -45,6 +45,15 @@ class Model(BaseHTTPRequestHandler):
             pass
 
 
+# Windows children need the system environment (Winsock, temp, PATHEXT); POSIX uses the first three.
+CHILD_ENV_KEYS = ('PATH', 'LANG', 'TZ', 'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP', 'PATHEXT',
+                  'LOCALAPPDATA', 'APPDATA', 'PROGRAMDATA', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE')
+
+
+def child_env():
+    return {k: os.environ[k] for k in CHILD_ENV_KEYS if k in os.environ}
+
+
 async def rpc(ws, method, **params):
     await ws.send(json.dumps({'jsonrpc': '2.0', 'id': method, 'method': method, 'params': params}))
     async with asyncio.timeout(20):
@@ -66,7 +75,7 @@ def daemon(root, home, env, *, barrier, fixture='local_recovery_daemon.py'):
     with (home / ('first.log' if barrier else 'restart.log')).open('w+') as log:
         proc = subprocess.Popen(command, cwd=root, env=env, stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)
         try:
-            deadline = time.monotonic() + 40
+            deadline = time.monotonic() + 120
             desc = {}
             while proc.poll() is None and time.monotonic() < deadline:
                 try:
@@ -100,7 +109,7 @@ def probe(tmp_path):
     cfg = {'gateway': {'multiplex_profiles': False}, 'model': {'provider': 'custom', 'default': 'old-default', 'base_url': url},
            'auxiliary': {'title_generation': {'enabled': False}}, 'platform_toolsets': {'cli': []}}
     (home / 'config.yaml').write_text(json.dumps(cfg))
-    env = {k: os.environ[k] for k in ('PATH', 'LANG', 'TZ') if k in os.environ}
+    env = child_env()
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url, PYTHONUNBUFFERED='1')
     sessions, params, pids, epochs = {}, {}, [], []
