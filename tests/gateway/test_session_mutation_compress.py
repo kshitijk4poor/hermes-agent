@@ -88,6 +88,14 @@ def test_compress_runs_summary_and_next_inference_on_atomic_successor(tmp_path):
             count = len(peer.requests)
             assert await call('session.mutate', **params) == result
             assert len(peer.requests) == count
+            # The logical owner row is now closed by compression; later prepared
+            # mutations must still target the live successor, not crash on the parent.
+            after = await call('session.resume', session_id=sid)
+            branch = await call('session.mutate', session_id=sid, request_id='branch-after-compress',
+                operation='branch', payload={}, expected_revision=after['revision'],
+                expected_generation=after['execution_generation'])
+            child = await call('session.resume', session_id=branch['branched_session_id'])
+            assert 'SUMMARY_RETAINED_FACTS' in json.dumps(child['messages'])
             with sqlite3.connect(home / 'state.db') as db:
                 assert db.execute('SELECT end_reason FROM sessions WHERE id=?', (sid,)).fetchone()[0] == 'compression'
                 assert db.execute('SELECT count(*) FROM messages WHERE session_id=?', (sid,)).fetchone()[0] > 0

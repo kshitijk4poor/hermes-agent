@@ -1,4 +1,5 @@
 """Transcript mutation guards evaluated on the receipt's writer connection."""
+from hermes_state_common import _ENDED_ROW_SQL, _ended_by_compression
 from hermes_state_runtime import RuntimeStoreError
 
 
@@ -11,6 +12,10 @@ def require_idle(db, conn, session_ids):
             raise RuntimeStoreError('unknown_execution')
         if states:
             raise RuntimeStoreError('session_busy')
+        # A logical owner closed by compression is an ancestor, not a transcript
+        # target; its live successor (also in session_ids) carries the lease/lock.
+        if _ended_by_compression(conn.execute(_ENDED_ROW_SQL, (sid,)).fetchone()):
+            continue
         db._check_transcript_write_guards(conn, sid, None,
             reject_active_turn_lease=True, reject_active_compression_lock=True)
 
