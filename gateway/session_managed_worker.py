@@ -177,6 +177,11 @@ async def execute_managed(authority, ref, row, policy):
             if kind == 'delta' and set(frame) == {'type', 'text'} and isinstance(frame['text'], str):
                 authority.publish_execution(ref.session_id, row['generation'], 'message.delta', {'text': frame['text']})
                 continue
+            if (kind in {'tool.start', 'tool.complete'} and set(frame) == {'type', 'tool_call_id', 'name'}
+                    and isinstance(frame['tool_call_id'], str) and isinstance(frame['name'], str)):
+                authority.publish_execution(ref.session_id, row['generation'], kind,
+                    {'tool_call_id': frame['tool_call_id'], 'name': frame['name']})
+                continue
             if kind == 'result' and set(frame) == {'type', 'result'} and accepted is None:
                 result = frame['result']
                 if (not isinstance(result, dict) or set(result) - {'final_response', 'failed', 'interrupted'}

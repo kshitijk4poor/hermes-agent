@@ -161,6 +161,11 @@ def test_ordinary_owner_launches_tool_worker_and_detach_does_not_cancel(tmp_path
             restored = await rpc(ws, 'session.resume', session_id=sid)
             history = restored['result']['messages']
             assert 'MANAGED_TOOL_DONE' in json.dumps(history), restored
+            replay = await rpc(ws, 'session.events.since', session_id=sid,
+                               replay_epoch=restored['result']['replay_epoch'], last_sequence=0)
+            tools = [e for e in replay['result']['events'] if e['type'] in {'tool.start', 'tool.complete'}]
+            assert tools and tools[0]['type'] == 'tool.start' and tools[-1]['type'] == 'tool.complete', replay
+            assert str(target) not in json.dumps(tools) and 'MANAGED_TOOL_EFFECT' not in json.dumps(tools), tools
         rows = query('SELECT role,content FROM messages WHERE session_id=? ORDER BY id', (sid,))
         assert sum(role == 'user' and 'DO_MANAGED_TOOL' in content for role, content in rows) == 1, rows
         assert sum(role == 'assistant' and 'MANAGED_TOOL_DONE' in (content or '') for role, content in rows) == 1, rows

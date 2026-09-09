@@ -162,7 +162,9 @@ def execute(frame, channel):
                 skip_context_files=policy.ignore_rules, load_soul_identity=not policy.ignore_rules,
                 skip_memory=policy.ignore_rules, skip_background_review=True, quiet_mode=True,
                 stream_delta_callback=lambda text: channel.send('delta', text=text) if text else None,
-                clarify_callback=controls.clarify)
+                clarify_callback=controls.clarify,
+                tool_start_callback=lambda call_id, name, args: channel.send('tool.start', tool_call_id=call_id, name=name),
+                tool_complete_callback=lambda call_id, name, args, result: channel.send('tool.complete', tool_call_id=call_id, name=name))
             controls.agent = agent
             if controls.stopped.is_set():
                 agent.interrupt()
