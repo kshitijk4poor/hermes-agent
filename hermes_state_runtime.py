@@ -174,7 +174,7 @@ def recover_session_inputs(db, *, epoch: int) -> int:
 def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str,
                            request_id: str, expected_revision: int,
                            operation: str, payload: dict, expected_generation: int | None = None,
-                           _live_guard=None) -> dict:
+                           _live_guard=None, _authorize_write=None) -> dict:
     """Commit a closed metadata edit and its retry receipt in the same transaction.
 
     Caller authorizes the principal and resolves the canonical session. These
@@ -220,6 +220,8 @@ def mutate_runtime_session(db, *, epoch: int, principal_id: str, session_id: str
             from hermes_state_mutation_guards import delete_targets
             targets = delete_targets(conn, session_id) if operation == 'delete' else [session_id]
             _live_guard(targets)
+        if _authorize_write is not None:
+            _authorize_write(conn)
         affected, projection = apply_action(db, conn, session_id, operation, payload)
         conn.executemany('UPDATE sessions SET runtime_revision=runtime_revision+1 WHERE id=?',
                          [(target,) for target in affected])

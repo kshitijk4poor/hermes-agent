@@ -18,6 +18,7 @@ async def mutate_session(authority, actor, ref, params):
     operation = params['operation']
     if not isinstance(operation, str):
         raise RuntimeStoreError('invalid_params')
+    cold_history = False
     if operation == 'import':
         if actor.profile_id != authority.profile_id or ref.profile_id != authority.profile_id:
             raise RuntimeStoreError('profile_mismatch')
@@ -32,7 +33,12 @@ async def mutate_session(authority, actor, ref, params):
         # A receipt authorizes only its original principal's exact retry; the
         # transaction still verifies the entire digest and current epoch.
         if not has_mutation_receipt(authority.db, actor.subject, ref.session_id, params['request_id']):
-            authority.authorize(actor, ref, 'session:control')
+            if ref.session_id not in authority.sessions:
+                from hermes_state_mutation_binding import authorize_history
+                with authority.db._read_ctx() as conn:
+                    cold_history = authorize_history(conn, actor, ref.session_id)
+            if not cold_history:
+                authority.authorize(actor, ref, 'session:control')
     authority._require_admission_open()
     live = authority.sessions.get(ref.session_id)
 
@@ -58,10 +64,16 @@ async def mutate_session(authority, actor, ref, params):
     if operation in _RUNTIME_ACTIONS:
         live_guard([ref.session_id])
         raise RuntimeStoreError('runtime_coordination_required')
+    def authorize_write(conn):
+        from hermes_state_mutation_binding import authorize_history
+        if not authorize_history(conn, actor, ref.session_id, claim=True):
+            raise RuntimeStoreError('permission_denied')
+
     result = mutate_runtime_session(authority.db, epoch=authority.epoch,
         principal_id=actor.subject, session_id=ref.session_id, request_id=params['request_id'],
         expected_revision=params['expected_revision'], expected_generation=params.get('expected_generation'),
-        operation=operation, payload=params['payload'], _live_guard=live_guard)
+        operation=operation, payload=params['payload'], _live_guard=live_guard,
+        _authorize_write=authorize_write if cold_history else None)
     if operation == 'delete':
         # Repeat local retirement on an exact retry too: publication may have
         # failed after the transaction committed. Never repeat the event.
