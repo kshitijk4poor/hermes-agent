@@ -18,7 +18,7 @@ from gateway.session_pending_controls import PendingControls
 from hermes_state_runtime import (
     RuntimeStoreError, admit_session_input, begin_runtime_epoch,
     cancel_session_input, claim_session_input, get_session_admission,
-    list_session_admissions, recover_session_inputs,
+    list_session_admissions, recover_session_inputs, resolve_unknown_session_input,
 )
 
 
@@ -245,6 +245,17 @@ class SessionAuthority:
         await self.receipt(actor, ref, admission_id)
         row = cancel_session_input(self.db, epoch=self.epoch, admission_id=admission_id)
         self._publish_pending(ref)
+        return self._receipt(row)
+
+    async def resolve_unknown(self, actor, ref, admission_id, generation):
+        """Operator acknowledgement that a turn lost across an owner restart will not
+        finish; the paused FIFO behind it resumes. Never requeues the lost input."""
+        self.authorize(actor, ref, 'session:control')
+        await self.receipt(actor, ref, admission_id)
+        row = resolve_unknown_session_input(self.db, epoch=self.epoch, admission_id=admission_id,
+                                            generation=generation)
+        self._publish_pending(ref)
+        self._schedule(ref)
         return self._receipt(row)
 
     async def interrupt(self, actor, ref, generation):
