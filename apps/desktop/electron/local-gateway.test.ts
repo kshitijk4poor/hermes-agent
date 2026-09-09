@@ -70,3 +70,34 @@ test('private dial credential is one-use and bound to the requesting native wind
   expect(headers['Sec-WebSocket-Protocol']).toBe('hermes-gateway-v1, hermes-gateway-ticket.private-ticket')
   expect(dials.headers({ ...details, webContentsId: 7 })).toBeNull()
 })
+
+test('a dial against a replaced local gateway forgets the cached endpoint once and re-ensures', async () => {
+  const { redialLocalGateway } = await import('./local-gateway')
+  const endpoints = [{ instance_id: 'dead' }, { instance_id: 'alive' }]
+  const forgotten: string[] = []
+  let ensures = 0
+  const result = await redialLocalGateway({
+    ensure: async () => endpoints[Math.min(ensures++, 1)],
+    forget: async () => { forgotten.push('primary') },
+    use: async endpoint => {
+      if (endpoint.instance_id === 'dead') {throw new Error('Gateway ticket bootstrap failed')}
+      return `ticket-for-${endpoint.instance_id}`
+    }
+  })
+  expect(result).toBe('ticket-for-alive')
+  expect(forgotten).toEqual(['primary'])
+  expect(ensures).toBe(2)
+})
+
+test('a dial that keeps failing after one re-ensure surfaces the error instead of looping', async () => {
+  const { redialLocalGateway } = await import('./local-gateway')
+  let ensures = 0
+  let forgets = 0
+  await expect(redialLocalGateway({
+    ensure: async () => { ensures++; return { instance_id: 'still-dead' } },
+    forget: async () => { forgets++ },
+    use: async () => { throw new Error('Invalid gateway ticket response') }
+  })).rejects.toThrow('Invalid gateway ticket response')
+  expect(ensures).toBe(2)
+  expect(forgets).toBe(1)
+})

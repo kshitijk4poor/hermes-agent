@@ -1,7 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process'
 
 import type { GatewayEndpoint } from './local-gateway'
-import { createLocalGatewayDials, ensureLocalGateway, mintLocalGatewayTicket, nativeGatewayHttpHeaders, runGatewayEnsure } from './local-gateway'
+import { createLocalGatewayDials, ensureLocalGateway, mintLocalGatewayTicket, nativeGatewayHttpHeaders, redialLocalGateway, runGatewayEnsure } from './local-gateway'
 const localGatewayDials = createLocalGatewayDials()
 import crypto from 'node:crypto'
 import fs from 'node:fs'
@@ -8563,9 +8563,15 @@ async function freshGatewayWsUrl(profile, webContentsId) {
   const connection = await ensureBackend(profile)
 
   if (connection.gatewayEndpoint) {
-    const ticket = await mintLocalGatewayTicket(connection.gatewayEndpoint)
+    return redialLocalGateway({
+      ensure: () => ensureBackend(profile),
+      forget: () => forgetLocalGatewayDescriptor(profile),
+      use: async current => {
+        const ticket = await mintLocalGatewayTicket(current.gatewayEndpoint)
 
-    return localGatewayDials.prepare(connection.baseUrl, ticket, webContentsId)
+        return localGatewayDials.prepare(current.baseUrl, ticket, webContentsId)
+      }
+    })
   }
 
   if (connection.authMode === 'oauth') {
@@ -11423,14 +11429,32 @@ function profileRouteOptions(
 // Resolve a backend connection for the given profile, per the routing table in
 // resolveProfileBackendRoute(). An empty / unknown profile resolves to the
 // primary, so legacy callers are unchanged.
-async function ensureBackend(
-  profile: string | null | undefined,
-  opts: {
-    passive?: boolean
-    request?: { method?: string; path?: string }
-    spawnPriority?: LocalBackendSpawnPriority
-  } = {}
-): Promise<Awaited<ReturnType<typeof backendConnectionState.getPromise>>> {
+// Drop the cached descriptor for a canonical local gateway whose owner is gone
+// so the next ensureBackend() re-runs `gateway ensure` (attach or start) instead
+// of minting tickets against a dead control socket. Nothing is killed: the
+// descriptor never owned the runtime.
+async function forgetLocalGatewayDescriptor(profile) {
+  const key = profile && String(profile).trim() ? String(profile).trim() : primaryProfileKey()
+  const route = resolveProfileBackendRoute(key, profileRouteOptions(key))
+
+  if (route.backend === 'primary') {
+    const attempt = backendConnectionState.startAttempt()
+    attempt.promise = backendConnectionState.getPromise()
+    backendConnectionState.clearPromiseForAttempt(attempt)
+    rememberLog(`[gateway] forgot stale canonical endpoint for primary "${key}"; re-ensuring`)
+
+    return
+  }
+
+  const entry = backendPool.get(key)
+
+  if (entry && !entry.process) {
+    backendPool.delete(key)
+    rememberLog(`[gateway] forgot stale canonical endpoint for profile "${key}"; re-ensuring`)
+  }
+}
+
+async function ensureBackend(profile, opts: { spawnPriority?: LocalBackendSpawnPriority } = {}) {
   const key = profile && String(profile).trim() ? String(profile).trim() : primaryProfileKey()
   const spawnPriority = spawnPriorityFrom(opts.spawnPriority)
   poolRetirer.assertCanOpen(key, spawnPriority)
@@ -17016,13 +17040,24 @@ async function handleHermesApiRequest(request) {
           timeoutMs
         })
       }
+    } else if (connection.gatewayEndpoint) {
+      response = await redialLocalGateway({
+        ensure: () => ensureBackend(routeProfile),
+        forget: () => forgetLocalGatewayDescriptor(routeProfile),
+        use: current => fetchJson(`${current.baseUrl}${apiRoute.requestPath}`, current.token, {
+          method: request?.method,
+          body: request?.body,
+          upload: request?.upload,
+          timeoutMs,
+          gatewayDescriptor: current
+        })
+      })
     } else {
       response = await fetchJson(url, connection.token, {
         method: request?.method,
         body: request?.body,
         upload: request?.upload,
-        timeoutMs,
-        gatewayDescriptor: connection.gatewayEndpoint ? connection : undefined
+        timeoutMs
       })
     }
   } catch (error) {

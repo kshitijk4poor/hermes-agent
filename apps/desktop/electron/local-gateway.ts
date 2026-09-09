@@ -54,6 +54,35 @@ export async function ensureLocalGateway(run: () => Promise<{ code: number; stdo
   return { baseUrl: endpoint.api_origin, wsUrl: `${endpoint.api_origin.replace(/^http/, 'ws')}/api/ws?native_dial=unminted`, mode: 'local', source: 'local', authMode: 'native', token: '', gatewayEndpoint: endpoint }
 }
 
+// The cached connection descriptor pins the gateway instance that answered the
+// first `gateway ensure`. When that owner is gone (crash, `gateway stop`,
+// update restart) every ticket mint against the stale control socket fails and
+// the renderer's reconnect backoff would loop on the dead descriptor forever.
+// Forget the cached descriptor exactly once and re-run the canonical ensure;
+// a second failure is a real error and surfaces to the caller.
+export function isStaleLocalGatewayError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? '')
+
+  return message.startsWith('Gateway ticket') || message === 'Invalid gateway ticket response' || message === 'Unsafe gateway control path'
+}
+
+export async function redialLocalGateway<TEndpoint, TResult>(deps: {
+  ensure: () => Promise<TEndpoint>
+  forget: () => Promise<void> | void
+  use: (endpoint: TEndpoint) => Promise<TResult>
+}): Promise<TResult> {
+  const first = await deps.ensure()
+
+  try {
+    return await deps.use(first)
+  } catch (error) {
+    if (!isStaleLocalGatewayError(error)) {throw error}
+    await deps.forget()
+
+    return deps.use(await deps.ensure())
+  }
+}
+
 // A one-use ticket crosses private IPC, then leaves the URL before dialing.
 // Public descriptors and persisted connection state never contain credentials.
 export function createLocalGatewayDials() {
