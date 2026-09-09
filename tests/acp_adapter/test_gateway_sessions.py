@@ -24,12 +24,15 @@ def daemon(tmp_path, model_peer, request):
     user.mkdir()
     root = Path(__file__).resolve().parents[2]
     model_url = f"http://127.0.0.1:{model_peer.server_port}/v1"
-    (home / "config.yaml").write_text(json.dumps({
+    config = {
         "gateway": {"multiplex_profiles": False},
         "approvals": {"mode": "manual", "timeout": 60},
         "model": {"provider": "custom", "default": "local-wire-stub", "base_url": model_url},
         "auxiliary": {"title_generation": {"enabled": False}},
-    }))
+    }
+    for key, value in (request.param.items() if isinstance(getattr(request, 'param', None), dict) else ()):
+        config.setdefault(key, {}).update(value)
+    (home / "config.yaml").write_text(json.dumps(config))
     env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home),
                PYTHONPATH=str(root), PYTHONUNBUFFERED="1",
@@ -215,3 +218,47 @@ async def test_acp_permission_detach_keeps_canonical_waiter(daemon, tmp_path, mo
         print("ACP_PERMISSION_RECEIPT=" + json.dumps({"session_id": sid, "permission": permission,
               "stale_generation_rejected": True, "detached_waiter_resolved_by_ws": True,
               "real_owned_deletion": not target.exists()}))
+
+
+# 1x1 transparent PNG: smallest valid image an editor can attach.
+_ONE_PX_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
+    "890000000a49444154789c6300010000000500010d0a2db40000000049454e44ae426082"
+)
+
+
+@pytest.mark.linux_only
+@pytest.mark.asyncio
+# A loopback custom provider has no catalog entry; declaring vision is the documented
+# knob and is exactly what a user of a self-hosted vision model does.
+@pytest.mark.parametrize("daemon", [{"model": {"supports_vision": True}}], indirect=True)
+async def test_acp_image_prompt_reaches_model_as_image_part(daemon, tmp_path, model_peer):
+    import base64
+    async with viewer(daemon) as ws:
+        created = await ws.rpc("session.create", request_id="acp-image", source="cli", cwd=str(tmp_path))
+        sid = created["session_id"]
+        async with editor(daemon, tmp_path) as acp:
+            init = await acp.rpc("initialize", protocolVersion=1, clientCapabilities={})
+            assert init["result"]["agentCapabilities"]["promptCapabilities"]["image"] is True, init
+            assert "result" in await acp.rpc("session/load", cwd=str(tmp_path), sessionId=sid, mcpServers=[])
+            reply = await acp.rpc("session/prompt", sessionId=sid, prompt=[
+                {"type": "text", "text": "WS_SHARED what is in this image?"},
+                {"type": "image", "mimeType": "image/png", "data": base64.b64encode(_ONE_PX_PNG).decode()},
+            ])
+            assert reply.get("result", {}).get("stopReason") == "end_turn", reply
+        (request,) = model_peer.requests
+        user = next(m for m in reversed(request["messages"]) if m["role"] == "user")
+        parts = user["content"]
+        assert isinstance(parts, list), parts
+        (image,) = [p for p in parts if p.get("type") == "image_url"]
+        url = image["image_url"]["url"]
+        assert url.startswith("data:image/png;base64,")
+        assert base64.b64decode(url.split(",", 1)[1]) == _ONE_PX_PNG
+        assert "WS_SHARED what is in this image?" in json.dumps([p for p in parts if p.get("type") == "text"])
+        replay = await ws.rpc("session.events.since", session_id=sid, replay_epoch=created["replay_epoch"], last_sequence=0)
+        completes = [e for e in replay["events"] if e["type"] == "message.complete"]
+        assert len(completes) == 1
+        receipt = await ws.rpc("prompt.receipt", session_id=sid, admission_id=completes[0]["admission_id"])
+        assert (receipt["status"], receipt["outcome"]) == ("terminal", "completed"), receipt
+        print("ACP_IMAGE_RECEIPT=" + json.dumps({"session_id": sid, "admission": receipt,
+              "image_part_bytes": len(url), "text_parts": [p["text"] for p in parts if p.get("type") == "text"]}))
