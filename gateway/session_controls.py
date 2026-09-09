@@ -202,7 +202,13 @@ class AuthorityConnection:
 
     async def mutate(self, ref, params):
         from gateway.session_mutations import mutate_session
-        return await mutate_session(self.authority, self.actor, ref, params)
+        result = await mutate_session(self.authority, self.actor, ref, params)
+        # The branching viewer navigates straight into its new child; attach it
+        # here (create parity) so the first submit is not refused as a stranger.
+        child = result.get('branched_session_id') if isinstance(result, dict) else None
+        if child and child not in self.subscriptions:
+            await self.resume(SessionRef(ref.profile_id, child), {})
+        return result
 
     async def receipt(self, ref, params):
         return asdict(await self.authority.receipt(self.actor, ref, params.get('admission_id')))

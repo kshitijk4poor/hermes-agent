@@ -31,6 +31,11 @@ async def branch_round(home, descriptor, previous=None):
         receipt = response['result']
         child = receipt['branched_session_id']
         assert child != params['session_id']
+        if previous is None:
+            # The branching viewer owns the child it just created: a submit on the
+            # same connection is admitted without an explicit resume first (create parity).
+            admitted = await rpc('prompt.submit', session_id=child, input_id='first-child-input', text='FIRST_CHILD_INPUT')
+            assert admitted.get('result', {}).get('status') == 'queued', admitted
         for sid in (child, params['session_id']):
             resumed = await rpc('session.resume', session_id=sid)
             assert 'result' in resumed, resumed
