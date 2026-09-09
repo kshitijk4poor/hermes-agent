@@ -39,9 +39,11 @@ async def test_rewind_refuses_live_task_even_before_admission_claim(tmp_path):
         db.create_session('s', source='test')
         db.append_message('s', role='user', content='keep')
         epoch = rt.begin_runtime_epoch(db, instance_id='owner')
-        authority = SessionAuthority(SimpleNamespace(_draining=False), profile_id='owned', instance_id='owner', db=db, epoch=epoch)
-        live = authority.sessions['s'] = LiveSession(None, 'route')
-        live.task = asyncio.create_task(asyncio.Event().wait())
+        authority = SessionAuthority(SimpleNamespace(_draining=False, _evict_cached_agent=lambda route: None),
+                                     profile_id='owned', instance_id='owner', db=db, epoch=epoch)
+        authority.sessions['s'] = LiveSession(None, 'route')
+        # Admitted but not yet claimed: the ledger row alone must fence the rewind.
+        rt.admit_session_input(db, epoch=epoch, principal_id='human', session_id='s', request_id='input', payload={'text': 'go'})
         owner = AuthorityConnection(authority, object(), {'user_id': 'human'})
         try:
             response = await owner.dispatch({'id': 1, 'method': 'session.mutate', 'params': {'session_id': 's',
@@ -50,6 +52,4 @@ async def test_rewind_refuses_live_task_even_before_admission_claim(tmp_path):
             assert response['error']['message'] == 'session_busy'
             assert db.get_messages('s')[0]['content'] == 'keep'
         finally:
-            live.task.cancel()
-            await asyncio.gather(live.task, return_exceptions=True)
             await owner.close()
