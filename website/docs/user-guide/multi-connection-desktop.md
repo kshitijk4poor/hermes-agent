@@ -187,9 +187,10 @@ The union roster is what multi-gateway surfaces (and the built-in
   live on the machine that owns the profile, exactly as if you were using
   that instance directly.
 
-Each `(connection, profile)` pair gets its own backend and socket, pooled
-with the same idle-reaping as local per-profile backends — background agents
-keep streaming while you look at another gateway.
+Each `(connection, profile)` pair gets its own socket, and Desktop caches the
+gateway descriptor it dialed so the next open joins the same connection —
+background agents keep streaming while you look at another gateway. Nothing is
+spawned or reaped on your behalf: each gateway owns its own lifetime.
 
 Approval buttons route back to the session's owning backend, not whichever
 profile is currently selected. For a local secondary profile, Desktop can use
