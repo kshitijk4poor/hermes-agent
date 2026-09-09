@@ -58,8 +58,14 @@ def worker_title(db, conn, session_id, payload):
     if (set(payload) != {'title', 'source'} or payload['source'] not in ('user', 'derived', 'llm')
             or not (payload['title'] is None or isinstance(payload['title'], str))):
         raise RuntimeStoreError('invalid_params')
-    return {'value': bool(db._set_session_title_in_transaction(
-        conn, session_id, payload['title'], source=payload['source']))}
+    try:
+        value = bool(db._set_session_title_in_transaction(
+            conn, session_id, payload['title'], source=payload['source']))
+    except ValueError:
+        # Expected validation/conflict outcomes must not poison the retry journal.
+        # Keep candidate authority in the receipt, not an in-memory worker claim.
+        return {'value': False, 'error': 'Title unavailable or invalid', 'title_candidate': payload['title']}
+    return {'value': value}
 
 
 def worker_title_source(db, conn, session_id, payload):
@@ -76,13 +82,22 @@ def worker_next_title(db, conn, session_id, payload):
     if set(payload) != {'base_title'} or not isinstance(payload['base_title'], str):
         raise RuntimeStoreError('invalid_params')
     title = conn.execute('SELECT title FROM sessions WHERE id=?', (session_id,)).fetchone()[0]
-    # This is an assigned title continuation, not a profile-wide title oracle.
-    if not title or payload['base_title'] != title:
+    # Only an assigned title or a receipted title attempt authorizes dedupe.
+    # Concurrent activity/usage receipts must not invalidate that title attempt.
+    candidate = payload['base_title']
+    attempted = conn.execute(
+        "SELECT 1 FROM worker_receipts r JOIN worker_executions w ON w.execution_id=r.execution_id "
+        "WHERE w.session_id=? AND w.status='running' "
+        "AND json_extract(r.result_json,'$.title_candidate')=? LIMIT 1",
+        (session_id, candidate)).fetchone()
+    if candidate != title and attempted is None:
         raise RuntimeStoreError('permission_denied')
-    match = _NUMBERED_TITLE_RE.match(title)
-    base = match.group(1) if match else title
+    match = _NUMBERED_TITLE_RE.match(candidate)
+    base = match.group(1) if match else candidate
     rows = conn.execute("SELECT title FROM sessions WHERE title=? OR title LIKE ? ESCAPE '\\'",
                         (base, f'{escape_like(base)} #%')).fetchall()
+    if not rows:
+        return {'value': base}
     numbers = [int(m.group(2)) for m in (_NUMBERED_TITLE_RE.match(row['title']) for row in rows) if m]
     return {'value': f'{base} #{max([1, *numbers]) + 1}'}
 

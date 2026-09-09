@@ -20,19 +20,27 @@ class RuntimeSessionLifecycleMixin:
 
     def set_session_title(self, session_id, title):
         self._session(session_id)
-        return self._apply('session.title', {'title': title, 'source': 'user'})['value']
+        return self._title_result(self._apply('session.title', {'title': title, 'source': 'user'}))
 
     def set_auto_title(self, session_id, title, *, source):
         if source not in ('derived', 'llm'):
             raise ValueError(f'invalid automatic title source: {source!r}')
         self._session(session_id)
-        return self._apply('session.title', {'title': title, 'source': source})['value']
+        return self._title_result(self._apply('session.title', {'title': title, 'source': source}))
+
+    @staticmethod
+    def _title_result(result):
+        if result.get('error'):
+            raise ValueError(result['error'])
+        return result['value']
 
     def get_session_title_source(self, session_id):
         row = self.get_session(session_id)
         return row.get('title_source') if row.get('title') is not None else None
 
     def set_session_title_source(self, session_id, source):
+        if source not in ('user', 'derived', 'llm'):
+            raise ValueError(f'invalid title source: {source!r}')
         self._session(session_id)
         return self._apply('session.title_source', {'source': source})['value']
 
