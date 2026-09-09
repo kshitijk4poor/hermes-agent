@@ -745,11 +745,22 @@ async def _handle_runs(self, request: "web.Request", *, _api_server) -> "web.Res
         browser_control_transport_family=_api_server._api_request_browser_control_transport_family.get())
     if getattr(self.gateway_runner, 'session_authority', None) is not None:
         from gateway.session_api_turn import admit_api_turn
-        with self._profile_scope(launch.request_profile):
-            launch.admission = admit_api_turn(self, user_message=launch.user_message,
-                conversation_history=launch.conversation_history, active_run_id=run_id,
-                history_from_session=bool(body.get('session_id')) and not previous_response_id,
-                **launch.agent_kwargs)
+        from hermes_state_runtime import RuntimeStoreError
+        try:
+            with self._profile_scope(launch.request_profile):
+                launch.admission = admit_api_turn(self, user_message=launch.user_message,
+                    conversation_history=launch.conversation_history, active_run_id=run_id,
+                    history_from_session=bool(body.get('session_id')) and not previous_response_id,
+                    **launch.agent_kwargs)
+        except RuntimeStoreError as exc:
+            # A refused admission owns no run: drop every reservation so an exact
+            # retry is refused again instead of replaying a run nobody executes.
+            _forget_run(
+                self, run_id, self._run_streams, self._run_streams_created, self._run_approval_sessions,
+                self._run_statuses, self._run_owners, self._run_idempotency_ids)
+            if idempotency_key:
+                self._run_idempotency_store.forget(idempotency_scope, idempotency_key)
+            return _json_error(_openai_error, exc.reason, code=exc.reason, status=409)
     self._activate_admitted_request()
     # A canonical Bot Chat that a Desktop holds live is that Desktop's to run: executing here would
     # be a second writer beside its lease (#114959). The owner's mailbox takes the turn and its
