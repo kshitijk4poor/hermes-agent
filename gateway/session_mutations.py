@@ -1,13 +1,13 @@
 """Action-specific authority mutations, shared by WS and authenticated HTTP.
 
 No legacy slash handler is executed after a receipt: those handlers own separate
-transactions. Reset/branch/compress/model need prepared runtime publication and
-remain explicitly unavailable until that contract is implemented.
+transactions. Local reset prepares its replacement in the receipt transaction;
+branch/compress/model still require their own prepared runtime publication.
 """
 from hermes_state_runtime import RuntimeStoreError, mutate_runtime_session
 
 _METADATA = frozenset({'rename', 'archive', 'sidebar'})
-_RUNTIME_ACTIONS = frozenset({'reset', 'branch', 'compress', 'model'})
+_RUNTIME_ACTIONS = frozenset({'branch', 'compress', 'model'})
 _FIELDS = frozenset({'session_id', 'request_id', 'expected_revision', 'operation', 'payload'})
 
 
@@ -58,7 +58,7 @@ async def mutate_session(authority, actor, ref, params):
             if store is not None and (store._routing_db is None
                     or store._routing_db.db_path != authority.db.db_path):
                 raise RuntimeStoreError('runtime_coordination_required')
-        if operation == 'rewind' and not callable(getattr(authority.runner, '_evict_cached_agent', None)):
+        if operation in {'rewind', 'reset'} and not callable(getattr(authority.runner, '_evict_cached_agent', None)):
             raise RuntimeStoreError('runtime_coordination_required')
 
     if operation in _RUNTIME_ACTIONS:
@@ -74,6 +74,19 @@ async def mutate_session(authority, actor, ref, params):
         expected_revision=params['expected_revision'], expected_generation=params.get('expected_generation'),
         operation=operation, payload=params['payload'], _live_guard=live_guard,
         _authorize_write=authorize_write if cold_history else None)
+    if operation == 'reset' and applied:
+        from gateway.session_local_recovery import restore_local_session
+        restore_local_session(authority, ref.session_id)
+        authority.runner._evict_cached_agent(authority.sessions[ref.session_id].route)
+        # Publish the prepared entry, not just its target ID, so fresh-reset and
+        # per-session counters match cold recovery in this process too.
+        from hermes_state_local import local_receipt
+        from gateway.session import SessionEntry
+        store = authority.runner.session_store
+        with store._lock:
+            entry = SessionEntry.from_dict(local_receipt(authority.db, ref.session_id)['entry'])
+            entry.origin = authority.sessions[ref.session_id].source
+            store._entries[entry.session_key] = entry
     if operation == 'delete':
         # Repeat local retirement on an exact retry too: publication may have
         # failed after the transaction committed. Never repeat the event.

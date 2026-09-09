@@ -8,7 +8,7 @@ METADATA_FIELDS = {'title': str, 'archived': bool, 'hidden': bool, 'pinned': boo
 def validate_action(operation, payload):
     if not isinstance(payload, dict) or not isinstance(operation, str):
         raise RuntimeStoreError('invalid_params')
-    if operation == 'delete' and not payload:
+    if operation in {'delete', 'reset'} and not payload:
         return
     if operation == 'import' and set(payload) == {'sessions'} and isinstance(payload['sessions'], list):
         return
@@ -27,7 +27,8 @@ def validate_action(operation, payload):
 
 
 def apply_action(db, conn, session_id, operation, payload):
-    handlers = {'delete': _delete, 'import': _import, 'rewind': _rewind}
+    from hermes_state_mutation_reset import reset_in_transaction
+    handlers = {'delete': _delete, 'import': _import, 'rewind': _rewind, 'reset': reset_in_transaction}
     if operation in handlers:
         return handlers[operation](db, conn, session_id, payload)
     affected = set()
