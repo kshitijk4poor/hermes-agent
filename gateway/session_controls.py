@@ -128,8 +128,8 @@ class AuthorityConnection:
         from gateway.session_policy import CREATE_FIELDS
         return {'instance_id': self.authority.instance_id, 'profile_id': self.authority.profile_id,
                 'authority_epoch': self.authority.epoch,
-                'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1'],
-                'session_create': {'sources': ['cli', 'tui', 'gui'],
+                'capabilities': ['durable-admission-v1', 'event-replay-v1', 'local-cli-create-v1', 'acp-editor-policy-v1', 'acp-session-mcp-v1'],
+                'session_create': {'sources': ['cli', 'tui', 'gui', 'acp'],
                                    'parameters': sorted(CREATE_FIELDS)}}
 
     async def info(self, ref, params):
@@ -163,6 +163,10 @@ class AuthorityConnection:
         return {'sessions': sessions[:limit], 'scope': 'live'}
 
     async def resume(self, ref, params):
+        if params.get('editor') is not None:
+            self.authority.authorize(self.actor, ref, 'session:control')
+            from gateway.session_local_mcp import resume_editor_mcp
+            resume_editor_mcp(self.authority, ref, params['editor'])
         snapshot = await self.authority.attach(self.actor, ref)
         self.subscriptions[ref.session_id] = snapshot.subscription_id
         return {'session_id': ref.session_id, 'stored_session_id': ref.session_id,
