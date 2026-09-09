@@ -104,15 +104,40 @@ def probe(base):
         assert sum('LEGACY_QUEUED_ONCE' in str(t) for t in texts) == 1, texts
         assert not any('LEGACY_CLAIMED_NEVER' in str(t) for t in texts), texts
         print(json.dumps({'ledger': rows(), 'inputs': texts, 'lost_ack': True, 'same_target': sid}))
+        return sid
 
     try:
         with daemon(root, home, env, barrier=False) as (proc, desc):
             try:
-                asyncio.run(run(desc))
+                sid = asyncio.run(run(desc))
                 print(json.dumps({'ordinary_daemon_pid': proc.pid}))
             except BaseException:
                 print((home / 'restart.log').read_text()[-10000:], file=sys.stderr)
                 raise
+        # Model the exact post-settlement/pre-mailbox-publication crash boundary.
+        # Keep the actual admission/result, remove only the derivative reply receipt.
+        from tools.bot_live_delivery import _locked, _read, _write
+        with _locked(home) as mailbox:
+            path = mailbox / ('a' * 32 + '.json')
+            record = _read(path)
+            record.update(status='canonical', reply='')
+            _write(path, record)
+            owner = dict(profile_home=str(home), session_id=sid, lease_id='departed', live_session_id='old')
+            _write(mailbox / ('d' * 32 + '.json'), dict(delivery_id='d' * 32, id='d' * 32,
+                owner=owner, **owner, status='queued', message='STARTUP_LEGACY_ONCE', created_at=2, sequence=2))
+        async def restarted(desc):
+            def read_delivery_result(home, key):
+                return _read(home / 'runtime' / 'bot_live_delivery' / (key + '.json'))
+            await wait(lambda: read_delivery_result(home, 'a' * 32)['status'] == 'settled')
+            recovered = read_delivery_result(home, 'a' * 32)
+            assert recovered['admission_id'] == record['admission_id']
+            assert recovered['reply'] == 'AUTOMATION_ACK', recovered
+            await wait(lambda: read_delivery_result(home, 'd' * 32)['status'] == 'settled')
+            assert sum('STARTUP_LEGACY_ONCE' in r['payload_json'] for r in rows()) == 1
+            print(json.dumps({'restart_receipt': recovered, 'startup_migration': True}))
+        with daemon(root, home, env, barrier=False) as (proc, desc):
+            asyncio.run(restarted(desc))
+            print(json.dumps({'restart_daemon_pid': proc.pid}))
     finally:
         model.release.set(); model.shutdown(); model.server_close()
 

@@ -6,7 +6,7 @@ admission is the only consumer; unknown execution is never retried as inference.
 import asyncio
 from pathlib import Path
 
-from gateway.session_contract import SessionRef
+from gateway.session_contract import Principal, SessionRef
 from gateway.config import Platform
 from gateway.platforms.event import MessageEvent
 from hermes_state_runtime import RuntimeStoreError, get_session_admission
@@ -114,6 +114,39 @@ async def _migrate(authority, actor, home, root):
                      record['message'], ref, live, entry, legacy=record)
 
 
+async def recover_bot_deliveries(authority):
+    """Rebuild derivative replies and queued legacy admissions at owner startup."""
+    home = Path(authority.db.db_path).parent.resolve()
+    with _locked(home) as root:
+        records = [(path, _read(path)) for path in root.glob('*.json')]
+        for path, record in records:
+            if not record or record.get('profile_home') != str(home) or not record.get('admission_id'):
+                continue
+            record.update(_result(authority, record))
+            _write(path, record)
+            if record['status'] in {'queued', 'claimed'}:
+                _watch_reply(authority, home, record['delivery_id'], record['admission_id'])
+        row = authority.db.get_session_by_title('Bot Chat')
+        if row is None:
+            return
+        target = authority.db.get_session(authority.db.get_compression_tip(row['id']))
+        if target is None or not str(target.get('chat_id') or '').startswith('local-'):
+            return  # Historical binding migration belongs to the session owner.
+        actor = Principal(target['user_id'], authority.profile_id,
+                          frozenset({'session:submit'}), 'bot-owner-recovery')
+        await _migrate(authority, actor, home, root)
+
+
+def _watch_reply(authority, home, key, admission_id):
+    future = authority.waiters.setdefault(admission_id, asyncio.get_running_loop().create_future())
+    task = asyncio.create_task(_record_reply(authority, home, key, future))
+    tasks = getattr(authority, '_bot_receipt_tasks', None)
+    if tasks is None:
+        tasks = authority._bot_receipt_tasks = set()
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
 async def deliver(connection, params):
     authority, actor = connection.authority, connection.actor
     home = _home(authority, actor, params.get('profile'))
@@ -158,12 +191,5 @@ async def _admit(authority, actor, home, root, key, message, ref, live, entry, l
     record.update(status='canonical', admission_id=receipt.admission_id)
     _write(path, record)
     if receipt.status in {'queued', 'started'}:
-        future = authority.waiters.setdefault(receipt.admission_id, asyncio.get_running_loop().create_future())
-        task = asyncio.create_task(_record_reply(authority, home, key, future))
-        # Keep receipt publication independent of the requesting WebSocket.
-        tasks = getattr(authority, '_bot_receipt_tasks', None)
-        if tasks is None:
-            tasks = authority._bot_receipt_tasks = set()
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
+        _watch_reply(authority, home, key, receipt.admission_id)
     return _result(authority, record)
