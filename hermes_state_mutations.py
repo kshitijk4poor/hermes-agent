@@ -55,6 +55,8 @@ def _delete(db, conn, session_id, payload):
         if (conn.execute('SELECT 1 FROM session_admissions WHERE target_session_id=? LIMIT 1', (sid,)).fetchone()
                 or conn.execute('SELECT 1 FROM worker_executions WHERE session_id=? LIMIT 1', (sid,)).fetchone()):
             raise RuntimeStoreError('retained_receipts')
+    from hermes_state_mutation_retirement import retire_routes
+    retire_routes(conn, targets)
     for sid in targets:
         conn.execute('UPDATE sessions SET parent_session_id=NULL, runtime_revision=runtime_revision+1 WHERE parent_session_id=?', (sid,))
         conn.execute('DELETE FROM messages WHERE session_id=?', (sid,))

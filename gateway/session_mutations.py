@@ -24,7 +24,15 @@ async def mutate_session(authority, actor, ref, params):
         if 'session:create' not in actor.capabilities:
             raise RuntimeStoreError('permission_denied')
     else:
-        authority.authorize(actor, ref, 'session:control')
+        from hermes_state_mutation_retirement import has_mutation_receipt
+        if actor.profile_id != authority.profile_id or ref.profile_id != authority.profile_id:
+            raise RuntimeStoreError('profile_mismatch')
+        if 'session:control' not in actor.capabilities:
+            raise RuntimeStoreError('permission_denied')
+        # A receipt authorizes only its original principal's exact retry; the
+        # transaction still verifies the entire digest and current epoch.
+        if not has_mutation_receipt(authority.db, actor.subject, ref.session_id, params['request_id']):
+            authority.authorize(actor, ref, 'session:control')
     authority._require_admission_open()
     live = authority.sessions.get(ref.session_id)
 
@@ -40,10 +48,9 @@ async def mutate_session(authority, actor, ref, params):
             if candidate is not None and candidate.task is not None and not candidate.task.done():
                 raise RuntimeStoreError('session_busy')
         if operation == 'delete':
-            # Route retirement must commit with deletion, not recreate the same
-            # physical ID on the next native message. Do not fake that handoff.
             store = getattr(authority.runner, 'session_store', None)
-            if store is not None and any(store.lookup_by_session_id(sid) is not None for sid in targets):
+            if store is not None and (store._routing_db is None
+                    or store._routing_db.db_path != authority.db.db_path):
                 raise RuntimeStoreError('runtime_coordination_required')
         if operation == 'rewind' and not callable(getattr(authority.runner, '_evict_cached_agent', None)):
             raise RuntimeStoreError('runtime_coordination_required')
@@ -55,6 +62,18 @@ async def mutate_session(authority, actor, ref, params):
         principal_id=actor.subject, session_id=ref.session_id, request_id=params['request_id'],
         expected_revision=params['expected_revision'], expected_generation=params.get('expected_generation'),
         operation=operation, payload=params['payload'], _live_guard=live_guard)
+    if operation == 'delete':
+        # Repeat local retirement on an exact retry too: publication may have
+        # failed after the transaction committed. Never repeat the event.
+        store = getattr(authority.runner, 'session_store', None)
+        if store is not None:
+            store.retire_runtime_sessions(result['deleted_ids'])
+        for sid in result['deleted_ids']:
+            candidate = authority.sessions.pop(sid, None)
+            if candidate is not None:
+                evict = getattr(authority.runner, '_evict_cached_agent', None)
+                if callable(evict):
+                    evict(candidate.route)
     if applied and live is not None:
         if operation == 'rewind':
             authority.runner._evict_cached_agent(live.route)
