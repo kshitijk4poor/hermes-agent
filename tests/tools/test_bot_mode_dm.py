@@ -874,7 +874,11 @@ def test_real_peer_delivery_command_round_trip(tmp_path):
 
 @pytest.mark.platforms("windows")
 def test_delivery_command_round_trip_through_windows_local_shell(tmp_path):
-    """Native runner paths must survive the Git Bash process boundary."""
+    """Native runner paths must survive the Git Bash process boundary.
+
+    Peer (stdin) transport, like the Linux sibling: a local query-file delivery without a
+    canonical Bot Chat owner is refused with ``runtime_unavailable`` by design.
+    """
     from tools.environments.local import _find_shell
 
     dm_file = tmp_path / "message with spaces.txt"
@@ -883,13 +887,13 @@ def test_delivery_command_round_trip_through_windows_local_shell(tmp_path):
     child = tmp_path / "child with spaces.py"
     child.write_text(
         "import pathlib, sys\n"
-        "pathlib.Path(sys.argv[1]).write_text('started', encoding='utf-8')\n",
+        "pathlib.Path(sys.argv[1]).write_text(sys.stdin.read(), encoding='utf-8')\n",
         encoding="utf-8",
     )
     command = bot_mode_dm._delivery_command(
         [sys.executable, str(child), str(observed)],
         str(dm_file),
-        stdin_file=False,
+        stdin_file=True,
     )
 
     result = subprocess.run(
@@ -900,7 +904,7 @@ def test_delivery_command_round_trip_through_windows_local_shell(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr or result.stdout
-    assert observed.read_text(encoding="utf-8") == "started"
+    assert observed.read_text(encoding="utf-8") == "secret"
     assert not dm_file.exists()
 
 
