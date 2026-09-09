@@ -62,24 +62,10 @@ def apply_action(db, conn, session_id, operation, payload, *, prepared=None):
 
 
 def _delete(db, conn, session_id, payload):
-    from hermes_state_mutation_guards import require_idle, delete_targets
-    targets = delete_targets(conn, session_id)
-    require_idle(db, conn, targets)
-    # Completed receipts remain queryable. Until storage has durable tombstones,
-    # retaining the row is safer than erasing retry/adoption evidence.
-    for sid in targets:
-        if (conn.execute('SELECT 1 FROM session_admissions WHERE target_session_id=? LIMIT 1', (sid,)).fetchone()
-                or conn.execute('SELECT 1 FROM worker_executions WHERE session_id=? LIMIT 1', (sid,)).fetchone()):
-            raise RuntimeStoreError('retained_receipts')
-    from hermes_state_mutation_retirement import retire_routes
-    retire_routes(conn, targets)
-    for sid in targets:
-        db._bump_conversation_generation(conn, sid, 'session_reset')
-        conn.execute('UPDATE sessions SET parent_session_id=NULL, runtime_revision=runtime_revision+1 WHERE parent_session_id=?', (sid,))
-        conn.execute('DELETE FROM messages WHERE session_id=?', (sid,))
-    conn.executemany('DELETE FROM sessions WHERE id=?', [(sid,) for sid in targets])
-    db._delete_unreferenced_system_prompts(conn)
-    return set(), {'deleted_ids': targets}
+    # Terminal admission/worker rows become digest tombstones so exact retries and
+    # adoption checks still resolve after the transcript is gone.
+    from hermes_state_mutation_retirement import delete_in_transaction
+    return delete_in_transaction(db, conn, session_id, payload)
 
 
 def _rewind(db, conn, session_id, payload):

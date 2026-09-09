@@ -106,8 +106,7 @@ def test_used_api_and_native_delete_restart_exact_retry(tmp_path):
                 assert db.execute("SELECT 1 FROM session_admissions WHERE request_id='busy-once'").fetchone()
 
     try:
-        # Only dispatch is composed until the action lane installs the reported hook.
-        with daemon(root, home, env, barrier=True, fixture='terminal_retirement_daemon.py') as (proc, desc):
+        with daemon(root, home, env, barrier=True) as (proc, desc):
             first = asyncio.run(api_request())
             native_sid = asyncio.run(native_turn(desc))
             asyncio.run(busy_delete_refused(desc))
