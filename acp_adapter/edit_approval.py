@@ -73,7 +73,8 @@ def _required_path(arguments: dict[str, Any]) -> str:
     path = str(arguments.get("path") or "")
     if not path:
         raise ValueError("path required")
-    return path
+    from tools.file_tools_paths import _resolve_path_for_task
+    return str(_resolve_path_for_task(path))
 
 
 def _proposal_for_write_file(arguments: dict[str, Any]) -> EditProposal:
