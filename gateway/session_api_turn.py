@@ -122,6 +122,10 @@ async def observe_api_turn(admitted, **kwargs):
     observers.pop(row['admission_id'], None)
     saved = admission_result(authority.db, row['admission_id'])
     if saved is None:
+        from hermes_state_runtime import get_session_admission
+        current = get_session_admission(authority.db, admission_id=row['admission_id'])
+        if current['outcome'] == 'cancelled':
+            return {'final_response': '', 'interrupted': True, 'completed': False}, {}
         raise RuntimeStoreError('unknown_execution')
     return saved['result'], saved['usage']
 

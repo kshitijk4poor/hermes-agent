@@ -394,6 +394,10 @@ def _owner_alive(owner_pid: int, owner_started: int) -> bool:
 
 def _durable_run_status(self, request: "web.Request", run_id: str) -> Dict[str, Any] | None:
     """Hydrate a scoped run status and fail stale owners closed."""
+    from gateway.platforms.api_server_authority_runs import run_projection
+    canonical = run_projection(self, run_id)
+    if canonical is not None:
+        return canonical
     status = self._run_statuses.get(run_id)
     if status is not None:
         if run_id in self._run_idempotency_ids:
@@ -1265,6 +1269,13 @@ async def _handle_stop_run(self, request: "web.Request", *, _api_server) -> "web
         self, request, _api_server=_api_server, permission="stop", active_fallback=True)
     if err is not None:
         return err
+    if getattr(self.gateway_runner, 'session_authority', None) is not None:
+        from gateway.platforms.api_server_authority_runs import stop_run
+        from hermes_state_runtime import RuntimeStoreError
+        try:
+            return web.json_response(await stop_run(self, run_id))
+        except RuntimeStoreError as exc:
+            return _json_error(_openai_error, exc.reason, code=exc.reason, status=409)
     if status.get("status") in TERMINAL_STATUSES:
         return web.json_response(status)
     if agent is None and task is None:
