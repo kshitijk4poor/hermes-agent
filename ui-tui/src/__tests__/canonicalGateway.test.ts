@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest'
+
 import { canonicalRequest, canonicalResult, sharedControlParams } from '../canonicalGateway.js'
 
 it('retains prepared identity and rejects unsupported TUI launch policy instead of impersonating CLI', () => {

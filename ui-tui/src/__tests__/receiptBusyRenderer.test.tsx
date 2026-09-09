@@ -26,23 +26,30 @@ function mount() {
   const home = mkdtempSync(join(tmpdir(), 'ink-receipt-busy-'))
   vi.stubEnv('HERMES_HOME', home)
   resetUiState()
+
   const info = { model: 'test', skills: {}, tools: {}, profile_name: 'default',
     stored_session_id: 'stored-owner', execution_epoch: 'owner-epoch', execution_generation: 1, running: false }
+
   patchUiState({ sid: 'owner', info, busy: false, status: 'ready' })
   const submits: ReturnType<typeof deferred>[] = []
   const snapshots: ReturnType<typeof deferred>[] = []
+
   const request = vi.fn((method: string) => {
     if (method === 'input.detect_drop') { return Promise.resolve({ matched: false }) }
     const pending = deferred()
+
     if (method === 'prompt.submit') { submits.push(pending) }
     else if (method === 'session.activate') { snapshots.push(pending) }
     else { throw new Error(`unexpected RPC: ${method}`) }
 
     return pending.promise
   })
+
   let queue!: ReturnType<typeof useQueue>
   let submission!: ReturnType<typeof useSubmission>
+
   const noop = () => {}
+
   const onEvent = createGatewayEventHandler({
     composer: { dequeue: () => undefined, queueEditRef: { current: null }, sendQueued: noop, setInput: noop },
     gateway: { gw: { request }, rpc: async () => null },
@@ -51,6 +58,7 @@ function mount() {
     transcript: { appendMessage: noop, panel: noop, setHistoryItems: noop },
     voice: { setProcessing: noop, setRecording: noop, setVoiceEnabled: noop }
   } as any)
+
   const emit = (type: string, generation: number) => onEvent({ type, session_id: 'owner',
     payload: { execution_epoch: info.execution_epoch, execution_generation: generation, text: 'completed' } } as any)
 
@@ -68,11 +76,13 @@ function mount() {
     useEffect(() => {
       if (!ui.sid || ui.busy || queue.queueEditRef.current !== null || !queue.queueRef.current.length) { return }
       const next = queue.dequeue()
+
       if (next) { submission.sendQueued(next) }
     }, [ui.sid, ui.busy, queue, submission])
 
     return <Text>{ui.status} {queue.queuedDisplay.join('|')}</Text>
   }
+
   const instance = renderSync(<Harness />, {
     stdin: new PassThrough() as any,
     stdout: Object.assign(new PassThrough(), { columns: 80, rows: 20, isTTY: false }) as any,
@@ -93,6 +103,7 @@ function mount() {
 it('reconciles terminal and unknown retries to idle so queued follow-ups can drain without another terminal event', async () => {
   for (const status of ['terminal', 'unknown']) {
     const h = mount()
+
     try {
       const item = h.queue.stage('original')
       h.submission.sendQueued(item)
@@ -119,14 +130,17 @@ it('reconciles terminal and unknown retries to idle so queued follow-ups can dra
 it('preserves a newer running generation across old receipts and delayed idle snapshots', async () => {
   for (const delayed of [false, true]) {
     const h = mount()
+
     try {
       const item = h.queue.stage('retry old identity')
       h.submission.sendQueued(item)
       await expect.poll(() => h.submits.length).toBe(1)
+
       if (!delayed) { h.emit('message.start', 2) }
       h.submits[0]!.resolve(h.receipt(item.submissionId!, 'terminal'))
       await expect.poll(() => h.queue.queueRef.current.length).toBe(0)
       await expect.poll(() => h.snapshots.length).toBe(1)
+
       if (delayed) { h.emit('message.start', 2) }
       h.snapshots[0]!.resolve(h.snapshot(!delayed, delayed ? 1 : 2))
       await new Promise(resolve => setTimeout(resolve, 20))

@@ -26,24 +26,33 @@ function mount(busyInputMode: 'queue' | 'interrupt' = 'queue') {
   const home = mkdtempSync(join(tmpdir(), 'ink-busy-admit-'))
   vi.stubEnv('HERMES_HOME', home)
   resetUiState()
+
   const info = { model: 'test', skills: {}, tools: {}, profile_name: 'default',
     stored_session_id: 'stored-owner', execution_epoch: '1', execution_generation: 1, running: true }
+
   patchUiState({ sid: 'owner', info, busy: true, status: 'running…', busyInputMode })
   const calls: Array<{ method: string; params: any }> = []
+
   const request = vi.fn((method: string, params: any) => {
     calls.push({ method, params })
+
     if (method === 'input.detect_drop') { return Promise.resolve({ matched: false }) }
+
     if (method === 'prompt.submit') {
       return Promise.resolve({ admission_id: `adm-${params.submission_id}`, input_id: params.submission_id,
         target_session_id: 'stored-owner', target_profile_home: home, status: 'queued' })
     }
+
     if (method === 'prompt.cancel') { return Promise.resolve({ admission_id: params.admission_id, status: 'terminal', outcome: 'cancelled' }) }
     throw new Error(`unexpected RPC: ${method}`)
   })
+
   const gw = { request, isCanonical: true } as any
   let queue!: ReturnType<typeof useQueue>
   let submission!: ReturnType<typeof useSubmission>
+
   const noop = () => {}
+
   const onEvent = createGatewayEventHandler({
     composer: { dequeue: () => undefined, queueEditRef: { current: null }, sendQueued: noop, setInput: noop },
     gateway: { gw, rpc: async () => null },
@@ -52,6 +61,7 @@ function mount(busyInputMode: 'queue' | 'interrupt' = 'queue') {
     transcript: { appendMessage: noop, panel: noop, setHistoryItems: noop },
     voice: { setProcessing: noop, setRecording: noop, setVoiceEnabled: noop }
   } as any)
+
   // The wire shape the gateway fans out; the client translates it exactly once.
   const fanout = (pending: any[]) => onEvent(canonicalEvent({ type: 'session.info', session_id: 'owner',
     payload: { stored_session_id: 'stored-owner', pending, running: true, execution_generation: 1, revision: 3,
@@ -72,6 +82,7 @@ function mount(busyInputMode: 'queue' | 'interrupt' = 'queue') {
 
     return <Text>{ui.status} {queue.queuedDisplay.join('|')}</Text>
   }
+
   const instance = renderSync(<Harness />, {
     stdin: new PassThrough() as any,
     stdout: Object.assign(new PassThrough(), { columns: 80, rows: 20, isTTY: false }) as any,
@@ -87,6 +98,7 @@ function mount(busyInputMode: 'queue' | 'interrupt' = 'queue') {
 
 it('admits busy queue-mode input to the authority immediately with a stable input_id instead of holding it locally', async () => {
   const h = mount('queue')
+
   try {
     h.submission.dispatchSubmission('follower while busy')
     await expect.poll(() => h.calls.filter(c => c.method === 'prompt.submit').length).toBe(1)
@@ -103,6 +115,7 @@ it('admits busy queue-mode input to the authority immediately with a stable inpu
 
 it('renders the queue from the session.info pending fanout, excluding the started row, and clears it when the fanout empties', async () => {
   const h = mount('queue')
+
   try {
     h.fanout([row('adm-1', 'in-1', 'currently running', 'started'), row('adm-2', 'in-2', 'second in line')])
     await expect.poll(() => h.queue.queuedDisplay).toEqual(['[queued] second in line'])
@@ -113,6 +126,7 @@ it('renders the queue from the session.info pending fanout, excluding the starte
 
 it('deletes a server-queued row through prompt.cancel rather than local removal', async () => {
   const h = mount('queue')
+
   try {
     h.fanout([row('adm-9', 'in-9', 'cancel me')])
     await expect.poll(() => h.queue.queuedDisplay).toEqual(['[queued] cancel me'])
@@ -128,8 +142,10 @@ it('deletes a server-queued row through prompt.cancel rather than local removal'
 
 it('projects canonical pending rows onto the legacy pending_submissions shape for resume snapshots and fanout', () => {
   const pending = [row('adm-3', 'in-3', 'hello')]
+
   const snapshot = canonicalResult('session.resume', { session_id: 'sid', stored_session_id: 'sid', authority_epoch: 1,
     execution_generation: 2, running: true, messages: [], pending }, {})
+
   expect(snapshot.info.pending_submissions).toEqual([expect.objectContaining({ admission_id: 'adm-3', input_id: 'in-3', user: 'hello',
     status: 'queued', target_session_id: 'stored-owner', target_profile_home: '/tmp/profile' })])
   const ev = canonicalEvent({ type: 'session.info', session_id: 'sid', payload: { pending } } as any)

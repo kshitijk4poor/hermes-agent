@@ -3,14 +3,16 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
+
 import { renderSync, Text } from '@hermes/ink'
 import React from 'react'
 import { expect, it, vi } from 'vitest'
+
+import { submitPrompt } from '../app/submissionCore.js'
+import { captureDestination } from '../app/submissionDestination.js'
 import { getUiState, resetUiState } from '../app/uiStore.js'
 import { useSessionLifecycle } from '../app/useSessionLifecycle.js'
-import { submitPrompt } from '../app/submissionCore.js'
 import { useQueue } from '../hooks/useQueue.js'
-import { captureDestination } from '../app/submissionDestination.js'
 import { loadPendingInputs } from '../lib/pendingInputs.js'
 
 async function coldResume(legacy: boolean) {
@@ -32,20 +34,25 @@ async function coldResume(legacy: boolean) {
   `], { cwd: process.cwd(), env: { ...process.env, HERMES_HOME: home }, stdio: 'pipe' })
   let queue!: ReturnType<typeof useQueue>
   let lifecycle!: ReturnType<typeof useSessionLifecycle>
+
   const request = vi.fn(async (method: string, params: any) => method === 'session.resume'
     ? { session_id: 'R2', session_key: 'S', messages: [], running: false, info: { model: 'test', tools: {}, skills: {}, stored_session_id: 'S', profile_name: 'default', running: false } }
     : { admission_id: params.submission_id, target_session_id: 'S', target_profile_home: home, status: 'queued' })
+
   function Harness() {
     queue = useQueue()
     lifecycle = useSessionLifecycle({ colsRef: { current: 80 }, composerActions: { setComposerTokens: vi.fn() },
       gw: { request }, rpc: async () => ({}), scrollRef: { current: null }, panel: vi.fn(), sys: vi.fn(),
       setHistoryItems: vi.fn(), setLastUserMsg: vi.fn(), setSessionStartedAt: vi.fn(), setStickyPrompt: vi.fn(),
       setVoiceProcessing: vi.fn(), setVoiceRecording: vi.fn() } as any)
+
     return <Text>{queue.queuedDisplay.join('|')}</Text>
   }
+
   const instance = renderSync(<Harness />, { stdin: new PassThrough() as any,
     stdout: Object.assign(new PassThrough(), { columns: 80, rows: 20, isTTY: false }) as any,
     stderr: new PassThrough() as any, patchConsole: false })
+
   try {
     lifecycle.resumeById('S')
     await vi.waitFor(() => expect(getUiState().sid).toBe('R2'))
@@ -60,6 +67,7 @@ async function coldResume(legacy: boolean) {
       { destination: item.destination, queueItem: item, skipDetectDrop: true })
     await new Promise(resolve => setImmediate(resolve))
     const submissions = request.mock.calls.filter(([method]) => method === 'prompt.submit')
+
     if (legacy) {
       expect(submissions).toEqual([])
       expect(queue.queueRef.current[0]).toMatchObject({ failed: true, legacyAttempted: true })

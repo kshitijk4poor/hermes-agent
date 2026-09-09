@@ -7,33 +7,41 @@ export interface CreationContract { sources: string[]; parameters: string[] }
 
 export function canonicalRequest(method: string, original: Record<string, unknown>, contract?: CreationContract) {
   const params = { ...original }
+
   if (method === 'session.create') {
     delete params.cols
     params.source = 'tui'
     params.request_id ??= randomUUID()
+
     if (!contract?.sources.includes('tui')) { throw new Error('gateway does not support tui session policy; update/restart the gateway') }
     const unsupported = Object.keys(params).filter(key => !contract.parameters.includes(key))
+
     if (unsupported.length) { throw new Error(`gateway does not support TUI launch options: ${unsupported.join(', ')}`) }
   }
+
   if (method === 'prompt.submit' && params.submission_id) {
     params.input_id = params.submission_id
     delete params.submission_id
   }
+
   if (method === 'session.resume' || method === 'session.activate') {
     method = 'session.resume'
     delete params.cols
     delete params.omit_messages
   }
+
   return { method, params }
 }
 
 export function canonicalResult(method: string, value: any, request: Record<string, unknown> = {}): any {
   if (!value || typeof value !== 'object') { return value }
+
   // The JSON-RPC response correlates the prepared input; admission_id is a
   // separate server-issued identity and must not be rewritten to that input ID.
   if (method === 'prompt.submit' && value.ref) {
     return { ...value, input_id: request.input_id, target_profile_home: value.ref.profile_id, target_session_id: value.ref.session_id }
   }
+
   if (['session.create', 'session.resume', 'session.activate'].includes(method)) {
     // Canonical snapshots contain stored conversation rows (`content`), not
     // the legacy TUI's display rows (`text`). Without this translation only
@@ -42,10 +50,12 @@ export function canonicalResult(method: string, value: any, request: Record<stri
       row && typeof row === 'object'
         ? { ...row, text: row.content, name: row.tool_name }
         : row) : value.messages
+
     return { ...value, messages, info: { ...value.info, stored_session_id: value.stored_session_id,
       execution_epoch: String(value.authority_epoch), execution_generation: value.execution_generation,
       running: value.running, pending_submissions: pendingSubmissions(value.pending) } }
   }
+
   return value
 }
 
@@ -54,12 +64,14 @@ export function canonicalResult(method: string, value: any, request: Record<stri
 // queue panel, the receipt matcher and Desktop all read the same list.
 export function pendingSubmissions(pending: unknown) {
   if (!Array.isArray(pending)) { return undefined }
+
   return pending.filter(row => row && typeof row === 'object').map(row => ({
     ...row, user: row.text, target_profile_home: row.ref?.profile_id, target_session_id: row.ref?.session_id }))
 }
 
 export function canonicalEvent<T extends { type: string; payload?: any }>(event: T): T {
   const pending = pendingSubmissions(event.payload?.pending)
+
   return pending ? { ...event, payload: { ...event.payload, pending_submissions: pending } } : event
 }
 
@@ -69,7 +81,10 @@ export function localCreationOptions(env = process.env): Record<string, unknown>
     skills: env.HERMES_TUI_SKILLS, checkpoints: env.HERMES_TUI_CHECKPOINTS,
     max_turns: env.HERMES_TUI_MAX_TURNS, accept_hooks: env.HERMES_ACCEPT_HOOKS
   }
+
   const options: Record<string, unknown> = Object.fromEntries(Object.entries(fields).filter(([, value]) => value))
+
   if (env.HERMES_TUI_TOOLSETS) { options.toolsets = env.HERMES_TUI_TOOLSETS.split(',') }
+
   return options
 }

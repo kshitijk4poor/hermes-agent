@@ -284,6 +284,7 @@ export function useSubmission(opts: UseSubmissionOptions) {
       if (typeof input !== 'string') {
         return sendQueued(input)
       }
+
       const full = input
 
       if (!full.trim()) {

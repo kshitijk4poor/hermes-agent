@@ -16,12 +16,16 @@ it('branch hydration replaces source authority only after a successful destinati
   vi.stubEnv('HERMES_HOME', home)
   vi.stubEnv('HERMES_TUI_ACTIVE_SESSION_FILE', join(home, 'active'))
   resetUiState()
+
   const source = { model: 'test', skills: {}, tools: {}, stored_session_id: 'stored-source',
     execution_epoch: 'source-owner', execution_generation: 9, running: true }
+
   patchUiState({ sid: 'source', info: source, busy: true })
   const pending: Array<{ method: string; resolve: (value: any) => void }> = []
+
   const request = vi.fn((method: string) => method === 'session.close'
     ? Promise.resolve({}) : new Promise(resolve => pending.push({ method, resolve })))
+
   const setHistoryItems = vi.fn()
   const sys = vi.fn()
   let slash!: (command: string) => boolean
@@ -31,14 +35,17 @@ it('branch hydration replaces source authority only after a successful destinati
       gw: { request }, rpc: request, scrollRef: { current: null }, panel: vi.fn(), sys,
       setHistoryItems, setLastUserMsg: vi.fn(), setSessionStartedAt: vi.fn(), setStickyPrompt: vi.fn(),
       setVoiceProcessing: vi.fn(), setVoiceRecording: vi.fn() } as any)
+
     slash = createSlashHandler({ slashFlightRef: { current: 0 }, gateway: { gw: { request }, rpc: request },
       local: {}, session: { ...lifecycle, setSessionStartedAt: vi.fn() }, transcript: { sys, setHistoryItems } } as any)
+
     return <Text>branch</Text>
   }
 
   const instance = renderSync(<Harness />, { stdin: new PassThrough() as any,
     stdout: Object.assign(new PassThrough(), { columns: 80, rows: 20, isTTY: false }) as any,
     stderr: new PassThrough() as any, patchConsole: false })
+
   const flush = () => new Promise(resolve => setImmediate(resolve))
 
   try {

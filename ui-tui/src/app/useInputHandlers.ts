@@ -1,8 +1,8 @@
-import { sharedControlParams } from '../canonicalGateway.js'
 import { forceRedraw, useInput } from '@hermes/ink'
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef } from 'react'
 
+import { sharedControlParams } from '../canonicalGateway.js'
 import { DASHBOARD_TUI_MODE } from '../config/env.js'
 import { DOUBLE_ESC_MS, TYPING_IDLE_MS } from '../config/timing.js'
 import { applyCompletion } from '../domain/slash.js'
@@ -256,9 +256,11 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
     if (overlay.approval) {
       const fresh = capturePromptResponseGuard('approval', overlay.approval)
+
       if (!fresh()) {
         return
       }
+
       return gateway
         .rpc<ApprovalRespondResponse>('approval.respond', { choice: 'deny', session_id: getUiState().sid, ...sharedControlParams(overlay.approval) })
         .then(r => r && fresh() && (patchOverlayState({ approval: null }), patchTurnState({ outcome: 'denied' })))

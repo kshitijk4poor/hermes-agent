@@ -1,4 +1,5 @@
 import { expect, it } from 'vitest'
+
 import { canonicalResult } from '../canonicalGateway.js'
 import { toTranscriptMessages } from '../domain/messages.js'
 
@@ -10,6 +11,7 @@ it('hydrates canonical persisted replies through the same transcript path as res
     { role: 'assistant', content: 'CLARIFY_FINISHED', timestamp: 123 },
     { role: 'session_meta', content: null },
   ]
+
   for (const method of ['session.create', 'session.resume', 'session.activate']) {
     const snapshot = canonicalResult(method, { messages, authority_epoch: 1, execution_generation: 2 })
     const rendered = toTranscriptMessages(snapshot.messages)

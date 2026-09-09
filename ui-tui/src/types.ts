@@ -1,4 +1,4 @@
-import type { ProjectInfo, SessionLiveInfo, SubagentStatus, ToolLabel } from '@hermes/shared/gateway-events'
+import type { SharedControl } from './canonicalGateway.js'
 
 export interface ActiveTool {
   context?: string
@@ -96,7 +96,7 @@ export interface DelegationStatus {
 }
 
 export interface ApprovalReq {
-  sharedControl?: import('./canonicalGateway.js').SharedControl
+  sharedControl?: SharedControl
   // false when the backend won't honor a permanent allow (tirith warning) → hide "Always allow".
   allowPermanent?: boolean
   choices?: string[]
@@ -124,7 +124,7 @@ export interface ClarifyQuestion {
 }
 
 export interface ClarifyReq {
-  sharedControl?: import('./canonicalGateway.js').SharedControl
+  sharedControl?: SharedControl
   choices: string[] | null
   question: string
   requestId: string

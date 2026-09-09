@@ -802,8 +802,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
     // snapshots replace that epoch; delayed push events cannot reset it.
     const current = getUiState().info
     const execution = (ev.payload ?? {}) as { execution_epoch?: string; execution_generation?: number }
+
     const genericError = ev.type === 'error' &&
       execution.execution_epoch === undefined && execution.execution_generation === undefined
+
     const lifecycle = !genericError && ['session.info', 'message.start', 'message.complete', 'error'].includes(ev.type)
 
     if (lifecycle && current?.execution_generation !== undefined) {
@@ -824,10 +826,12 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
     }
 
     const settled = ev as unknown as { type: string; payload?: { prompt_id?: string } }
+
     if (settled.type === 'approval.settled' || settled.type === 'clarify.settled') {
       const kind = settled.type === 'approval.settled' ? 'approval' : 'clarify'
       patchOverlayState(previous => previous[kind]?.sharedControl?.prompt_id === settled.payload?.prompt_id
         ? { ...previous, [kind]: null } : previous)
+
       return
     }
 
@@ -1391,8 +1395,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
       case 'clarify.request': {
         const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
+
         const sharedControl = shared.prompt_id && ev.session_id && typeof shared.execution_generation === 'number'
           ? { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id } : undefined
+
         const batch = (ev.payload.questions ?? [])
           .filter(q => typeof q?.qid === 'string' && q.qid && typeof q?.question === 'string' && q.question.trim())
           .map(q => ({
@@ -1426,8 +1432,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
       case 'approval.request': {
         const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
+
         const sharedControl = shared.prompt_id && ev.session_id && typeof shared.execution_generation === 'number'
           ? { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id } : undefined
+
         const description = String(ev.payload.description ?? 'dangerous command')
         // Only an explicit false (tirith warning) drops the permanent-allow option.
         const allowPermanent = ev.payload.allow_permanent !== false

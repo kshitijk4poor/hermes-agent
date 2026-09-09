@@ -16,7 +16,6 @@ import { reconnectBackoffDelayMs } from '@hermes/shared/reconnect-backoff'
 import { WebSocket as UndiciWebSocket } from 'undici'
 
 import { canonicalEvent, canonicalRequest, canonicalResult, type CreationContract } from './canonicalGateway.js'
-
 import type { GatewayEvent } from './gatewayTypes.js'
 import { CircularBuffer } from './lib/circularBuffer.js'
 import { recordParentLifecycle } from './lib/parentLog.js'
@@ -125,9 +124,11 @@ export interface LocalGatewayGrant { url: string; protocols: string[]; profile_i
 
 const bootstrapLocalGateway = async (start: boolean): Promise<LocalGatewayGrant> => {
   const root = process.env.HERMES_PYTHON_SRC_ROOT ?? resolve(import.meta.dirname, '../../')
+
   const { stdout } = await promisify(execFile)(resolvePython(root),
     [resolve(root, 'ui-tui/scripts/gateway_bootstrap.py'), ...(start ? ['--start'] : [])],
     { cwd: root, env: { ...process.env, PYTHONPATH: root }, timeout: 40_000, maxBuffer: 1024 * 1024 })
+
   return JSON.parse(stdout) as LocalGatewayGrant
 }
 
@@ -423,6 +424,7 @@ export class GatewayClient extends EventEmitter {
   hydrateSharedPrompts(snapshot: unknown) {
     if (!this.isCanonical) { return }
     const result = snapshot as { session_id: string; authority_epoch: number; prompts?: Array<Record<string, unknown>> }
+
     for (const prompt of result.prompts ?? []) {
       this.publishLocalEvent({ type: `${prompt.kind}.request`, session_id: result.session_id,
         payload: { ...prompt, execution_epoch: String(result.authority_epoch) } } as unknown as GatewayEvent)
@@ -518,9 +520,11 @@ export class GatewayClient extends EventEmitter {
             }
 
             this.connectSidecarMirror()
+
             if (this.isCanonical) {
               void this.requestOverWebSocket<{session_create: CreationContract}>('runtime.describe').then(description => {
                 this.creationContract = description.session_create
+
                 if (this.ws === ws) { this.publish({ type: 'gateway.ready', payload: {} }) }
               }).catch(error => {
                 this.publish({ type: 'gateway.start_timeout', payload: {
@@ -661,11 +665,13 @@ export class GatewayClient extends EventEmitter {
         // The canonical client owns readiness after runtime.describe. Forwarding
         // the listener's legacy ready as well creates two sessions/startup turns.
         if (this.isCanonical && ev.type === 'gateway.ready') { return }
+
         if (this.isCanonical) {
           const shared = ev as GatewayEvent & { authority_epoch?: number; execution_generation?: number }
           ev.payload = { ...canonicalEvent(ev).payload, execution_epoch: String(shared.authority_epoch),
             execution_generation: shared.execution_generation } as any
         }
+
         this.publish(ev)
       }
     }
@@ -766,6 +772,7 @@ export class GatewayClient extends EventEmitter {
 
     if (!this.ws || this.ws.readyState === WS_CLOSED || this.ws.readyState === WS_CLOSING) {
       this.start()
+
       if (!resolveGatewayAttachUrl()) { await this.bootstrapFlight }
     }
 
@@ -805,9 +812,11 @@ export class GatewayClient extends EventEmitter {
     }
 
     if (!this.bootstrapFlight) { this.start() }
+
     return this.bootstrapFlight!.then(() => {
       if (this.bootstrapError) { throw this.bootstrapError }
       const request = canonicalRequest(method, params, this.creationContract)
+
       return this.requestOverWebSocket<T>(request.method, request.params).then(value => canonicalResult(method, value, request.params))
     })
   }

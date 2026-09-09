@@ -21,6 +21,7 @@ function mount() {
   patchUiState({ sid: 'owner' })
   const images = new Map<string, string[]>()
   const pending: Array<{ sid: string; finish: (path: string) => void }> = []
+
   const request = vi.fn((method: string, params: any) => {
     if (method === 'image.attach' || method === 'clipboard.paste') {
       return new Promise(resolve => {
@@ -30,6 +31,7 @@ function mount() {
         } })
       })
     }
+
     if (method === 'image.detach') {
       images.set(params.session_id, (images.get(params.session_id) ?? []).filter(path => path !== params.path))
     } else if (!method.startsWith('complete.')) {
@@ -38,6 +40,7 @@ function mount() {
 
     return Promise.resolve({})
   })
+
   const gw = { request } as any
   const submitRef = { current: (_value: string) => {} }
   const slashRef = { current: (_value: string) => false }
@@ -85,6 +88,7 @@ function mount() {
 it('slash attachment submission leaves a visible removable image in the cleared composer', async () => {
   for (const command of ['/image /owned.png', '/paste']) {
     const h = mount()
+
     try {
       await h.submit(command)
       expect(h.pending).toHaveLength(1)
@@ -111,17 +115,21 @@ it('stale attachment cleanup uses its captured owner and preserves a concurrent 
       for (const samePath of [false, true]) {
         for (const staleFirst of [false, true]) {
           const h = mount()
+
           try {
             if (command === 'drop') {
               void h.composer.actions.handleTextPaste({ text: '/owned.png', value: '', cursor: 0 })
             } else {
               await h.submit(command)
             }
+
             h.composer.actions.setInput('user edit')
+
             if (navigation) {
               patchUiState({ sid: 'other' })
               h.composer.actions.clearIn()
             }
+
             await h.submit('/image /valid.png')
             expect(h.pending).toHaveLength(2)
             const validPath = samePath ? '/owned.png' : '/valid.png'
@@ -137,6 +145,7 @@ it('stale attachment cleanup uses its captured owner and preserves a concurrent 
             ])
             expect(h.images.get(sid)).toContain(validPath)
             const detach = h.request.mock.calls.filter(([method]) => method === 'image.detach')
+
             if (samePath && !navigation) {
               expect(detach).toEqual([])
             } else {

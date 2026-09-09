@@ -110,10 +110,12 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
   const [input, setInputState] = useState('')
   const [inputBuf, setInputBufState] = useState<string[]>([])
   const composerRevision = useRef(0)
+
   const setInputBuf = useCallback<StateSetter<string[]>>(next => {
     composerRevision.current++
     setInputBufState(next)
   }, [])
+
   const [tokens, setTokens] = useState<ComposerToken[]>([])
   // Tokens and the input line are read from keystroke handlers that run several
   // times before React re-renders, so the refs — not the state — are the source
@@ -209,6 +211,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
 
   const attachmentFlights = useRef(0)
   const staleAttachments = useRef<Array<{ destination: SubmissionDestination; path: string }>>([])
+
   const resolveAttachment = useCallback(
     async <T extends { path?: string }>(
       destination: SubmissionDestination,
@@ -217,12 +220,14 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
       accept: (attached: T | null) => ComposerPasteResult | null
     ): Promise<ComposerPasteResult | null> => {
       attachmentFlights.current++
+
       try {
         const attached = await request
 
         if (isCurrentDestination(destination) && revision === composerRevision.current) {
           return accept(attached)
         }
+
         if (attached?.path) {
           staleAttachments.current.push({ destination, path: attached.path })
         }
@@ -230,6 +235,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
         return null
       } finally {
         attachmentFlights.current--
+
         // Detach is path-based: wait for concurrent replies before deciding
         // whether that path belongs to a surviving visible attachment.
         if (!attachmentFlights.current) {
@@ -240,6 +246,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
             ) {
               continue
             }
+
             void gw.request('image.detach', { session_id: stale.destination.sid, path: stale.path }).catch(() => {})
           }
         }
@@ -274,6 +281,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
           if (r?.attached) {
             return attachImageToken(r, value, cursor)
           }
+
           if (!quiet) {
             sys(r?.message || 'No image found in clipboard')
           }

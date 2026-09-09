@@ -16,6 +16,7 @@ export const resetBubbleLedger = () => shown.clear()
 export function newlyStartedRows(previous: PendingRow[] | undefined, incoming: PendingRow[] | undefined): PendingRow[] {
   if (!previous || !incoming) { return [] }
   const wasQueued = new Set(previous.filter(row => row.status === 'queued').map(row => row.admission_id))
+
   return incoming.filter(row => row.status === 'started' && wasQueued.has(row.admission_id) && !(row.input_id && shown.has(row.input_id)))
 }
 

@@ -74,7 +74,9 @@ def _rewind(db, conn, session_id, payload):
     require_idle(db, conn, [session_id])
     target, ids, head, replacement = rewind_in_transaction(db, conn, session_id,
         payload['target_message_id'], preserve_compaction_handoff=payload.get('preserve_compaction_handoff', False))
-    target['content'] = db._decode_content(target.get('content'))
+    # Receipts are JSON: publish the same public message shape get_messages() returns (decoded
+    # content/tool_calls, no internal display_identity BLOB / display_order).
+    target = db._row_to_message_dict(target, warn_context='rewind receipt', summary_flag=True)
     conn.execute('UPDATE sessions SET runtime_generation=runtime_generation+1 WHERE id=?', (session_id,))
     return {session_id}, {'rewound_count': len(ids), 'target_message': target,
         'new_head_id': head, 'replacement_message_id': replacement}

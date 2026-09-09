@@ -104,7 +104,9 @@ export function submitPrompt(
 
     if (item) {
       item.preparedText ??= submitText
+
       if (opts.behindTurn) { item.queued = true }
+
       if (ownsTurn() && show) { markBubbleShown(item.submissionId) }
       savePendingInput(item)
     }
@@ -181,6 +183,7 @@ export function submitPrompt(
           try {
             item.legacyAttempted = true
             savePendingInput(item)
+
             const r = await deps.gw.request<PromptSubmitResponse>('prompt.submit', {
               session_id: sid,
               text: item.preparedText ?? submitText,

@@ -264,7 +264,10 @@ class TestScopedGatewayPidQuery:
         monkeypatch.setattr(status, "_pid_exists", lambda pid: False)
         assert status.get_running_pid(pid_path) is None
         assert not pid_path.exists()
-        assert not (profile_dir / "gateway.lock").exists()
+        # gateway.lock is an ownership inode (gateway/runtime_ownership.py): a stale record
+        # is cleared through the PID file only; unlinking the lock would let a contender that
+        # already opened it become a second owner.
+        assert (profile_dir / "gateway.lock").exists()
 
 
 class TestGatewayRuntimeStatus:

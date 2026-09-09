@@ -515,6 +515,7 @@ describe('createSlashHandler', () => {
       model: 'test', tools: {}, skills: {}, execution_epoch: 'owner', execution_generation: 2,
       execution_state: 'idle', running: false, stored_session_id: 'stored-source'
     }
+
     const flush = () => new Promise(resolve => setImmediate(resolve))
 
     for (const change of [

@@ -17,18 +17,22 @@ it('never redispatches an ambiguous legacy attempt after native journal reload',
   resetUiState()
   patchUiState({ sid: 'runtime', info: { model: 'test', tools: {}, skills: {}, stored_session_id: 'stored' } })
   const destination = captureDestination()
+
   const item: QueueItem = {
     submissionId: randomUUID(), text: 'exact Ω', display: 'exact Ω', destination, inFlight: true
   }
+
   item.settle = accepted => {
     item.inFlight = false
     item.failed = !accepted
     savePendingInput(item)
   }
+
   const request = vi.fn(async (_method: string, params: Record<string, unknown>) => {
     if (params.submission_id) { throw Object.assign(new Error('unsupported'), { code: 4094 }) }
     throw new Error('lost legacy ACK')
   })
+
   const deps = {
     gw: { request }, appendMessage: vi.fn(), enqueue: vi.fn(), expand: (value: string) => value,
     setLastUserMsg: vi.fn(), sys: vi.fn()

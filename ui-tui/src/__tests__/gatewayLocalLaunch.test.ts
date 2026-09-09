@@ -1,7 +1,8 @@
-import { afterEach, expect, it, vi } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+import { afterEach, expect, it, vi } from 'vitest'
 
 vi.mock('node:child_process', () => ({ execFile: vi.fn(), spawn: vi.fn(() => { throw new Error('independent owner forbidden') }) }))
 import { GatewayClient } from '../gatewayClient.js'

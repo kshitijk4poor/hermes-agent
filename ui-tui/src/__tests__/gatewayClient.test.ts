@@ -146,6 +146,7 @@ describe('GatewayClient websocket attach mode', () => {
     const gw = new GatewayClient(async () => ({ url: 'ws://gateway.test/api/ws', protocols: [], instance_id: 'owner', profile_id: 'fixture' }))
     const events: any[] = []
     gw.on('event', event => events.push(event))
+
     try {
       gw.start()
       gw.drain()
