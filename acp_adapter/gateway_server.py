@@ -17,6 +17,36 @@ from hermes_constants import get_hermes_home
 from acp_adapter.session import _translate_acp_cwd, _normalize_cwd_for_compare
 
 
+def _stage_user_content(content):
+    """Shared-converter output -> ``(text, attachments)`` for ``prompt.submit``.
+
+    Text-only prompts stay a plain string. Media parts (image ``data:`` URLs from
+    image blocks, image resource links and embedded blobs) are staged as bytes in
+    the profile image cache; the authority commits them at admission. Remote
+    image URLs cannot be staged and are kept as text so the model still sees them."""
+    if isinstance(content, str):
+        return content, []
+    import base64
+    from gateway.platforms.base import cache_image_from_bytes
+    texts, attachments = [], []
+    for part in content:
+        if part.get('type') == 'text':
+            texts.append(part['text'])
+            continue
+        url = part['image_url']['url']
+        if not url.startswith('data:'):
+            texts.append(f"[Image attached: {url}]")
+            continue
+        header, _, data = url.partition(',')
+        mime = header[len('data:'):].split(';', 1)[0] or 'image/png'
+        try:
+            path = cache_image_from_bytes(base64.b64decode(data), '.' + mime.split('/', 1)[1])
+        except ValueError as exc:
+            raise GatewayClientError('acp_content_invalid') from exc
+        attachments.append({'path': path, 'mime': mime})
+    return "\n".join(texts), attachments
+
+
 class GatewayACPAgent(acp.Agent):
     def __init__(self):
         self._conn = None
@@ -43,7 +73,7 @@ class GatewayACPAgent(acp.Agent):
         return InitializeResponse(protocol_version=acp.PROTOCOL_VERSION,
             agent_info=Implementation(name="hermes-agent", version=__version__),
             agent_capabilities=AgentCapabilities(load_session=True,
-                prompt_capabilities=PromptCapabilities(image=False),
+                prompt_capabilities=PromptCapabilities(image=True),
                 session_capabilities=SessionCapabilities(resume=SessionResumeCapabilities())),
             auth_methods=build_auth_methods())
 
@@ -164,10 +194,9 @@ class GatewayACPAgent(acp.Agent):
     async def prompt(self, prompt, session_id, **kwargs):
         if session_id not in self._snapshots:
             raise GatewayClientError("not_found")
-        if any(getattr(block, "type", None) != "text" for block in prompt):
-            raise GatewayClientError("acp_content_unavailable")
-        text = "\n".join(block.text for block in prompt)
-        if text.lstrip().startswith('/'):
+        from acp_adapter.content import _content_blocks_to_openai_user_content
+        text, attachments = _stage_user_content(_content_blocks_to_openai_user_content(prompt))
+        if text.lstrip().startswith('/') and not attachments:
             from hermes_cli.gateway_mutations import slash_mutation
             parts = text.strip().split(None, 1)
             operation, payload = slash_mutation(parts[0], parts[1] if len(parts) > 1 else '')
@@ -179,8 +208,11 @@ class GatewayACPAgent(acp.Agent):
             self._mutations.acknowledge(session_id, operation, payload)
             return PromptResponse(stop_reason='end_turn')
         client = await self._client()
+        submit = {'text': text}
+        if attachments:
+            submit['attachments'] = attachments
         receipt = await client.rpc("prompt.submit", session_id=session_id,
-                                   input_id=uuid.uuid4().hex, text=text)
+                                   input_id=uuid.uuid4().hex, **submit)
         admission_id = receipt["admission_id"]
         async with self._changed:
             await self._changed.wait_for(lambda: admission_id in self._terminals or self._failure is not None)
