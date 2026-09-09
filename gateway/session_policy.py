@@ -7,7 +7,9 @@ from pathlib import Path
 from hermes_state_runtime import RuntimeStoreError
 
 CREATE_FIELDS = frozenset({'request_id', 'source', 'cwd', 'model', 'toolsets',
-                           'provider', 'base_url', 'reasoning', 'max_turns', 'ignore_rules', 'api_key', 'editor'})
+                           'provider', 'base_url', 'reasoning', 'max_turns', 'ignore_rules', 'api_key', 'editor',
+                           'safe_mode', 'ignore_user_config'})
+BYPASS_FIELDS = ('safe_mode', 'ignore_user_config')
 SURFACES = {'cli': 'cli', 'tui': 'tui', 'gui': 'desktop', 'acp': 'acp'}
 
 
@@ -24,6 +26,10 @@ class LocalSessionPolicy:
     credential_ref: str | None = None
     config_secret_ref: str | None = None
     editor_mcp_json: str | None = None
+    # Troubleshooting isolation is derived by the owner at creation and frozen with the
+    # route; safe_mode always implies ignore_user_config (normalized once in build_policy).
+    safe_mode: bool = False
+    ignore_user_config: bool = False
 
     def config(self, authority=None):
         config = json.loads(self.config_json)
@@ -49,7 +55,7 @@ class LocalSessionPolicy:
 
     @property
     def ignore_rules(self):
-        return json.loads(self.request_json).get('ignore_rules', False)
+        return self.safe_mode or json.loads(self.request_json).get('ignore_rules', False)
 
     @property
     def max_turns(self):
@@ -63,16 +69,20 @@ class LocalSessionPolicy:
         return resolve_reasoning_config(self.config(), self.model or '')
 
 
-def build_policy(params, config, *, private_secrets=None):
+def build_policy(params, config, *, private_secrets=None, profile_terminal=True):
     from hermes_cli.tools_config import _get_platform_tools
     from toolsets import validate_toolset
     from agent.runtime_cwd import resolve_agent_cwd
-    from tools.terminal_scope import build_profile_terminal_scope
+    from tools.terminal_scope import build_profile_terminal_scope, default_terminal_scope
     from hermes_constants import get_hermes_home
 
     source = params.get('source', 'cli')
     if set(params) - CREATE_FIELDS or not isinstance(source, str) or source not in SURFACES:
         raise RuntimeStoreError('invalid_params')
+    if any(name in params and type(params[name]) is not bool for name in BYPASS_FIELDS):
+        raise RuntimeStoreError('invalid_params')
+    safe_mode = params.get('safe_mode', False)
+    ignore_user_config = safe_mode or params.get('ignore_user_config', False)
     if 'api_key' in params and (not isinstance(params['api_key'], str) or not params['api_key'].strip()):
         raise RuntimeStoreError('invalid_params')
     model = params.get('model')
@@ -128,7 +138,11 @@ def build_policy(params, config, *, private_secrets=None):
         enabled.add('project')
         if source == 'gui':
             enabled.add('desktop_ui')
-    terminal = build_profile_terminal_scope(get_hermes_home())
+    if safe_mode:
+        # Plugin toolsets are user customizations; the safe worker never imports them.
+        from hermes_cli.tools_config import _get_plugin_toolset_keys
+        enabled -= _get_plugin_toolset_keys()
+    terminal = build_profile_terminal_scope(get_hermes_home()) if profile_terminal else default_terminal_scope()
     terminal['TERMINAL_CWD'] = cwd
     request = {k: v for k, v in params.items() if k not in {'request_id', 'api_key'}}
     request.setdefault('source', 'cli')
@@ -137,7 +151,8 @@ def build_policy(params, config, *, private_secrets=None):
     _extract_config_secrets(config, private_secrets)
     _extract_config_secrets(terminal, private_secrets, (None,))
     return LocalSessionPolicy(source, SURFACES[source], cwd, model, tuple(sorted(enabled)),
-                              json.dumps(config), json.dumps(request, sort_keys=True), json.dumps(terminal))
+                              json.dumps(config), json.dumps(request, sort_keys=True), json.dumps(terminal),
+                              safe_mode=safe_mode, ignore_user_config=ignore_user_config)
 
 
 def _extract_config_secrets(value, private, path=()):
@@ -216,7 +231,9 @@ def restore_policy(data):
                 or not Path(policy.cwd).is_dir()
                 or not isinstance(policy.model, str) or not policy.model.strip()
                 or not isinstance(policy.toolsets, (list, tuple))
-                or any(not isinstance(name, str) for name in policy.toolsets)):
+                or any(not isinstance(name, str) for name in policy.toolsets)
+                or type(policy.safe_mode) is not bool or type(policy.ignore_user_config) is not bool
+                or (policy.safe_mode and not policy.ignore_user_config)):
             raise ValueError('invalid policy')
         from dataclasses import replace
         for value in (policy.config_json, policy.request_json, policy.terminal_json):

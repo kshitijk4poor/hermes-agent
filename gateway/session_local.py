@@ -75,18 +75,36 @@ def authorize_local_source(runner, source):
     return adapter.authorize_source(source)
 
 
+def _bypass_policy(params, *, private_secrets):
+    """Frozen snapshot for --safe-mode / --ignore-user-config: code defaults plus the explicit
+    launch options. The profile's config.yaml/.env are never read, so a malformed profile cannot
+    block or shape the session; there is no default model to inherit, so one must be explicit."""
+    import copy
+    from gateway.session_policy import build_policy
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+    if not params.get('model'):
+        raise RuntimeStoreError('invalid_params')
+    defaults = copy.deepcopy(DEFAULT_CONFIG)
+    if not isinstance(defaults.get('model'), dict):  # code default is the empty string
+        defaults['model'] = {}
+    return build_policy(params, defaults, private_secrets=private_secrets, profile_terminal=False)
+
+
 def create_local_session(authority, actor, params):
     if actor.profile_id != authority.profile_id:
         raise RuntimeStoreError('profile_mismatch')
     if 'session:create' not in actor.capabilities:
         raise RuntimeStoreError('permission_denied')
-    from gateway.session_policy import build_policy
+    from gateway.session_policy import build_policy, BYPASS_FIELDS
     from gateway.run import _load_gateway_config, _resolve_gateway_model
     from dataclasses import replace
     private_secrets = {}
-    policy = build_policy(params, _load_gateway_config(), private_secrets=private_secrets)
-    if policy.model is None:
-        policy = replace(policy, model=_resolve_gateway_model(policy.config()))
+    if any(params.get(name) is True for name in BYPASS_FIELDS):
+        policy = _bypass_policy(params, private_secrets=private_secrets)
+    else:
+        policy = build_policy(params, _load_gateway_config(), private_secrets=private_secrets)
+        if policy.model is None:
+            policy = replace(policy, model=_resolve_gateway_model(policy.config()))
     request_id = params.get('request_id', uuid.uuid4().hex)
     if not isinstance(request_id, str) or not request_id or len(request_id) > 256:
         raise RuntimeStoreError('invalid_params')
