@@ -11,7 +11,7 @@ import {
   MAX_AUTO_DRAIN_ATTEMPTS,
   parkQueuedPrompts
 } from '@/store/composer-queue'
-import { $connection } from '@/store/session'
+import { $connection, setSessionsLoading } from '@/store/session'
 
 import type { QueueEditState } from '../composer-utils'
 import type { ChatBarProps } from '../types'
