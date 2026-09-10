@@ -260,6 +260,7 @@ export async function hydrateFullConfig(
   scope?: { sid: string; isCurrent: () => boolean }
 ): Promise<ConfigFullResponse | null> {
   const params = scope ? { session_id: scope.sid } : {}
+
   const [cfg, busy] = await Promise.all([
     quietRpc<ConfigFullResponse>(gw, 'config.get', { key: 'full', ...params }),
     gw.isCanonical && scope ? quietRpc(gw, 'config.get', { key: 'busy', ...params }) : null
@@ -270,6 +271,7 @@ export async function hydrateFullConfig(
   }
 
   applyDisplay(cfg, setBell, setVoiceRecordKey, setBellOnPrompt, !gw.isCanonical)
+
   if (gw.isCanonical && BUSY_MODES.has(busy?.value)) {
     patchUiState({ busyInputMode: busy!.value })
   }
@@ -362,7 +364,7 @@ export function useConfigSync({
     // check still runs when the user opens /voice.
     setVoiceEnabled(process.env.HERMES_VOICE === '1')
     quietRpc<ConfigMtimeResponse>(gw, 'config.get', { key: 'mtime', session_id: sid }).then(r => {
-      if (!scope.isCurrent()) return
+      if (!scope.isCurrent()) {return}
       mtimeRef.current = Number(r?.mtime ?? 0)
       // Seed the MCP revision baseline too: after a normal boot mtime is
       // already non-zero, so the poller's baseline branch never runs, and an
@@ -371,6 +373,7 @@ export function useConfigSync({
       mcpRevRef.current.accepted = String(r?.mcp_rev ?? '')
     })
     void hydrateFullConfig(gw, setBellOnComplete, setVoiceRecordKey, setBellOnPrompt, scope)
+
     return () => {
       active = false
     }
@@ -383,9 +386,10 @@ export function useConfigSync({
 
     let active = true
     const scope = { sid, isCurrent: () => active && getUiState().sid === sid }
+
     const id = setInterval(() => {
       quietRpc<ConfigMtimeResponse>(gw, 'config.get', { key: 'mtime', session_id: sid }).then(r => {
-        if (!scope.isCurrent()) return
+        if (!scope.isCurrent()) {return}
         const next = Number(r?.mtime ?? 0)
         const nextMcpRev = String(r?.mcp_rev ?? '')
 
