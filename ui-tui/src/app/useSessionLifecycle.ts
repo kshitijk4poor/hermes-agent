@@ -414,8 +414,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               busy: running,
               info,
               sid: r.session_id,
-              status: statusFromLiveSession(r.status ?? undefined, running),
-              storedSid,
+              gatewayConnected: true,
+              status: statusFromLiveSession(r.status, running),
               usage: usageFrom(info)
             })
             gw.hydrateSharedPrompts?.(r)

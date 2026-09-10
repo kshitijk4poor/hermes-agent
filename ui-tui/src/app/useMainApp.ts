@@ -260,7 +260,7 @@ export function useMainApp(gw: GatewayClient) {
   const onServerRequestRef = useRef<(request: ServerRequest) => boolean>(() => false)
   const sysRef = useRef<(text: string) => void>(() => {})
   const submitRef = useRef<(value: string) => void>(() => {})
-  const submitLiteralRef = useRef<(value: string) => void>(() => {})
+  const submitLiteralRef = useRef<(value: string, attachments?: Array<{ path: string; mime: string }>) => void>(() => {})
   const terminalHintsShownRef = useRef(new Set<string>())
   const historyItemsRef = useRef(historyItems)
   const lastUserMsgRef = useRef(lastUserMsg)
@@ -877,6 +877,7 @@ export function useMainApp(gw: GatewayClient) {
   useEffect(() => {
     if (
       !ui.sid ||
+      ui.gatewayConnected === false ||
       ui.busy ||
       composerRefs.queueEditRef.current !== null ||
       composerRefs.queueRef.current.length === 0
@@ -890,7 +891,7 @@ export function useMainApp(gw: GatewayClient) {
       patchUiState({ busy: true, status: 'running…' })
       sendQueued(next)
     }
-  }, [ui.sid, ui.busy, composerActions, composerRefs, sendQueued])
+  }, [ui.sid, ui.busy, ui.gatewayConnected, composerActions, composerRefs, sendQueued])
 
   const { pagerPageSize } = useInputHandlers({
     actions: {
@@ -1016,25 +1017,18 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
-      // A still-owned child dying while the TUI is alive is an *unexpected*
-      // death — respawn the gateway and resume the persisted session via the
-      // next gateway.ready. session.resume takes the durable stored id, not the
-      // process-local runtime sid. planGatewayRecovery bounds the attempts so a
-      // crash-looping gateway can't spawn-storm.
-      const plan = planGatewayRecovery(storedSid, recoverSidRef.current, recoveryAtRef.current, Date.now())
+      // Keep the old destination for durable offline input; discovery retries
+      // must never silently create a replacement for an ended session.
+      const plan = planGatewayRecovery(getUiState().sid, recoverSidRef.current, recoveryAtRef.current, Date.now())
 
-      // Clear sid immediately: while the gateway is down, sid-guarded effects
-      // (session.active_list poll, queue drain) would otherwise fire RPCs at a
-      // dead/respawning gateway. recoverSidRef carries the session forward, and
-      // resumeById restores sid once the fresh gateway is ready.
       recoveryAtRef.current = plan.attempts
-      patchUiState({ busy: false, compacting: false, sid: null, status: t('session.status.restarting') })
+      patchUiState({ busy: false, compacting: false, gatewayConnected: false, status: 'gateway exited' })
 
-      if (plan.recover && plan.sid) {
+      if (plan.sid) {
         recoverSidRef.current = plan.sid
-        turnController.pushActivity(backendRestartingActivity(), 'warn')
-        sys(backendRestarting())
-        gw.start()
+        turnController.pushActivity('gateway exited · recovering session…', 'warn')
+        sys('gateway exited — recovering your session (any in-flight reply was lost)')
+        // GatewayClient retries discovery without starting a stopped owner.
 
         return
       }

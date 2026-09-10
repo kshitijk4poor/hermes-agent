@@ -18,6 +18,8 @@ import type {
 } from '../gatewayTypes.js'
 import { t } from '../i18n/runtime.js'
 import { billingDialogCopy } from '../lib/billingDialog.js'
+import { relativeLuminance } from '../lib/color.js'
+import { stageImagePath, type ImageAttachment } from '../lib/imageAttachments.js'
 import { isTodoDone } from '../lib/liveProgress.js'
 import { openExternalUrl } from '../lib/openExternalUrl.js'
 import { rpcErrorMessage } from '../lib/rpc.js'
@@ -655,18 +657,27 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return sys(t('gatewayMsg.startup.querySkipped'))
       }
 
+      const destination = captureDestination()
+      const attachments: ImageAttachment[] = []
+
       if (STARTUP_IMAGE) {
         try {
-          await rpc('image.attach', { path: STARTUP_IMAGE, session_id: sid })
+          if (gw.isCanonical) {
+            const image = await stageImagePath(STARTUP_IMAGE, gw, destination)
+            attachments.push({ path: image.path, mime: image.mime })
+          } else {
+            await rpc('image.attach', { path: STARTUP_IMAGE, session_id: sid })
+          }
         } catch (e) {
-          sys(t('gatewayMsg.startup.imageAttachFailed', rpcErrorMessage(e)))
+          return sys(`startup image attach failed: ${rpcErrorMessage(e)}`)
         }
       }
 
       // Startup queries are arbitrary launcher/script text (Omarchy prompted
       // launches, `hermes --tui -q "…"`) — submit LITERALLY, bypassing the
       // slash/!/interpolation dispatcher, matching one-shot's semantics.
-      submitLiteralRef.current(STARTUP_QUERY || 'What do you see in this image?')
+      if (!isCurrentDestination(destination)) { return sys('startup query skipped: active session changed') }
+      submitLiteralRef.current(STARTUP_QUERY || 'What do you see in this image?', attachments)
     }, 0)
   }
 
