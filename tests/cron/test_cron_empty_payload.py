@@ -230,7 +230,8 @@ def _legacy_empty_job(hermes_env):
     save_jobs(jobs)
     return dict(job, prompt="   ")
 
-def test_run_job_fails_closed_and_never_builds_an_agent(hermes_env):
+
+def test_run_job_fails_closed_and_never_builds_an_agent(hermes_env, cron_owner):
     import cron.scheduler as scheduler
 
     job = _legacy_empty_job(hermes_env)
@@ -248,7 +249,24 @@ def test_run_job_fails_closed_and_never_builds_an_agent(hermes_env):
     # Not silent: the user gets told why the job stopped.
     assert "auto-paused" in final
 
-def test_run_one_job_does_not_resurrect_the_paused_job(hermes_env):
+
+def test_run_job_pauses_the_job_on_disk(hermes_env, cron_owner):
+    """Fail-closed isn't enough — the job must stop being scheduled."""
+    import cron.scheduler as scheduler
+    from cron.jobs import get_job
+
+    job = _legacy_empty_job(hermes_env)
+
+    scheduler.run_job(job)
+
+    stored = get_job(job["id"])
+    assert stored["enabled"] is False
+    assert stored["state"] == "paused"
+    assert "nothing to run" in (stored["paused_reason"] or "")
+    assert stored["paused_at"]
+
+
+def test_run_one_job_does_not_resurrect_the_paused_job(hermes_env, cron_owner):
     """The real caller runs post-run bookkeeping (mark_job_run) after run_job
     returns. That must not undo the pause, or the job re-fires every tick."""
     import cron.scheduler as scheduler
