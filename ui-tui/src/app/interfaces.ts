@@ -670,5 +670,5 @@ export interface AppOverlaysProps {
  * path, used to detach the image when its token is deleted.
  */
 export type ComposerToken =
-  | { index: number; kind: 'image'; label: string; path: string; text?: undefined }
+  | { index: number; kind: 'image'; label: string; path: string; mime?: string; text?: undefined }
   | { index?: undefined; kind: 'paste'; label: string; path?: string; text: string }
