@@ -7971,6 +7971,185 @@ const ensureNativeAccessToken: (baseUrl: string, options?: NativeAccessTokenOpti
   nativeAccessTokenCoordinator.ensure
 
 interface GatewayFileConnection extends RegistryBackendRequestScope {
+  authMode?: 'oauth' | 'token'
+  baseUrl: string
+  token?: null | string
+}
+
+  try {
+    const body = await postJsonNoAuth(
+      nativeRefreshUrl(baseUrl),
+      { refresh_token: tokens.refreshToken, provider: tokens.provider },
+      { timeoutMs: 10_000 }
+    )
+
+    const rotated = parseTokenResponse(body)
+    _storeNativeTokens(baseUrl, rotated)
+
+    return rotated.accessToken
+  } catch (error: any) {
+    // A 401 means the RT is dead (session_expired) — drop tokens so the UI
+    // prompts a fresh native login. A 503/transient keeps them for a retry.
+    if (error && error.statusCode === 401) {
+      _clearNativeTokens(baseUrl)
+
+      return null
+    }
+
+    throw error
+  }
+}
+
+// OAuth-session download that streams the response body straight to a
+// user-selected destination (via finalizeGatewayDownload). The connect timeout
+// is cleared once the response headers arrive.
+function downloadViaOauthSessionToFile(url, ctx, options: any = {}) {
+  return new Promise((resolve, reject) => {
+    const sess = getOauthSessionForUrl(url)
+
+    if (!sess) {
+      reject(new Error('OAuth session partition is unavailable.'))
+
+      return
+    }
+
+    let parsed
+
+    try {
+      parsed = new URL(url)
+    } catch (error) {
+      reject(new Error(`Invalid URL: ${error.message}`))
+
+      return
+    }
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
+
+      return
+    }
+
+    const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
+
+    const request = electronNet.request({
+      method: 'GET',
+      url,
+      session: sess,
+      useSessionCookies: true,
+      redirect: 'follow'
+    } as any)
+
+    let settled = false
+
+    const timer = setTimeout(() => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+
+      try {
+        request.abort()
+      } catch {
+        // already finished
+      }
+
+      reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
+    }, timeoutMs)
+
+    request.on('response', res => {
+      if (settled) {
+        return
+      }
+
+      // Response headers arrived — cancel the connect timeout so it can't abort
+      // the stream while the save dialog is open or bytes are still flowing.
+      settled = true
+      clearTimeout(timer)
+      finalizeGatewayDownload(res, res.statusCode || 500, res.headers || {}, {
+        ...ctx,
+        abort: () => {
+          try {
+            request.abort()
+          } catch {
+            // already finished
+          }
+        }
+      }).then(resolve, reject)
+    })
+    request.on('error', error => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      clearTimeout(timer)
+      reject(error)
+    })
+    request.end()
+  })
+}
+
+// Shared tail for both transports: validate status, pick a filename, prompt the
+// save dialog, then stream the (still-unconsumed) response body to the chosen
+// destination. On an HTTP error the status code is attached so saveGatewayFile
+// can trigger the 404-only compatibility fallback.
+async function finalizeGatewayDownload(res, statusCode, headers, ctx: any = {}) {
+  if (statusCode >= 400) {
+    const message = await readGatewayErrorText(res)
+    const error: any = new Error(`${statusCode}: ${message}`)
+    error.statusCode = statusCode
+    throw error
+  }
+
+  const disposition = headers['content-disposition'] || headers['Content-Disposition']
+  const filename = filenameFromContentDisposition(disposition) || ctx.suggested || ctx.fallbackName
+
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: filename,
+    title: 'Save File'
+  })
+
+  if (result.canceled || !result.filePath) {
+    ctx.abort?.()
+
+    return { canceled: true, saved: false }
+  }
+
+  try {
+    // Failure-atomic: exclusive temp create beside the destination, rename into
+    // place only once the body is complete (#96597).
+    await pumpStreamToFile(res, result.filePath, fsPumpDeps())
+  } catch (error) {
+    ctx.abort?.()
+    throw error
+  }
+
+  return { path: result.filePath, saved: true }
+}
+
+// Read a bounded amount of an error response body for the thrown message.
+function readGatewayErrorText(res): Promise<string> {
+  return new Promise(resolve => {
+    const chunks = []
+    let total = 0
+
+    res.on('data', chunk => {
+      if (total >= 500) {
+        return
+      }
+
+      const buffer = Buffer.from(chunk)
+
+      total += buffer.length
+      chunks.push(buffer)
+    })
+    res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8').slice(0, 500)))
+    res.on('error', () => resolve(Buffer.concat(chunks).toString('utf8').slice(0, 500)))
+  })
+}
+
+interface GatewayFileConnection extends RegistryBackendRequestScope {
   gatewayEndpoint?: GatewayEndpoint
   authMode?: 'oauth' | 'token' | 'native'
   baseUrl: string
@@ -7995,373 +8174,6 @@ async function gatedFileAuth(connection: GatewayFileConnection) {
     connection.authMode === 'oauth' ? await ensureNativeAccessToken(connection.baseUrl).catch(() => null) : null
 
   return resolveGatedDownloadAuth(connection.authMode, nativeAt, connection.token)
-}
-
-function gatewayFileRequestPath(
-  connection: GatewayFileConnection,
-  connectionId: null | string,
-  profile: null | string,
-  requestPath: string
-) {
-  return connectionId
-    ? pathForRegistryBackendRequest(requestPath, profile, connection)
-    : pathWithGlobalRemoteProfile(requestPath, profile, profileRouteOptions(profile))
-}
-
-async function saveGatewayFile(payload: GatewayFileSavePayload = {}) {
-  const filePath = gatewayFilePath(payload.path)
-
-  if (!filePath) {
-    throw new Error('Missing gateway file path')
-  }
-
-  const { connection, connectionId, profile } = await resolveGatewayFileBackend<GatewayFileConnection>(payload, {
-    ensureLegacy: ensureBackend,
-    ensureRegistry: ensureRegistryBackend
-  })
-
-  const suggested = String(payload.suggestedName || '').trim()
-  const fallbackName = path.basename(filePath) || suggested || 'download'
-  const ctx = { suggested, fallbackName }
-
-  const requestPaths = gatewayFileRequestPaths(
-    filePath,
-    requestPath => gatewayFileRequestPath(connection, connectionId, profile, requestPath),
-    payload.sessionId
-  )
-
-  const url = `${connection.baseUrl}${requestPaths.download}`
-
-  try {
-    const auth = await gatedFileAuth(connection)
-
-    if (auth.kind === 'bearer') {
-      return await downloadViaTokenToFile(url, auth.token, ctx, finalizeGatewayDownload, { bearer: auth.token })
-    }
-
-    if (auth.kind === 'cookie') {
-      return await downloadViaOauthSessionToFile(url, ctx)
-    }
-
-    return await downloadViaTokenToFile(url, auth.token, ctx, finalizeGatewayDownload, { gatewayDescriptor: connection.gatewayEndpoint ? connection : undefined })
-  } catch (error) {
-    // Desktop and the remote gateway update independently. A gateway predating
-    // /api/fs/download 404s here; fall back (ONLY on 404) to the older capped
-    // data-URL route so downloads keep working against older backends.
-    if (isNotFoundError(error)) {
-      return await saveGatewayFileViaDataUrl(connection, requestPaths.dataUrl, ctx)
-    }
-
-    throw error
-  }
-}
-
-// Compatibility fallback: fetch the file through the capped
-// `/api/fs/read-data-url` route, decode it, and save. Bounded by the gateway's
-// data-URL cap, so it only serves smaller files — enough to keep older gateways
-// working until they gain the streaming route.
-async function saveGatewayFileViaDataUrl(
-  connection: GatewayFileConnection,
-  requestPath: string,
-  ctx: GatewayFileSaveContext
-) {
-  const url = `${connection.baseUrl}${requestPath}`
-  const auth = await gatedFileAuth(connection)
-  let json: unknown
-
-  if (auth.kind === 'bearer') {
-    json = await fetchJson(url, null, { bearer: auth.token })
-  } else if (auth.kind === 'cookie') {
-    json = await fetchJsonViaOauthSession(url)
-  } else {
-    json = await fetchJson(url, auth.token, { gatewayDescriptor: connection.gatewayEndpoint ? connection : undefined })
-  }
-
-  const dataUrl =
-    json && typeof json === 'object' && 'dataUrl' in json && typeof json.dataUrl === 'string' ? json.dataUrl : ''
-
-  if (!dataUrl) {
-    throw new Error('Gateway returned no file data')
-  }
-
-  const buffer = parseDataUrlToBuffer(dataUrl)
-  const filename = ctx.suggested || ctx.fallbackName
-
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: filename,
-    title: 'Save File'
-  })
-
-  if (result.canceled || !result.filePath) {
-    return { canceled: true, saved: false }
-  }
-
-  // Same failure-atomic contract as the streaming path: a direct writeFile
-  // truncates an existing destination before the write completes (#96597).
-  await writeBufferToFile(buffer, result.filePath, fsPumpDeps())
-
-  return { path: result.filePath, saved: true }
-}
-
-// Mint a single-use WS ticket for a gated gateway. Returns the ticket string.
-// Prefers a native bearer token (cookieless RFC 8252 flow) when present,
-// falling back to the OAuth cookie partition otherwise.
-// Throws (with statusCode 401) if the session cookie is missing/expired —
-// callers treat that as "needs re-login".
-// Transient transport blips (brief host unreachable, 5xx, timeouts) are retried
-// a few times before failing — those 1-3s flaps were promoting into the
-// full-screen "couldn't start" lockout on reconnect.
-async function mintGatewayWsTicket(baseUrl, headers = {}) {
-  return withTransientRetries(async () => {
-    // Native flow: mint the ticket with the bearer token, no cookie involved.
-    const nativeAt = await ensureNativeAccessToken(baseUrl).catch(() => null)
-
-    if (nativeAt) {
-      const body = (await fetchJson(`${baseUrl}/api/auth/ws-ticket`, null, {
-        method: 'POST',
-        timeoutMs: 8_000,
-        bearer: nativeAt,
-        headers
-      })) as any
-
-      const ticket = body?.ticket
-
-      if (!ticket || typeof ticket !== 'string') {
-        throw new Error('Gateway did not return a WS ticket.')
-      }
-
-      return ticket
-    }
-
-    const body = (await fetchJsonViaOauthSession(`${baseUrl}/api/auth/ws-ticket`, {
-      method: 'POST',
-      timeoutMs: 8_000,
-      headers
-    })) as any
-
-    const ticket = body?.ticket
-
-    if (!ticket || typeof ticket !== 'string') {
-      throw new Error('Gateway did not return a WS ticket.')
-    }
-
-    return ticket
-  })
-}
-
-// Build a fresh WS URL for the *current* connection. Critical for reconnects:
-// OAuth WS tickets are single-use with a ~30s TTL, so the ticket baked into
-// the cached connection's wsUrl is stale on the second connect. The renderer
-// calls this immediately before every gateway.connect() so each WS upgrade
-// carries a freshly-minted ticket. For local/token connections this just
-// reuses the static token (no minting needed).
-async function freshGatewayWsUrl(profile, webContentsId) {
-  // Mint for the requested profile's backend, NOT always the primary. The
-  // renderer re-mints right before every gateway.connect(); when swapping to a
-  // pooled profile we must return THAT backend's ws URL, otherwise the connect
-  // silently lands back on the primary (default) backend and writes sessions to
-  // the wrong profile's DB. A null/empty profile resolves to the primary, so
-  // legacy callers and single-profile users are unchanged.
-  const connection = await ensureBackend(profile)
-
-  if (connection.gatewayEndpoint) {
-    return redialLocalGateway({
-      ensure: () => ensureBackend(profile),
-      forget: () => forgetLocalGatewayDescriptor(profile),
-      use: async current => {
-        const ticket = await mintLocalGatewayTicket(current.gatewayEndpoint)
-
-        return localGatewayDials.prepare(current.baseUrl, ticket, webContentsId)
-      }
-    })
-  }
-
-  if (connection.authMode === 'oauth') {
-    const ticket = await mintGatewayWsTicket(connection.baseUrl, connection.headers)
-    const wsUrl = buildGatewayWsUrlWithTicket(connection.baseUrl, ticket)
-
-    rememberRemoteWsHeaders(wsUrl, connection.headers)
-
-    return wsUrl
-  }
-
-  // Local/token: the cached wsUrl already carries the (long-lived) token.
-  rememberRemoteWsHeaders(connection.wsUrl, connection.headers)
-
-  return connection.wsUrl
-}
-
-// --- Hermes Cloud discovery + silent per-agent sign-in (cloud-auto-discovery
-// Phase 3) ---------------------------------------------------------------
-//
-// The "cloud" connection mode lets a user sign in to the Nous portal ONCE in
-// the OAuth session partition, then (a) discover their hosted agents and (b)
-// connect to any of them with no second interactive sign-in. Both ride the one
-// portal session cookie living in `persist:hermes-remote-oauth`:
-//   - discovery  → GET {portal}/api/agents over the partition-bound net; the
-//     portal session cookie authenticates it (NAS Phase 2.5 accepts the cookie).
-//   - cascade    → opening an agent's own /login in the same partition hits the
-//     portal's silent auto-approve (org member, existing session) and 302s back
-//     with that agent's session cookie — no prompt. Each agent still completes
-//     its own PKCE exchange; SSO removes the human click, not a security check.
-
-// Canonical Nous portal base URL, overridable for staging/dev. Mirrors the CLI
-// convention (hermes_cli/auth.py DEFAULT_NOUS_PORTAL_URL + the same env names)
-// so a single override flips every Hermes surface to the same portal.
-const DEFAULT_NOUS_PORTAL_URL = 'https://portal.nousresearch.com'
-
-function resolvePortalBaseUrl() {
-  const raw = process.env.HERMES_PORTAL_BASE_URL || process.env.NOUS_PORTAL_BASE_URL || DEFAULT_NOUS_PORTAL_URL
-
-  return String(raw).trim().replace(/\/+$/, '')
-}
-
-// Whether the OAuth partition currently holds a live Nous portal session — the
-// credential that powers both discovery and the silent cascade. The portal
-// authenticates via PRIVY, not the Hermes gateway session cookies, so this
-// checks for the `privy-token` cookie on the portal host (NOT
-// hasLiveOauthSession, which looks for hermes_session_at/rt that the portal
-// never sets). See connection-config.ts cookiesHavePrivySession.
-//
-// Mirrors hasLiveOauthSession's cold-start guard (#73495): a `persist:`
-// partition's cookie store hydrates lazily, so the FIRST read on a fresh boot
-// can come back empty even for a signed-in user. The renderer checks Cloud
-// status exactly once on entering cloud mode, so a single false-negative here
-// used to clear the discovered agent list and demand a re-login that a plain
-// retry would have avoided. Warm the store and re-read with a short backoff
-// before trusting a negative.
-async function hasLivePortalSession() {
-  const sess = getOauthSession()
-
-  if (!sess) {
-    return false
-  }
-
-  const portalBaseUrl = resolvePortalBaseUrl()
-  const parsed = new URL(portalBaseUrl)
-
-  const readPortal = async () => {
-    try {
-      const cookies = await sess.cookies.get({ url: portalBaseUrl })
-
-      return cookiesHavePrivySession(cookies)
-    } catch {
-      try {
-        const cookies = await sess.cookies.get({ domain: parsed.hostname })
-
-        return cookiesHavePrivySession(cookies)
-      } catch {
-        return false
-      }
-    }
-  }
-
-  if (await readPortal()) {
-    return true
-  }
-
-  await warmOauthCookieStore()
-
-  for (const delayMs of [30, 60, 90]) {
-    if (await readPortal()) {
-      return true
-    }
-
-    await new Promise(resolve => setTimeout(resolve, delayMs))
-  }
-
-  return readPortal()
-}
-
-// Whether the jar holds the short-lived Privy ACCESS token — the exact cookie
-// `/api/agents` validates. hasLivePortalSession() answers "signed in at all?"
-// (renewal material counts); this answers "can discovery succeed right now?".
-async function hasPortalAccessToken() {
-  const sess = getOauthSession()
-
-  if (!sess) {
-    return false
-  }
-
-  const portalBaseUrl = resolvePortalBaseUrl()
-  const parsed = new URL(portalBaseUrl)
-
-  try {
-    const cookies = await sess.cookies.get({ url: portalBaseUrl })
-
-    return cookiesHavePrivyAccessToken(cookies)
-  } catch {
-    try {
-      const cookies = await sess.cookies.get({ domain: parsed.hostname })
-
-      return cookiesHavePrivyAccessToken(cookies)
-    } catch {
-      return false
-    }
-  }
-}
-
-// Bounded silent renewal of the short-lived Privy access token (#73495).
-//
-// After a Desktop restart the long-lived `privy-session` / `privy-refresh-token`
-// cookies routinely survive while the ~1h `privy-token` access cookie has
-// expired. Discovery then 401s and the only offered recovery used to be a full
-// interactive re-login — even though the persisted refresh material can mint a
-// fresh access token with no user action: loading any portal page runs the
-// Privy client, which rotates a new `privy-token` from the refresh session.
-//
-// This drives exactly that, headlessly: a hidden window on the portal root in
-// the OAuth partition, polled until the access cookie lands, torn down on a
-// bounded timeout. Never shown — if renewal can't complete silently the caller
-// falls back to the interactive needsCloudLogin path. The in-flight promise is
-// shared so concurrent discovery + cascade calls ride one renewal.
-let portalAccessRenewal: Promise<boolean> | null = null
-
-function renewPortalAccessSilently() {
-  if (portalAccessRenewal) {
-    return portalAccessRenewal
-  }
-
-  portalAccessRenewal = (async () => {
-    if (!app.isReady()) {
-      return false
-    }
-
-    const sess = getOauthSession()
-
-    if (!sess) {
-      return false
-    }
-
-    // No renewal material at all → nothing to renew; interactive login is
-    // genuinely required.
-    if (!(await hasLivePortalSession())) {
-      return false
-    }
-
-    if (await hasPortalAccessToken()) {
-      return true
-    }
-
-    const portalBaseUrl = resolvePortalBaseUrl()
-
-    return await new Promise<boolean>(resolve => {
-      let settled = false
-      let win = null
-      let pollTimer = null
-      let deadlineTimer = null
-
-      const finish = (ok: boolean) => {
-        if (settled) {
-          return
-        }
-
-interface GatewayFileSavePayload {
-  sessionId?: string
-  connectionId?: unknown
-  path?: unknown
-  profile?: unknown
-  suggestedName?: unknown
 }
 
 function gatewayFileRequestPath(
@@ -8397,29 +8209,27 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<Ga
     payload.sessionId
   )
 
-  const deps: GatewayFileSaveDeps = {
-    showSaveDialog: (options: GatewaySaveDialogOptions): Promise<GatewaySaveDialogResult> =>
-      dialog.showSaveDialog(mainWindow, options)
-  }
+  const url = `${connection.baseUrl}${requestPaths.download}`
 
-  return saveGatewayDownload(requestPaths, ctx, {
-    ...deps,
-    download: async (requestPath: string, context: GatewayFileSaveContext): Promise<GatewayFileSaveResult> => {
-      const url: string = `${connection.baseUrl}${requestPath}`
+  try {
+    const auth = await gatedFileAuth(connection)
 
-      if (connection.authMode === 'oauth') {
-        return requestWithOauthFallback(connection.baseUrl, {
-          ensureNativeAccessToken,
-          requestWithBearer: (bearer: string): Promise<GatewayFileSaveResult> =>
-            downloadViaTokenToFile(url, null, context, deps, { bearer }),
-          requestWithCookie: (): Promise<GatewayFileSaveResult> =>
-            downloadViaOauthSessionToFile<Session>(url, context, {
-              ...deps,
-              getSession: getOauthSessionForUrl,
-              request: electronNet.request
-            })
-        })
-      }
+    if (auth.kind === 'bearer') {
+      return await downloadViaTokenToFile(url, auth.token, ctx, finalizeGatewayDownload, { bearer: auth.token })
+    }
+
+    if (auth.kind === 'cookie') {
+      return await downloadViaOauthSessionToFile(url, ctx)
+    }
+
+    return await downloadViaTokenToFile(url, auth.token, ctx, finalizeGatewayDownload, { gatewayDescriptor: connection.gatewayEndpoint ? connection : undefined })
+  } catch (error) {
+    // Desktop and the remote gateway update independently. A gateway predating
+    // /api/fs/download 404s here; fall back (ONLY on 404) to the older capped
+    // data-URL route so downloads keep working against older backends.
+    if (isNotFoundError(error)) {
+      return await saveGatewayFileViaDataUrl(connection, requestPaths.dataUrl, ctx)
+    }
 
       return downloadViaTokenToFile(url, connection.token ?? null, context, deps)
     },
@@ -8427,8 +8237,26 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<Ga
   })
 }
 
-async function readGatewayFileDataUrl(connection: GatewayFileConnection, requestPath: string): Promise<string> {
-  const json: unknown = await fetchJsonForBackend(connection, requestPath)
+// Compatibility fallback: fetch the file through the capped
+// `/api/fs/read-data-url` route, decode it, and save. Bounded by the gateway's
+// data-URL cap, so it only serves smaller files — enough to keep older gateways
+// working until they gain the streaming route.
+async function saveGatewayFileViaDataUrl(
+  connection: GatewayFileConnection,
+  requestPath: string,
+  ctx: GatewayFileSaveContext
+) {
+  const url = `${connection.baseUrl}${requestPath}`
+  const auth = await gatedFileAuth(connection)
+  let json: unknown
+
+  if (auth.kind === 'bearer') {
+    json = await fetchJson(url, null, { bearer: auth.token })
+  } else if (auth.kind === 'cookie') {
+    json = await fetchJsonViaOauthSession(url)
+  } else {
+    json = await fetchJson(url, auth.token, { gatewayDescriptor: connection.gatewayEndpoint ? connection : undefined })
+  }
 
   const dataUrl =
     json && typeof json === 'object' && 'dataUrl' in json && typeof json.dataUrl === 'string' ? json.dataUrl : ''
@@ -8483,7 +8311,7 @@ async function mintGatewayWsTicket(baseUrl: string, headers: Record<string, stri
 // calls this immediately before every gateway.connect() so each WS upgrade
 // carries a freshly-minted ticket. For local/token connections this just
 // reuses the static token (no minting needed).
-async function freshGatewayWsUrl(profile) {
+async function freshGatewayWsUrl(profile, webContentsId) {
   // Mint for the requested profile's backend, NOT always the primary. The
   // renderer re-mints right before every gateway.connect(); when swapping to a
   // pooled profile we must return THAT backend's ws URL, otherwise the connect
@@ -8491,6 +8319,18 @@ async function freshGatewayWsUrl(profile) {
   // the wrong profile's DB. A null/empty profile resolves to the primary, so
   // legacy callers and single-profile users are unchanged.
   const connection = await ensureBackend(profile)
+
+  if (connection.gatewayEndpoint) {
+    return redialLocalGateway({
+      ensure: () => ensureBackend(profile),
+      forget: () => forgetLocalGatewayDescriptor(profile),
+      use: async current => {
+        const ticket = await mintLocalGatewayTicket(current.gatewayEndpoint)
+
+        return localGatewayDials.prepare(current.baseUrl, ticket, webContentsId)
+      }
+    })
+  }
 
   if (connection.authMode === 'oauth') {
     const ticket = await mintGatewayWsTicket(connection.baseUrl, connection.headers)
@@ -10981,18 +10821,6 @@ async function fetchJsonForProfile(profile, path) {
 async function requestJsonForProfile(profile: string, path: string, method: string, body?: string) {
   const conn = await ensureBackend(profile)
 
-  if (conn.authMode === 'oauth') {
-    // Native RFC 8252 flow: authenticate with the bearer token (cookieless)
-    // when we hold one for this gateway; otherwise use the cookie partition.
-    const nativeAt = await ensureNativeAccessToken(conn.baseUrl).catch(() => null)
-
-    if (nativeAt) {
-      return fetchJson(url, null, { ...opts, bearer: nativeAt, headers: conn.headers })
-    }
-
-    return fetchJsonViaOauthSession(url, { ...opts, headers: conn.headers })
-  }
-
   return fetchJson(url, conn.token, { ...opts, headers: conn.headers, gatewayDescriptor: conn.gatewayEndpoint ? conn : undefined })
 }
 
@@ -12350,6 +12178,28 @@ function reapInstallRootedStragglers(excludePids: number[]): void {
   }
 
   const payloadRoot = installShape() === 'bundled' ? process.resourcesPath : null
+
+  try {
+    reapPackageRootedProcesses({
+      installRoots: [payloadRoot],
+      listProcesses: () =>
+        listWindowsProcesses(
+          (file, args, options) =>
+            execFileSync(file, args, {
+              ...hiddenWindowsChildOptions({ encoding: 'utf8', timeout: options.timeout }),
+              windowsHide: options.windowsHide
+            }) as unknown as string
+        ),
+      killProcess: pid => process.kill(pid, 'SIGKILL'),
+      selfPid: process.pid,
+      excludePids,
+      isWindows: true,
+      log: message => rememberLog(message)
+    })
+  } catch (err) {
+    rememberLog(`[package-reap] skipped: ${(err as Error).message}`)
+  }
+}
 
   stopBackendChild(primary)
   await Promise.all([waitForBackendExit(primary), stopAllPoolBackends()])
