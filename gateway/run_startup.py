@@ -586,8 +586,15 @@ class GatewayStartupMixin:
             return 0
         scheduled = 0
         for entry in candidates:
-            # Epoch math: the marker was stamped naive-local by the previous process, possibly
-            # on the other side of a DST change; wall-clock subtraction is off by the shift.
+            # Canonical admissions own restart decisions, including unknown pauses.
+            # Legacy synthetic resume must not race their restored FIFO.
+            authority = getattr(self, 'session_authority', None)
+            if authority is not None:
+                if authority.db._read_one(
+                    'SELECT 1 FROM session_admissions WHERE target_session_id=? LIMIT 1',
+                    (entry.session_id,),
+                ):
+                    continue
             marker = entry.last_resume_marked_at or entry.updated_at
             if not _is_fresh_gateway_interruption(marker, window_secs=window):
                 continue
@@ -1496,6 +1503,8 @@ class GatewayStartupMixin:
         # auto-resume stays visible on the next user message.
         self._schedule_resume_pending_sessions()
         await self._finish_startup_restore()
+        from gateway.run_runtime import recover_gateway_native_sessions
+        await recover_gateway_native_sessions(self)
         # Surface state.db init failures to messaging platforms before the user loses data.
         # See #88235.
         await self._send_session_db_warning_notifications()
