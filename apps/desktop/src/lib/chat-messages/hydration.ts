@@ -1,6 +1,6 @@
 import { skillInvocationText } from '@hermes/shared'
 
-import { splitLeadingAttachmentRefs } from '@/components/assistant-ui/reference-kinds'
+import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { extractImageRefs } from '@/lib/embedded-images'
 import { dedupeGeneratedImageEchoesInParts } from '@/lib/generated-images'
 import { isTodoToolName } from '@/lib/todos'
@@ -32,11 +32,19 @@ const LEGACY_HEARTBEAT_ROW_RE = /^\[Background process \S+ heartbeat #\d+ /
 const CONTEXT_WARNINGS_MARKER_RE = /(?:^|\n)--- Context Warnings ---[\s\S]*$/
 const CONTEXT_REF_RE = /@(file|folder|url|image|tool|terminal):(?:"[^"\n]+"|'[^'\n]+'|`[^`\n]+`|\S+)/g
 
-// Gateway routing note for Discord turns (gateway/run_inbound.py::discord_triggering_note).
-// Current gateways persist the authored text; this heals rows written before that fix. Only
-// the note is model-facing — the `[Replying to: …]` pointer next to it is kept.
-const DISCORD_TRIGGERING_NOTE_RE =
-  /(^|\n)\[Triggering message id: `[^`\n]*` — use as `message_id` for reply\/react\/pin via the discord tools\.\]\n*/
+// Native ingress persists the image-routing hints followed by one placeholder
+// per flattened image part. Recognize that suffix only, not quoted caption prose.
+function persistedImageRefs(text: string) {
+  const suffix = /\n\n((?:\[Image attached(?: at)?: [^\n]+\]\n)+)((?:\[screenshot\](?:\n|$))+)$/.exec(text)
+
+  if (!suffix) { return extractImageRefs(text) }
+  const paths = [...suffix[1].matchAll(/^\[Image attached(?: at)?: (.+)\]$/gm)].map(match => match[1])
+
+  if (paths.length !== suffix[2].split('[screenshot]').length - 1) { return extractImageRefs(text) }
+  const extracted = extractImageRefs(text.slice(0, suffix.index))
+
+  return { cleanedText: extracted.cleanedText, refs: [...extracted.refs, ...paths.map(path => `@image:${formatRefValue(path)}`)] }
+}
 
 /**
  * Backend history projection authorizes/sanitizes public commentary before it
@@ -435,13 +443,10 @@ export function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
     // thumbnail pushes any caption text below the clamp's visible area — so
     // pull image refs out into `attachmentRefs` (same shape the local
     // optimistic composer already uses) and render them via the dedicated
-    // attachments row below the bubble instead. The leading `@file:` block
-    // (attached files, large pastes) moves there too, for the same parity.
-    const imageRefExtraction = displayRole === 'user' && rawDisplayContent ? extractImageRefs(rawDisplayContent) : null
-    const fileRefExtraction = imageRefExtraction ? splitLeadingAttachmentRefs(imageRefExtraction.cleanedText) : null
-    const displayContent = fileRefExtraction ? fileRefExtraction.text : rawDisplayContent
-    const liftedRefs = [...(fileRefExtraction?.refs ?? []), ...(imageRefExtraction?.refs ?? [])]
-    const extractedAttachmentRefs = liftedRefs.length ? liftedRefs : undefined
+    // attachments row below the bubble instead.
+    const imageRefExtraction = displayRole === 'user' && rawDisplayContent ? persistedImageRefs(rawDisplayContent) : null
+    const displayContent = imageRefExtraction ? imageRefExtraction.cleanedText : rawDisplayContent
+    const extractedAttachmentRefs = imageRefExtraction?.refs.length ? imageRefExtraction.refs : undefined
 
     const parts: ChatMessagePart[] = []
     const rowId = message.row_id ?? (typeof message.id === 'number' ? message.id : undefined)
