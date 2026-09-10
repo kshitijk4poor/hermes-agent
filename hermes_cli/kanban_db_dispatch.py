@@ -1044,44 +1044,12 @@ class _DeadWorker:
         return "rate_limited" if self.rate_limited else "crashed"
 
 
-def _classify_dead_worker(
-    pid: int, claimer: Optional[str], *, task_id: Optional[str] = None, board: Optional[str] = None,
-) -> _DeadWorker:
-    """Map a dead worker's reaped exit status to its reclaim bookkeeping.
-
-    A clean exit or a crash carries the worker's own last output (``worker_output``
-    in the event payload, appended to the error text) so the board and the retry
-    worker see WHY instead of a bare label; a rate-limited requeue does not need it.
-    """
-    dead = _classify_dead_worker_exit(pid, claimer, task_id=task_id, board=board)
-    if task_id and not dead.rate_limited:
-        worker_output = _worker_final_output(task_id, board=board)
-        if worker_output:
-            dead.error_text += f" Worker's last output: {worker_output!r}"
-            dead.event_payload["worker_output"] = worker_output
-    return dead
-
-
-def _classify_dead_worker_exit(
-    pid: int,
-    claimer: Optional[str],
-    *,
-    task_id: Optional[str] = None,
-    board: Optional[str] = None,
-) -> _DeadWorker:
-    """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
-
-    The reap registry only knows children of THIS process; a per-tick dispatcher
-    reads the exit trailer the worker left in its log instead, so the same death
-    gets the same booking (protocol violation / rate-limit requeue / crash) as
-    under the gateway-embedded dispatcher. A worker that never reached its exit
-    epilogue (killed, OOM) leaves no trailer and stays a plain crash.
-    """
+def _classify_dead_worker(pid: int, claimer: Optional[str], exit_code=None) -> _DeadWorker:
+    """Map a dead worker's reaped exit status to its reclaim bookkeeping."""
     kind, code = _classify_worker_exit(pid)
-    if kind == "unknown" and task_id:
-        logged = _worker_log_exit_code(task_id, board=board)
-        if logged is not None:
-            kind, code = _exit_code_kind(logged)
+    if exit_code is not None:
+        code = exit_code
+        kind = "rate_limited" if code == _kb.KANBAN_RATE_LIMIT_EXIT_CODE else ("clean_exit" if code == 0 else "nonzero_exit")
     if kind == "clean_exit":
         # rc=0 while still ``running``: usually the work succeeded and only the
         # paperwork was skipped; the corrective sentence reaches the retry
@@ -1166,7 +1134,15 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 continue
 
             pid = int(row["worker_pid"])
-            dead = _classify_dead_worker(pid, row["claim_lock"], task_id=row["id"], board=board)
+            # Managed interpreters are children of the authority, not this dispatcher.
+            # Their exact-run result survives a dispatcher restart and cannot be reaped here.
+            run = conn.execute(
+                "SELECT e.payload FROM task_events e JOIN tasks t ON t.current_run_id=e.run_id "
+                "WHERE t.id=? AND e.task_id=t.id AND e.kind='worker_result' ORDER BY e.id DESC LIMIT 1",
+                (row["id"],)).fetchone()
+            result = _kb._json_dict(run["payload"]) if run else {}
+            exit_code = result.get("exit_code") if result.get("claim_lock") == row["claim_lock"] and result.get("pid") == pid else None
+            dead = _classify_dead_worker(pid, row["claim_lock"], exit_code)
             retry_status = _kb._retry_status_for_run(conn, row["id"])
             dead.event_payload["retry_status"] = retry_status
             cur = conn.execute(
@@ -1465,46 +1441,19 @@ def _record_task_failure(
         return True
 
 
-def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int) -> None:
-    """Record the spawned child's pid + its restart-stable fingerprint (``_process_fingerprint``), and
-    emit a ``spawned`` event carrying them. The fingerprint is what lets every later liveness/kill
-    decision tell OUR worker from a process that recycled the PID after a reboot. A failed capture is
-    persisted as ``UNVERIFIED_WORKER_FINGERPRINT``, never NULL: NULL is the legacy pre-fingerprint row
-    whose bare-PID kill authority a new spawn must not inherit."""
-    started_at = _process_fingerprint(int(pid)) or UNVERIFIED_WORKER_FINGERPRINT
+def _set_worker_pid(conn: sqlite3.Connection, task_id: str, pid: int, *, run_id=None, claim_lock=None) -> None:
+    """Publish the launcher only while this claim has no executing worker yet."""
     with _kb.write_txn(conn):
-        conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
-                     (int(pid), started_at, task_id))
-        run_id = _kb._current_run_id(conn, task_id)
-        if run_id is not None:
-            conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
-                         (int(pid), started_at, run_id))
-        _kb._append_event(conn, task_id, "spawned", {"pid": int(pid), "started_at": started_at}, run_id=run_id)
-
-
-def adopt_worker_pid(conn: sqlite3.Connection, task_id: str, run_id: int, pid: int) -> bool:
-    """Worker-side half of ``_set_worker_pid``, run by the worker before its first model call.
-
-    A dispatcher killed between spawning the worker and ``_set_worker_pid`` leaves the run with no
-    pid: no liveness check can see the worker, so a TTL expiry reclaims the card and spawns a second
-    worker beside it. The worker fills the missing pid itself (``worker_registered``). False when
-    ``run_id`` is no longer the card's live run: the card was reclaimed before this worker got here,
-    and it must exit without working it."""
-    started_at = _process_fingerprint(int(pid)) or UNVERIFIED_WORKER_FINGERPRINT
-    with _kb.write_txn(conn):
-        row = conn.execute("SELECT status, current_run_id, worker_pid, claim_lock FROM tasks WHERE id = ?",
-                           (task_id,)).fetchone()
-        if row is None or row["status"] != "running" or row["current_run_id"] != int(run_id):
-            return False
-        # Liveness checks are host-local: a pid from another host (or pid namespace) proves nothing here.
-        if row["worker_pid"] is None and (row["claim_lock"] or "").startswith(_kb._host_prefix()):
-            conn.execute("UPDATE tasks SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
-                         (int(pid), started_at, task_id))
-            conn.execute("UPDATE task_runs SET worker_pid = ?, worker_started_at = ? WHERE id = ?",
-                         (int(pid), started_at, int(run_id)))
-            _kb._append_event(conn, task_id, "worker_registered", {"pid": int(pid), "started_at": started_at},
-                              run_id=int(run_id))
-    return True
+        if run_id is None:
+            run_id = _kb._current_run_id(conn, task_id)
+        cur = conn.execute(
+            "UPDATE tasks SET worker_pid = ? WHERE id = ? AND status = 'running' "
+            "AND current_run_id IS ? AND worker_pid IS NULL "
+            "AND (? IS NULL OR claim_lock = ?)",
+            (int(pid), task_id, run_id, claim_lock, claim_lock))
+        if cur.rowcount:
+            conn.execute("UPDATE task_runs SET worker_pid = ? WHERE id = ?", (int(pid), run_id))
+        _kb._append_event(conn, task_id, "spawned", {"pid": int(pid)}, run_id=run_id)
 
 
 def _clear_failure_counter(conn: sqlite3.Connection, task_id: str) -> None:
@@ -2123,7 +2072,7 @@ def _dispatch_lane_task(
     try:
         pid = _call_spawn_fn(spawn_fn if spawn_fn is not None else _default_spawn, claimed, str(workspace), board)
         if pid:
-            _set_worker_pid(conn, claimed.id, int(pid))
+            _set_worker_pid(conn, claimed.id, int(pid), run_id=claimed.current_run_id, claim_lock=claimed.claim_lock)
         # Fires AFTER the PID (when reported) is durably persisted. Best-effort.
         _kb._fire_worker_spawned_hook(conn, claimed, str(workspace), pid, board=board)
         # consecutive_failures is deliberately NOT reset here: resetting on
