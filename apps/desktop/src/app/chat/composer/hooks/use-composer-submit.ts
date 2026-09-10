@@ -332,8 +332,15 @@ export function useComposerSubmit({
     triggerHaptic('submit')
     clearDraft()
 
+    const submittedScope = activeQueueSessionKeyRef.current
+
+    const restore = () => {
+      loadIntoComposer(text, [])
+      stashAt(submittedScope, text, [])
+    }
+
     const canonical = serverOwnsComposerQueue(sessionId ?? activeQueueSessionKey)
-    void Promise.resolve(onSteer(text, mode)).then(accepted => {
+    void Promise.resolve().then(() => onSteer(text, mode)).then(accepted => {
       if (!accepted && activeQueueSessionKey) {
         if (canonical) {
           dispatchSubmit(text, [], undefined, { fromQueue: true, sessionId: sessionId ?? null, storedSessionId: activeQueueSessionKey })
@@ -341,15 +348,7 @@ export function useComposerSubmit({
           enqueueQueuedPrompt(activeQueueSessionKey, { text, attachments: [] })
         }
       }
-    }
-
-    void Promise.resolve(onSteer(text))
-      .then(accepted => {
-        if (!accepted) {
-          keep()
-        }
-      })
-      .catch(keep)
+    }).catch(restore)
   }
 
   const queueDraft = () => {

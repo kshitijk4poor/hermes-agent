@@ -58,6 +58,8 @@ function renderSubmitHook({
   editor.dataset.slot = 'composer-rich-input'
   editor.textContent = text
   const editorRef = { current: editor }
+  const loadIntoComposer = vi.fn()
+  const stashAt = vi.fn()
   const onCancel = vi.fn()
   const onSteer = vi.fn(async () => true)
   const onSteerHidden = vi.fn(async () => true)
@@ -133,6 +135,8 @@ function renderSubmitHook({
   )
 
   return {
+    loadIntoComposer,
+    stashAt,
     clearDraft,
     hook,
     onCancel,
@@ -158,6 +162,18 @@ describe('useComposerSubmit external request routing', () => {
     cleanup()
     clearQueuedPrompts('stored-session')
     vi.restoreAllMocks()
+  })
+
+  it.each(['interrupt', 'steer'] as const)('restores a rejected %s draft without queue admission', async mode => {
+    const h = renderSubmitHook({ busy: true, busyInputMode: mode, text: 'keep guidance' })
+    h.onSteer.mockRejectedValue(new Error('correction unsupported'))
+    act(() => h.hook.result.current.submitDraft())
+    await waitFor(() => expect(h.loadIntoComposer).toHaveBeenCalledWith('keep guidance', []))
+    expect(h.stashAt).toHaveBeenCalledWith('stored-session', 'keep guidance', [])
+    expect(h.onSteer).toHaveBeenCalledWith('keep guidance', mode)
+    expect(h.onSubmit).not.toHaveBeenCalled()
+    expect(h.queueCurrentDraft).not.toHaveBeenCalled()
+    expect(getQueuedPrompts('stored-session')).toEqual([])
   })
 
   it('routes a refused native steer through canonical queue admission', async () => {

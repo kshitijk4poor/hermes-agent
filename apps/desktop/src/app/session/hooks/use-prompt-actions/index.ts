@@ -864,66 +864,12 @@ export function usePromptActions({
         const { result } = await withSessionNotFoundResume(target.sessionId, target.storedSessionId, send, target)
 
         return result
-      } catch {
-        // Swallow — caller queues the text so nothing is lost.
-      }
-
-      return false
-    },
-    [
-      activeSessionIdRef,
-      appendSessionTextMessage,
-      getRoutedStoredSessionId,
-      requestGateway,
-      runtimeIdByStoredSessionIdRef,
-      selectedStoredSessionIdRef,
-      updateSessionState
-    ]
-  )
-
-  // A hidden note that lands mid-turn must reach the model without becoming a
-  // user turn. session.steer injects it into the model's next tool result and
-  // records nothing in the transcript; a redirect would paint it as the user's
-  // own bubble and store it as one.
-  const injectHiddenPrompt = useCallback(
-    async (rawText: string): Promise<boolean> => {
-      const text = sanitizeComposerInput(rawText).trim()
-
-      const target = captureSteeringSession({
-        activeSessionIdRef,
-        selectedStoredSessionIdRef,
-        runtimeIdByStoredSessionIdRef,
-        getRoutedStoredSessionId,
-        requestGateway,
-        updateSessionState
-      })
-
-      if (!text || !target) {
-        return false
-      }
-
-      const send = async (id: string): Promise<boolean> => {
-        const response = await target.requestGateway<SessionRedirectResponse>('session.steer', { session_id: id, text })
-
-        return response?.status === 'queued'
-      }
-
-      try {
-        const { result } = await withSessionNotFoundResume(target.sessionId, target.storedSessionId, send, target)
-
-        return result
-      } catch {
-        return false
+      } catch (err) {
+        notifyError(err, copy.promptFailed)
+        throw err
       }
     },
-    [
-      activeSessionIdRef,
-      getRoutedStoredSessionId,
-      requestGateway,
-      runtimeIdByStoredSessionIdRef,
-      selectedStoredSessionIdRef,
-      updateSessionState
-    ]
+    [activeSessionIdRef, appendSessionTextMessage, copy.promptFailed, requestGateway, selectedStoredSessionIdRef, updateSessionState]
   )
 
   // After a durable rewind the surviving bubbles' cached rowIds are stale (the
