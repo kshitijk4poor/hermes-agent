@@ -889,6 +889,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           displayText: options?.displayText
         })
 
+        const imageAttachments = syncedAttachments.filter(attachment => attachment.kind === 'image' && attachment.mime)
+          .map(attachment => ({ path: attachment.path!, mime: attachment.mime! }))
+
         // Another Desktop window may own a newer transcript while this one
         // still shows an open-time snapshot. Refuse the send and refresh
         // rather than forking the session (#65047).
@@ -938,6 +941,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           session_id: targetId,
           text,
           submission_id: submissionId,
+          ...(imageAttachments.length && { attachments: imageAttachments }),
           ...(interrupted && { interrupted }),
           // Off-screen widget intent: the gateway types the persisted user
           // row display_kind=hidden so no client renders it as a bubble.
