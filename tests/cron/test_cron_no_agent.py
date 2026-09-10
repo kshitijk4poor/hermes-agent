@@ -197,6 +197,30 @@ def test_no_agent_script_of_launch_profile_keeps_its_own_env_credential(hermes_e
 
 
 
+    job = create_job(
+        prompt="Summarize the overnight logs.",
+        schedule="every 5m",
+        deliver="telegram",
+        name="provider-backed report",
+    )
+    delivered = []
+
+    monkeypatch.setattr(
+        scheduler,
+        "run_job",
+        lambda *_args, **_kwargs: (
+            False,
+            "# Cron Job: provider-backed report\n\nprovider request timed out\n",
+            "",
+            "ReadTimeout: provider request timed out after fallback attempts",
+        ),
+    )
+    monkeypatch.setattr(
+        "cron.delivery_queue.enqueue",
+        lambda execution_id, _job, content, **_kwargs: (
+            delivered.append(content) or {"status": "pending"}
+        ),
+    )
 
 
 
