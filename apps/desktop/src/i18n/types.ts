@@ -3273,6 +3273,7 @@ export interface Translations {
     queueSteer: string
     queueDelete: string
     queueLostNote: string
+    restoreImageDraft: string
     queueLostDiscard: string
     queueLostDiscardTip: string
     queueResume: string
