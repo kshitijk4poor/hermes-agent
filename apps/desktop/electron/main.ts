@@ -9489,7 +9489,14 @@ function isHermesProcess(pid) {
 //
 // Decision logic lives in profile-migration.ts (pure + unit-tested). This wrapper
 // just wires Electron/Node fs into a MigrationDeps bag and delegates.
+let activeProfileMigrationAttempted = false
+
 function migrateActiveProfileIfMissing() {
+  if (activeProfileMigrationAttempted) {
+    return
+  }
+
+  activeProfileMigrationAttempted = true
   migrateActiveProfileIfMissingPure(DESKTOP_PROFILE_CONFIG_PATH, {
     legacyActivePath: path.join(HERMES_HOME, 'active_profile'),
     hermesHome: HERMES_HOME,
@@ -11215,7 +11222,7 @@ async function ensureBackend(profile) {
   const route = resolveProfileBackendRoute(key, routeOpts)
 
   if (route.backend === 'primary') {
-    const connection = await startHermes()
+    const connection = await startHermes(key)
     setWslBridgeProfileState(key, connection.mode !== 'remote')
 
     // A shared backend still owes the caller its profile scope, so renderer-side
@@ -12281,288 +12288,7 @@ async function prepareProfileRenameRequest(request) {
   })
 }
 
-// ── Attach-first: one backend per HOST (multiplex-only) ───────────────────
-// Escape hatch: a dedicated, private backend for this app instead of the host's.
-const ISOLATED_BACKEND = process.env.HERMES_DESKTOP_ISOLATED_BACKEND === '1'
-const ATTACHED_LIVENESS_POLL_MS = 15_000
-let attachedBackendMonitor: NodeJS.Timeout | null = null
-let hostSpawnReservation: SpawnReservation | null = null
-
-function stopAttachedBackendMonitor() {
-  if (attachedBackendMonitor) {
-    clearInterval(attachedBackendMonitor)
-    attachedBackendMonitor = null
-  }
-}
-
-/**
- * An attached backend has no child process, so `child.exit` can never drive
- * recovery. Poll its readiness instead; a backend that dies under us
- * invalidates the connection and hands the respawn to the same supervisor path
- * a dead child would (which re-runs discovery and spawns, since the host now
- * has no backend).
- *
- * A backend recycled by an external supervisor (e.g. launchd `KeepAlive`)
- * into a new process on the same port passes the readiness probe (it's a
- * public route) while serving a brand-new session token, so also re-read the
- * served token on every tick and treat drift the same as "gone" (#121988).
- *
- * This teardown is unexpected, not intentional (nobody asked for a re-home),
- * so it must clear the slot via `backendConnectionState.invalidate()` directly
- * rather than `invalidatePrimaryConnection()`: the latter also sets
- * `primaryRecoverySuppressed`, which `scheduleUnexpectedPrimaryRecovery()`
- * below would then read back as `intentionalTeardown` and refuse to claim,
- * leaving the app with no backend and no respawn scheduled.
- */
-function startAttachedBackendMonitor(attached: AttachedBackend) {
-  stopAttachedBackendMonitor()
-
-  attachedBackendMonitor = setInterval(() => {
-    void waitForHermes(attached.baseUrl, attached.token, undefined, 'token', {})
-      .then(() => resolveServedDashboardToken(attached.baseUrl, attached.token).catch(() => attached.token))
-      .then(servedToken => {
-        if (isAttachedBackendTokenDrifted({ servedToken, adoptedToken: attached.token })) {
-          throw new Error('attached backend is serving a different session token')
-        }
-      })
-      .catch(() => {
-        stopAttachedBackendMonitor()
-        rememberLog(`[attach] attached backend on ${attached.baseUrl} (pid ${attached.pid}) is gone; recovering`)
-        backendConnectionState.invalidate()
-        scheduleUnexpectedPrimaryRecovery({ error: 'The Hermes backend this app attached to exited.', ready: true })
-      })
-  }, ATTACHED_LIVENESS_POLL_MS)
-
-  attachedBackendMonitor.unref?.()
-}
-
-/** Discover and attach to the host's running backend; null means "spawn one". */
-function attachToRunningHostBackend(): Promise<AttachedBackend | null> {
-  const options = { isolated: ISOLATED_BACKEND, ledgerPath: spawnLedgerPath(HERMES_HOME, path.join) }
-
-  return attachOrReserveSpawn(options, hostBackendAttachDeps(), hostSpawnGateDeps())
-    .then(outcome => {
-      if ('attached' in outcome) {
-        releaseHostSpawnReservation()
-
-        return outcome.attached
-      }
-
-      hostSpawnReservation = outcome.reservation
-
-      return null
-    })
-    .catch(error => {
-      // Discovery must never be able to block boot: fall through to spawning.
-      rememberLog(`[attach] host backend discovery failed (${error.message}); spawning our own`)
-
-      return null
-    })
-}
-
-function hostBackendAttachDeps() {
-  return {
-    log: rememberLog,
-    readLedger: (target: string) => {
-      try {
-        return fs.readFileSync(target, 'utf8')
-      } catch {
-        return null
-      }
-    },
-    probeWebSocket: (wsUrl: string) => probeGatewayWebSocket(wsUrl, { WebSocketImpl: globalThis.WebSocket }),
-    publishedTokenFor: (record: HostBackendRecord) =>
-      lookupPublishedSessionToken(
-        record,
-        {
-          home: os.homedir(),
-          lockDir: process.env.HERMES_GATEWAY_LOCK_DIR,
-          platform: process.platform,
-          stateHome: process.env.XDG_STATE_HOME
-        },
-        {
-          lstat: target => fs.lstatSync(target),
-          readFile: target => fs.readFileSync(target, 'utf8'),
-          uid: typeof process.getuid === 'function' ? process.getuid() : null
-        }
-      ),
-    resolveServedToken: (baseUrl: string) => resolveServedDashboardToken(baseUrl, ''),
-    // A ledger record is written only after its backend binds, so a refused
-    // port is a dead record (a hard-killed backend leaves both the record and
-    // its published token behind), not one still starting.
-    waitForReady: (baseUrl: string, token: string) =>
-      waitForHermes(baseUrl, token, undefined, 'token', {}, { alreadyBound: true })
-  }
-}
-
-function hostSpawnGatePath() {
-  return path.join(HERMES_HOME, 'desktop-backend-spawn.json')
-}
-
-function hostSpawnGateDeps() {
-  return {
-    now: () => Date.now(),
-    read: () => {
-      try {
-        const record = JSON.parse(fs.readFileSync(hostSpawnGatePath(), 'utf8'))
-        const owner = Number(record?.pid)
-
-        if (!Number.isInteger(owner) || owner <= 0) {
-          return null
-        }
-
-        // A gate whose owner is gone is no gate at all.
-        try {
-          process.kill(owner, 0)
-        } catch {
-          return null
-        }
-
-        return { ownerAlive: true, startedAt: Number(record?.startedAt) || 0 }
-      } catch {
-        return null
-      }
-    },
-    take: () =>
-      claimHostSpawnGate(hostSpawnGatePath(), {
-        staleAfterMs: HOST_SPAWN_GATE_STALE_MS
-      }),
-    sleep: (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
-  }
-}
-
-function releaseHostSpawnReservation() {
-  hostSpawnReservation?.release()
-  hostSpawnReservation = null
-}
-
-function startHermes({ supervisorRecovery = false }: { supervisorRecovery?: boolean } = {}): Promise<
-  Awaited<ReturnType<typeof backendConnectionState.getPromise>>
-> {
-  primaryRecoverySuppressed = false
-  primaryStartsInFlight += 1
-
-  const start: Promise<Awaited<ReturnType<typeof backendConnectionState.getPromise>>> = localBackendLifecycle.start(
-    () => runHermesStart({ supervisorRecovery })
-  )
-
-  const releaseStart = (): void => {
-    primaryStartsInFlight -= 1
-  }
-
-  // Ordering contract: this reaction is registered on the SAME promise the
-  // caller receives, before any caller `.catch`, so releaseStart has already
-  // run (primaryStartsInFlight back to 0) when runPrimaryRecoverySpawn's
-  // `.catch` evaluates primaryRecoveryState(). Returning a derived promise
-  // (start.then(...)) or wrapping `start` would invert that order: every
-  // pre-ready retry would see hasPendingStart:true, be refused, and leave the
-  // recovery claim stuck with no retry and no UI.
-  void start.then(releaseStart, releaseStart)
-
-  return start
-}
-
-// A quit or update handoff kills renderers while their windows can still report
-// live; the renderer lifecycle must treat that as teardown, not a crash to reload.
-function rendererTeardownInProgress(): boolean {
-  return isQuittingForHandoff || backendShutdown.hasStarted()
-}
-
-function primaryRecoveryState() {
-  return {
-    hasCurrentOwner: backendConnectionState.getProcess() !== null || backendConnectionState.getPromise() !== null,
-    hasPendingStart: primaryStartsInFlight > 0,
-    intentionalTeardown: primaryRecoverySuppressed || isQuittingForHandoff || backendShutdown.hasStarted()
-  }
-}
-
-function reportPrimaryRecoveryCrashLoop(code: number | null, signal: string | null): boolean {
-  if (!primaryExitRecovery.isCrashLooping()) {
-    return false
-  }
-
-  const message =
-    'Hermes backend keeps crashing right after it restarts; not restarting it again. Relaunch Hermes Desktop.'
-
-  rememberLog(`[supervisor] ${message}`)
-  sendBackendExit({ code, signal, error: message })
-
-  return true
-}
-
-const firstLine = (text: string): string => (text || '').split('\n').find(Boolean) || ''
-
-function runPrimaryRecoverySpawn(code: number | null, signal: string | null) {
-  startHermes({ supervisorRecovery: true }).catch(respawnError => {
-    rememberLog(`[supervisor] backend respawn failed: ${firstLine(respawnError.message)}`)
-
-    // Terminal boot failures still own their existing recovery UI. Only a
-    // supervisor-owned respawn that failed transiently before ready may spend
-    // another bounded recovery slot.
-    const latched = latchedBootFailure()
-
-    if (latched) {
-      rememberLog(`[supervisor] respawn refused: boot failure latched: ${firstLine(latched.message)}`)
-
-      return
-    }
-
-    // releaseStart (startHermes) already ran: same-promise reaction order, so
-    // hasPendingStart is false here. See the ordering contract in startHermes.
-    if (primaryExitRecovery.retryAfterFailedStart(primaryRecoveryState())) {
-      rememberLog('[supervisor] backend respawn failed before ready; retrying within crash-loop budget')
-      runPrimaryRecoverySpawn(code, signal)
-
-      return
-    }
-
-    reportPrimaryRecoveryCrashLoop(code, signal)
-  })
-}
-
-// A ready primary child died. When its exit leaves the primary slot with no
-// owner and no start in flight (outside an intentional teardown), the
-// supervisor owns the respawn (#112344): the stale-classified exit used to
-// "log and return", and recovery then hinged on the renderer noticing its
-// socket drop — a 9 h engine-less window when it did not. Pool children are
-// deliberately not consulted: they never own the window backend.
-function scheduleUnexpectedPrimaryRecovery({
-  code = null,
-  signal = null,
-  error = null,
-  ready = false
-}: { code?: number | null; error?: string | null; ready?: boolean; signal?: string | null } = {}) {
-  if (!ready) {
-    return false
-  }
-
-  const claimed = primaryExitRecovery.claim(primaryRecoveryState())
-
-  if (!claimed) {
-    return reportPrimaryRecoveryCrashLoop(code, signal)
-  }
-
-  rememberLog('[supervisor] backend exit left no primary owner and no start in flight; respawning')
-  sendBackendExit({ code, signal, ...(error ? { error } : {}) })
-  runPrimaryRecoverySpawn(code, signal)
-
-  return true
-}
-
-/**
- * The terminal boot failure currently latched in this process, if any. These
- * latches are cleared only by an explicit recovery path (reset, repair,
- * apply-config, confirmed sign-in, or the child 'exit' handler), never by a
- * retry, so both the per-request short-circuit in runHermesStart and the
- * supervisor's respawn refusal must consult the same trio in the same order.
- */
-function latchedBootFailure(): Error | null {
-  return bootstrapFailure ?? backendStartFailure ?? remoteReauthFailure ?? null
-}
-
-async function runHermesStart({ supervisorRecovery = false }: { supervisorRecovery?: boolean } = {}): Promise<
-  Awaited<ReturnType<typeof backendConnectionState.getPromise>>
-> {
+async function startHermes(requestedProfile?: string) {
   // Only the single-instance lock holder may reap/spawn/claim the desktop
   // backend. A lock-losing instance must stay inert even if some path reaches
   // here (e.g. the deferred-quit window before `ready`): its reapOrphans()
@@ -12622,18 +12348,7 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
   migrateActiveProfileIfMissing()
 
   const connectionAttempt = backendConnectionState.startAttempt()
-
-  // ONE launch-profile decision for this attempt (#108417): routing pin,
-  // --profile argv, and the child env all derive from the same read, so a
-  // hermes:profile:remember landing mid-startup becomes the NEXT boot's
-  // preference instead of splitting routing identity from the launch
-  // argument. (The pin below still honors a live primary — but a primary
-  // being live means startHermes never got here.)
-  const { argvProfile: activeProfile, routingProfile: primaryProfile } = resolveLaunchProfile(readActiveDesktopProfile)
-
-  // Pin the routing table to the profile this primary actually boots as; a
-  // later hermes:profile:remember must not retarget requests mid-life.
-  primaryProfilePin.pin(primaryProfile)
+  const primaryProfile = requestedProfile || primaryProfileKey()
 
   // Legacy path callers without an explicit profile belong to the primary
   // window backend. Profile-scoped callers still pass their key directly.
@@ -12694,7 +12409,7 @@ async function runHermesStart({ supervisorRecovery = false }: { supervisorRecove
     // resolves HERMES_HOME the same way `hermes -p <name>` does on the CLI. An
     // unset preference keeps the legacy launch so existing installs are
     // unaffected.
-    const activeProfile = readActiveDesktopProfile()
+    const activeProfile = requestedProfile || readActiveDesktopProfile()
 
     if (activeProfile) {
       backendArgs.unshift('--profile', activeProfile)
