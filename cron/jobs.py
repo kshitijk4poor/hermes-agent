@@ -2464,9 +2464,7 @@ def mark_job_run(
     status: Optional[str] = None,
     *,
     expected_fire_owner: Optional[str] = None,
-    model_unreachable: bool = False,
-    quota_hold_seconds: Optional[float] = None,
-    recover_consumed_fire: bool = False,
+    execution_id: Optional[str] = None,
 ) -> bool:
     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
     and retire the record as a terminal completion when the repeat limit is reached.
@@ -2488,6 +2486,8 @@ def mark_job_run(
     (cron/quota_hold.py, #89376).
     """
     def apply(jobs, _i, job):
+        if execution_id is not None and execution_id in job.get("canonical_completions", []):
+            return True
         if expected_fire_owner is not None:
             claim = job.get("fire_claim")
             if not isinstance(claim, dict) or claim.get("by") != expected_fire_owner:
@@ -2497,6 +2497,8 @@ def mark_job_run(
                 return False
         now = _hermes_now().isoformat()
         _record_run_outcome(job, success, error, delivery_error, status, now)
+        if execution_id is not None:
+            job.setdefault("canonical_completions", []).append(execution_id)
         _advance_after_run(job, now)
         from cron import quota_hold
         from cron.unreachable_retry import clear_state, plan_retry

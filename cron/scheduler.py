@@ -3043,6 +3043,12 @@ def _save_compose_deliver(
 
     if not d.should_deliver:
         return
+    execution_id = job.get('execution_id')
+    if execution_id and not job.get('no_agent'):
+        from cron.delivery_queue import enqueue
+        queued = enqueue(execution_id, job, deliver_content, for_failure=not d.success)
+        job['last_delivery_queued'] = {'canonical': {'status': queued['status'], 'execution_id': execution_id}}
+        return
     d.unresolved_origin = (
         _normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)) == "origin"
         and not _resolve_delivery_targets(job, for_failure=not d.success)
@@ -3095,16 +3101,11 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         from cron.jobs import update_job
         update_job(job["id"], {"last_delivery_queued": None})
         job["last_delivery_queued"] = None
-    mark_kwargs: dict = {"delivery_error": d.delivery_error}
-    if not d.success and job.pop("_model_unreachable", False):
-        # Never-reached-the-model failure: schedule the Cowork-style bounded re-run
-        # (cron/unreachable_retry.py) inside the same fenced store write.
-        mark_kwargs["model_unreachable"] = True
-    _hold_s = job.pop("_quota_hold_seconds", None)
-    if not d.success and _hold_s:
-        # Provider window closed for a known duration: park past it (cron/quota_hold.py, #89376).
-        mark_kwargs["quota_hold_seconds"] = _hold_s
-        mark_kwargs["recover_consumed_fire"] = bool(job.get("_scheduled_instant"))
+    mark_kwargs = {"delivery_error": d.delivery_error}
+    from cron.scheduler_authority import journal_path
+    journal = journal_path(job['id'], execution_id)
+    if not job.get('no_agent'):
+        mark_kwargs['execution_id'] = execution_id
     if d.success and not d.delivery_error and d.should_deliver and job.get("last_delivery_queued"):
         mark_kwargs["status"] = "delivery_queued"
     if fire_owner is not None:
@@ -3135,6 +3136,7 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         _mark_incident_alerted(d.failure_incident_id)
     finish_execution(
         execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome)
+    journal.unlink(missing_ok=True)
     return True
 
 
@@ -3230,6 +3232,7 @@ def _run_one_job_body(
     if not execution_id:
         execution_id = create_execution(
             job["id"], source="direct", scheduled_instant=job.get("_scheduled_instant"))["id"]
+    job = dict(job, execution_id=execution_id)
     delivery_attempted = False
     delivery_error = None
 
@@ -4258,7 +4261,105 @@ def _sweep_mcp_orphans_when_all_done(futures: list) -> None:
         _f.add_done_callback(_on_done)
 
 
-from cron.scheduler_tick import tick  # noqa: E402
+def tick(
+    verbose: bool = True, adapters=None, loop=None, sync: bool = True, *, can_dispatch=None):
+    """Check and run all due jobs. File-locked so only one tick runs at a time (gateway ticker vs
+    standalone daemon / manual tick). ``can_dispatch``: optional gate; false leaves due jobs for the
+    next allowed tick. Returns the number of jobs executed (0 if another tick holds the lock)."""
+    # Stale-code yield gate — BEFORE the lock race. A process whose checkout was updated under it
+    # serves mixed sys.modules (jobs die on ImportErrors); if a fresher gateway holds the runtime
+    # lock, ITS ticker dispatches. With no fresh holder (desktop-standalone) the tick proceeds.
+    _skew = _should_yield_tick_to_fresh_gateway()
+    if _skew is not None:
+        _log_tick_yield_once(f"boot={_skew[0]} disk={_skew[1]}")
+        raise CronTickYielded(_skew[0], _skew[1])
+
+    lock_dir, lock_file = _get_lock_paths()
+    _ensure_cron_dir(lock_dir)
+    lock_fd = _acquire_tick_lock(lock_file)
+    if lock_fd is None:
+        return 0
+
+    try:
+        # `hermes pause` ESTOP: skip dispatch, never touch in-flight runs; check_paused logs once.
+        with contextlib.suppress(ImportError):
+            from agent.estop import check_paused as _estop_check_paused
+            if _estop_check_paused("cron", logger):
+                return 0
+
+        if can_dispatch is not None and not can_dispatch():
+            logger.debug("Cron dispatch paused while gateway drains existing work")
+            return 0
+
+        from cron.scheduler_authority import reconcile_pending
+        reconcile_pending()
+        _maybe_reap_dead_owners()
+        # Periodic worktree GC (6h, threaded) — the only sweep gateway-only boxes get.
+        try:
+            _maybe_run_worktree_maintenance()
+        except Exception as _wt_exc:
+            logger.debug("Worktree maintenance dispatch failed: %s", _wt_exc)
+
+        due_jobs = get_due_jobs()
+        _sweep_stale_inflight_for_tick(due_jobs)
+
+        if not due_jobs:
+            # Idle tick: skip config load + pool setup, but still reap crashed jobs' MCP orphans.
+            if verbose:
+                # Idle tick: skip config load + pool partitioning entirely (#33612 — the gateway ticker
+                # calls tick(verbose=False) every 60s, so idle ticks previously fell through to
+                # load_config()). Still run the post-tick MCP orphan sweep: main intentionally sweeps on
+                # idle ticks so orphaned stdio children from crashed jobs are reaped even when nothing is
+                # due.
+                logger.info("%s - No jobs due", _hermes_now().strftime('%H:%M:%S'))
+            _sweep_mcp_orphans()
+            return 0
+
+        if verbose:
+            logger.info("%s - %s job(s) due", _hermes_now().strftime('%H:%M:%S'), len(due_jobs))
+
+        # Advance next_run_at for recurring jobs FIRST, under the lock, before any execution
+        # (at-most-once). Re-advancing running jobs keeps the grace window alive; mark_job_run
+        # overwrites it on completion. Composes with the claim-time advance in claim_job_for_fire.
+        advance_next_runs([job["id"] for job in due_jobs])
+
+        _max_workers = _resolve_max_parallel_workers()
+        if verbose:
+            logger.info(
+                "Running %d job(s) in parallel (max_workers=%s)",
+                len(due_jobs),
+                _max_workers if _max_workers else "unbounded")
+
+        def _process_job(job: dict) -> bool:
+            return _process_due_job(job, adapters, loop, verbose)
+
+        # Persistent pool, non-blocking dispatch. Already-running jobs are skipped; mark_job_run
+        # re-arms next_run_at on completion, so no catch-up queue is needed.
+        _results: list = []
+        _all_futures: list = []
+        pool = _get_parallel_pool(_max_workers)
+        for job in due_jobs:
+            fut = _submit_with_guard(job, pool, _process_job)
+            if fut is None:
+                continue
+            _all_futures.append(fut)
+            if not sync:
+                _results.append(True)  # optimistically counted
+
+        if sync:
+            for f in concurrent.futures.as_completed(_all_futures):
+                try:
+                    _results.append(f.result())
+                except Exception as exc:
+                    logger.error("Cron job future failed: %s", exc)
+                    _results.append(False)
+            _sweep_mcp_orphans()
+            return sum(_results)
+
+        _sweep_mcp_orphans_when_all_done(_all_futures)
+        return sum(_results)
+    finally:
+        _release_tick_lock(lock_fd)
 
 
 # ---------------------------------------------------------------------------
