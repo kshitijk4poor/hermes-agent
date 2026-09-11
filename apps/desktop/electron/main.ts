@@ -8984,6 +8984,15 @@ function installRemoteHeaderRulesOnSession(sess) {
     return
   }
 
+  remoteHeaderSessions.add(sess)
+  attachRemoteRequestHeaderListener(sess, headersForRemoteRequest)
+}
+
+function installRemoteHeaderRules() {
+  if (remoteHeaderRulesInstalled) {
+    return
+  }
+
   remoteHeaderRulesInstalled = true
   session.defaultSession.webRequest.onBeforeSendHeaders((details, callback) => {
     const nativeHeaders = localGatewayDials.headers(details)
@@ -10848,9 +10857,6 @@ async function fetchJsonForProfile(profile, path) {
 async function requestJsonForProfile(profile: string, path: string, method: string, body?: string) {
   const conn = await ensureBackend(profile)
 
-    return fetchJsonViaOauthSession(url, { ...opts, headers: conn.headers })
-  }
-
   return fetchJson(url, conn.token, { ...opts, headers: conn.headers, gatewayDescriptor: conn.gatewayEndpoint ? conn : undefined })
 }
 
@@ -12189,6 +12195,17 @@ async function dialPoolBackend(profile, entry, opts: { forceLocal?: boolean; poo
 async function stopPoolBackend(profile: string) {
   backendPool.delete(profile)
 }
+
+const poolRetirer = createPoolRetirer({
+  pool: backendPool,
+  coordinator: localBackendSpawnCoordinator,
+  ...createPoolRetirementClient(fetchJson),
+  stopBackend: stopPoolBackend,
+  onRetiring: broadcastPoolBackendRetiring,
+  log: rememberLog
+})
+
+localBackendLifecycle.signal.addEventListener('abort', poolRetirer.dispose, { once: true })
 
 async function teardownPoolBackendAndWait(profile) {
   await Promise.all(localProfilePoolKeys(profile).map(key => stopPoolBackend(key)))
