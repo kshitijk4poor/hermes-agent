@@ -31,7 +31,10 @@ test('quitPromptFor stays out of the way when nothing is running', () => {
 })
 
 test('quitPromptFor stays out of the way during an update handoff', () => {
-  assert.equal(quitPromptFor({ count: 2, titles: ['Fix login'] }, true), null)
+  const work = mergeActiveWork([normalizeActiveWork({ count: 2, titles: ['Fix login'] })])
+
+  assert.ok(quitPromptFor(work, false))
+  assert.equal(quitPromptFor(work, true), null)
 })
 
 test('quitPromptFor names the running chats', () => {
@@ -77,62 +80,19 @@ test('quitPromptFor warns about lost work when the app owns the backend (local)'
   const prompt = quitPromptFor({ count: 1, titles: ['Fix login'] }, false, owned)
 
   assert.ok(prompt)
-  assert.ok(prompt.detail.includes('is lost'))
-  assert.deepEqual(prompt.buttons, ['Keep Running', 'Quit Anyway'])
+  assert.equal(prompt.message, 'Hermes is still working on 1 chat.')
 })
 
-for (const primaryRouteKind of ['remote', 'cloud'] as const) {
-  test(`quitPromptFor says the agent keeps running on a ${primaryRouteKind} backend`, () => {
-    const owned = backendOwnedByApp({ ownedBackendCount: 0, primaryRouteKind })
-    const prompt = quitPromptFor({ count: 1, titles: ['Fix login'] }, false, owned)
+test('active-work reports with unknown lifecycle keep a scoped confirmation, not a work-loss claim', () => {
+  // The real IPC summary has no connection identity or Desktop-tool activity.
+  // Neither named nor untitled work proves it is independent of the client.
+  for (const titles of [[], ['Fix login']]) {
+    const work = mergeActiveWork([normalizeActiveWork({ count: 1, titles })])
+    const prompt = quitPromptFor(work, false)
 
     assert.ok(prompt)
-    assert.ok(prompt.detail.includes('• Fix login'))
-    assert.ok(!prompt.detail.includes('lost'), 'a backend that outlives the app loses nothing')
-    assert.ok(prompt.detail.includes('keeps running'))
-    assert.notDeepEqual(prompt.buttons, ['Keep Running', 'Quit Anyway'])
-  })
-}
-
-// -- shouldGuardWindowClose -------------------------------------------------
-
-test('shouldGuardWindowClose guards active work on the last chat window', () => {
-  assert.equal(shouldGuardWindowClose({ count: 1, titles: ['Fix login'] }, false, false, false), true)
-  assert.equal(shouldGuardWindowClose({ count: 3, titles: ['a', 'b', 'c'] }, false, false, false), true)
-})
-
-test('shouldGuardWindowClose does not guard when no work is active', () => {
-  assert.equal(shouldGuardWindowClose({ count: 0, titles: [] }, false, false, false), false)
-})
-
-test('shouldGuardWindowClose does not guard the macOS close gesture', () => {
-  // Closing the primary window there is a "stay in Dock" gesture, not a quit.
-  assert.equal(shouldGuardWindowClose({ count: 2, titles: ['Fix login'] }, false, true, false), false)
-})
-
-test('shouldGuardWindowClose does not guard during a handoff', () => {
-  // Update / swap / uninstall relaunch: the app is replacing itself.
-  assert.equal(shouldGuardWindowClose({ count: 2, titles: ['Fix login'] }, true, false, false), false)
-})
-
-test('shouldGuardWindowClose does not guard a non-final chat window', () => {
-  assert.equal(shouldGuardWindowClose({ count: 1, titles: ['Fix login'] }, false, false, true), false)
-})
-
-// -- lastActiveWorkSeen fallback semantics (via mergeActiveWork) ---------------
-
-test('mergeActiveWork keeps a live count when the per-window map reads empty', () => {
-  // A stream can reload its webContents mid-turn, dropping its map entry
-  // before the guard runs; the cached summary must still count the turn.
-  const mapWork = mergeActiveWork([]) // map reads empty
-  const cached: ActiveWork = { count: 2, titles: ['Fix login'] }
-  const merged = mergeActiveWork([mapWork, cached])
-  assert.equal(merged.count, 2)
-  assert.deepEqual(merged.titles, ['Fix login'])
-})
-
-test('an idle cache does not resurrect finished work', () => {
-  // The cache is only refreshed by real publishes, so count=0 clears it.
-  const merged = mergeActiveWork([{ count: 0, titles: [] }, { count: 0, titles: [] }])
-  assert.equal(merged.count, 0)
+    assert.match(prompt.detail, /[Rr]unning and queued work on a persistent gateway continues after Desktop quits/)
+    assert.match(prompt.detail, /[Aa]ctivity that depends on this app or an older connection may be interrupted/)
+    assert.doesNotMatch(prompt.detail, /work.*(?:lost|stops)|stops the agent|all work continues/i)
+  }
 })
