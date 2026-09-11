@@ -47,10 +47,27 @@ import {
 } from 'electron'
 import type { Session } from 'electron'
 
-import { classifyActiveRuntime } from './active-runtime-state'
-import { destroyKeepaliveAgents, jsonAgentFor, withRetry } from './api-transport'
-import { appIconCandidates, resolveAppIcon } from './app-icon'
-import { stopBackendChild as stopBackendChildImpl, stopBackendTreesForUpdate } from './backend-child'
+import { type ActiveRuntimeState, classifyActiveRuntime } from './active-runtime-state'
+import {
+  destroyKeepaliveAgents,
+  httpStatusError,
+  jsonAgentFor,
+  readJsonErrorBody,
+  readStatusCode,
+  withRetry
+} from './api-transport'
+import { appIconCandidates, resolveAppIcon, shouldOverrideDockIcon } from './app-icon'
+import { stageAppInstallerFile } from './app-installer-file'
+import {
+  appVersionInfo,
+  type AppVersionInfo,
+  assertSourceUpdateChannel,
+  nativeAboutVersion,
+  packagedReleaseChannel
+} from './app-version'
+import { runAppInstallerChecker } from './appinstaller-checker'
+import { installApplicationMenuAfterFirstWindow } from './application-menu-startup'
+import { stopBackendChild as stopBackendChildImpl, waitForBackendExit } from './backend-child'
 import {
   type BackendOutputTail,
   claimDecision,
@@ -70,13 +87,6 @@ import type { HostBackendRecord } from './backend-discovery'
 import { buildDesktopBackendEnv, profileBackendParentEnv } from './backend-env'
 import { createBackendExitRecoveryLatch } from './backend-exit-recovery'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
-import {
-  isReauthRequiredError,
-  makeNousCloudBackendDownError,
-  makeUnsignedOauthError,
-  waitForHermesReady
-} from './backend-health'
-import { backendCommandMatches, createBackendOwnership, createBackendShutdownCoordinator } from './backend-ownership'
 import {
   canImportHermesCli,
   execProbeSync,
@@ -1771,6 +1781,12 @@ const hermesLog = []
 let desktopLogBuffer = ''
 let desktopLogFlushTimer = null
 let desktopLogFlushPromise = Promise.resolve()
+
+// Passive reads may reuse a cached descriptor, but never start an owner.
+function assertNotPassiveSpawn(passive: boolean, poolKey: string): void {
+  if (passive) {
+    throw new Error(`Passive read: no warm backend for "${poolKey}"`)
+  }
 
 // Land a spawn failure in desktop.log.
 function logPoolSpawnFailure(label: string, error: unknown): void {
@@ -7976,6 +7992,13 @@ interface GatewayFileConnection extends RegistryBackendRequestScope {
   token?: null | string
 }
 
+  if (!tokens.refreshToken) {
+    // Access token expired and no RT to rotate — force re-login.
+    _clearNativeTokens(baseUrl)
+
+    return null
+  }
+
   try {
     const body = await postJsonNoAuth(
       nativeRefreshUrl(baseUrl),
@@ -8096,10 +8119,7 @@ function downloadViaOauthSessionToFile(url, ctx, options: any = {}) {
 // can trigger the 404-only compatibility fallback.
 async function finalizeGatewayDownload(res, statusCode, headers, ctx: any = {}) {
   if (statusCode >= 400) {
-    const message = await readGatewayErrorText(res)
-    const error: any = new Error(`${statusCode}: ${message}`)
-    error.statusCode = statusCode
-    throw error
+    throw httpStatusError(statusCode, await readGatewayErrorText(res))
   }
 
   const disposition = headers['content-disposition'] || headers['Content-Disposition']
@@ -10828,6 +10848,9 @@ async function fetchJsonForProfile(profile, path) {
 async function requestJsonForProfile(profile: string, path: string, method: string, body?: string) {
   const conn = await ensureBackend(profile)
 
+    return fetchJsonViaOauthSession(url, { ...opts, headers: conn.headers })
+  }
+
   return fetchJson(url, conn.token, { ...opts, headers: conn.headers, gatewayDescriptor: conn.gatewayEndpoint ? conn : undefined })
 }
 
@@ -11209,8 +11232,9 @@ async function forgetLocalGatewayDescriptor(profile) {
   }
 }
 
-async function ensureBackend(profile) {
+async function ensureBackend(profile, opts: { passive?: boolean } = {}) {
   const key = profile && String(profile).trim() ? String(profile).trim() : primaryProfileKey()
+  const passive = Boolean(opts.passive)
 
   profileDeletionGate.assertCanStart(key)
 
@@ -11246,6 +11270,7 @@ async function ensureBackend(profile) {
     return connection
   }
 
+  assertNotPassiveSpawn(passive, key)
   const entry = newPoolEntry()
 
   entry.connectionPromise = dialPoolBackend(key, entry).catch(error => {
@@ -11274,8 +11299,10 @@ async function ensureBackend(profile) {
 async function ensureRegistryBackend(
   connectionId,
   profile,
-  managedUpdateCorrelation = ''
+  managedUpdateCorrelation = '',
+  opts: { passive?: boolean } = {}
 ) {
+  const passive = Boolean(opts.passive)
   const registry = readDesktopConnectionsRegistry()
   const id = registryDialConnectionId(connectionId, registry.primary)
   const source = registry.connections.find(c => c.id === id)
@@ -11332,7 +11359,7 @@ async function ensureRegistryBackend(
   const primary = await reuseMatchingPrimarySshBackend({
     connectionId: id,
     effectiveFingerprint: resolveRegistryEffectiveFingerprint,
-    ensurePrimary: () => ensureBackend(profile),
+    ensurePrimary: () => ensureBackend(profile, { passive }),
     profile,
     registry,
     source
@@ -11390,7 +11417,7 @@ async function ensureRegistryBackend(
     }
 
     if (localRoute.delegate) {
-      return ensureBackend(profile)
+      return ensureBackend(profile, { passive })
     }
 
     const existingLocal = backendPool.get(localRoute.poolKey)
@@ -11399,6 +11426,7 @@ async function ensureRegistryBackend(
       return existingLocal.connectionPromise
     }
 
+    assertNotPassiveSpawn(passive, localRoute.poolKey)
     const localEntry = newPoolEntry()
 
     localEntry.connectionPromise = dialPoolBackend(profileKey, localEntry, {
@@ -11453,6 +11481,7 @@ async function ensureRegistryBackend(
     )
   }
 
+  assertNotPassiveSpawn(passive, key)
   const entry = newPoolEntry()
 
   entry.connectionPromise = connectRegistryBackend(
@@ -12139,7 +12168,7 @@ async function dialPoolBackend(profile, entry, opts: { forceLocal?: boolean; poo
     profileDeletionGate.assertCanStart(profile)
     assertPoolEntryStillOwned(poolKey, entry)
 
-    return runGatewayEnsure(backend, resolveHermesCwd(), HERMES_HOME)
+    return runGatewayEnsure({ ...backend, env: desktopBackendSpawnEnv(backend.env || {}, GUEST_ONBOARDING) }, resolveHermesCwd(), HERMES_HOME)
   }, async () => {
     await waitForUpdateClearance(updateGateDeps(), { pollMs: UPDATE_WAIT_POLL_MS, timeoutMs: UPDATE_WAIT_TIMEOUT_MS })
     // Update waits yield: retirement or profile deletion may win in that gap.
@@ -12496,7 +12525,7 @@ async function startHermes(requestedProfile?: string) {
     // Local WSL backend — paths are bridgeable.
     setWslBridgeProfileState(primaryProfile, true)
 
-    const connection = await ensureLocalGateway(() => runGatewayEnsure(setup.backend, resolveHermesCwd(), HERMES_HOME))
+    const connection = await ensureLocalGateway(() => runGatewayEnsure({ ...setup.backend, env: desktopBackendSpawnEnv(setup.backend.env || {}, GUEST_ONBOARDING) }, resolveHermesCwd(), HERMES_HOME))
     void showPluginCompatNoticeOnce()
 
     if (!backendConnectionState.isCurrentAttempt(connectionAttempt)) {

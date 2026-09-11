@@ -584,6 +584,9 @@ def _restore_db_pages(src: Path, dst: Path) -> bool:
         return _unlink_move_restore_db(src, dst)
 
 
+def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
+    """Fallback restore: unlink+move. Only safe when no process holds the DB open.
+
     ZipFile.write finalizes its destination member while unwinding a source-read
     failure, so the partial bytes can otherwise become a CRC-valid archive member.
     This runs immediately after that failed write, so the dropped bytes are the tail
@@ -888,6 +891,9 @@ def run_import(args) -> Optional[int]:
         print(f"Backup contains {file_count} files")
         print(f"Target: {display_hermes_home()}")
 
+        if prefix:
+            print(f"Detected archive prefix: {prefix!r} (will be stripped)")
+
 def _import_db_member(
     zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
     from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
@@ -901,10 +907,6 @@ def _import_db_member(
 def _import_db_member_exclusive(
     zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
     """Publish a SQLite ``.db`` member onto *target* without replacing its inode.
-
-        # Check for existing installation
-        has_config = (hermes_root / "config.yaml").exists()
-        has_env = (hermes_root / ".env").exists()
 
         if (has_config or has_env) and not args.force:
             print()
@@ -979,6 +981,12 @@ def _import_db_member_exclusive(
                     print(f"  {restored}/{file_count} files ...")
                 continue
 
+            # Strip prefix if detected
+            if prefix and member.startswith(prefix):
+                rel = member[len(prefix):]
+            else:
+                rel = member
+
 def _import_members(
     zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
 ) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
@@ -1003,9 +1011,6 @@ def _import_members_exclusive(
     zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
 ) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
     """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
-
-            if not rel:
-                continue
 
             try:
                 parts = tuple(normalize_archive_parts(rel))

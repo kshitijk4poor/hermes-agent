@@ -12,7 +12,17 @@ import type {
 
 import { createSessionMutationClient, type SessionMutationSnapshot } from '../../../shared/src/session-http-mutations'
 
-import { capabilityScoped, getApiRequestConnection, hermesApi, type ProfileScope, profileScoped } from './client'
+import {
+  ambientOwnerConnectionId,
+  capabilityScoped,
+  connectionScoped,
+  getApiRequestConnection,
+  getApiRequestProfile,
+  hermesApi,
+  type ProfileScope,
+  profileScoped,
+  sessionReadOwnerPin
+} from './client'
 
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
 

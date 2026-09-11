@@ -4223,7 +4223,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
         confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False,
         request_id: Optional[str] = None, history_from_session: bool = False,
-        session_history_delivery: str = "") -> tuple:
+        session_history_delivery: str = "", turn_author: Optional[Dict[str, Any]] = None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -4232,7 +4232,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         provider/model must match or the turn fails; ``runtime`` metadata is attached.
         ``session_history_delivery`` declares #98619 session-id provenance and default-denies: only audited
         producers whose client can address the id again pass "1" (see
-        ``_bind_api_server_session``)."""
+        ``_bind_api_server_session``).
+        ``turn_author`` only labels the turn for memory attribution. It grants nothing."""
         if getattr(self.gateway_runner, "session_authority", None) is not None:
             from gateway.session_api_turn import run_api_turn
             return await run_api_turn(self, user_message=user_message, conversation_history=conversation_history,
@@ -4244,7 +4245,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 route=route, session_model=session_model, requested_runtime=requested_runtime,
                 route_source=route_source, confirmed_runtime_lock=confirmed_runtime_lock,
                 bind_declared_conversation=bind_declared_conversation, request_id=request_id,
-                history_from_session=history_from_session, session_history_delivery=session_history_delivery)
+                history_from_session=history_from_session, session_history_delivery=session_history_delivery,
+                turn_author=turn_author)
         loop = asyncio.get_running_loop()
         # ContextVars do not follow run_in_executor threads: capture here, re-enter in _run().
         request_profile = _api_request_profile.get()

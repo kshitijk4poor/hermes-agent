@@ -425,7 +425,7 @@ def _(rid, params: dict) -> dict:
 
 
 # ─── Command catalog / dispatch ──────────────────────────────────────────────
-@_rpc("commands.catalog", 5020)
+@_scoped_rpc("commands.catalog", 5020)
 def _(rid, params: dict) -> dict:
     from tui_gateway.command_discovery import command_catalog
     return _ok(rid, command_catalog(_load_cfg, _tools_mod))

@@ -27,9 +27,9 @@ def _relay_root() -> Path:
     from tools.bot_mode_probe import _default_home, _hermes_root
     return _hermes_root(Path(_default_home()))
 
+
 # Historical Desktop deadline mirrors; no subprocess retry is performed here.
 # Remove with the renderer relay deadline/receipt migration.
-TURN_ATTEMPT_TIMEOUT_SECONDS = 600
 TURN_MAX_ATTEMPTS = 2  # first attempt + the policy-gated re-run
 
 
@@ -67,11 +67,21 @@ def _(rid, params: dict, _root=_relay_root) -> dict:
             raise ValueError('invalid profile')
     except ValueError:
         return _err(rid, 4090, 'invalid_params', data={'reason': 'invalid_params'})
-    resolved = 'default' if profile == 'hermes' else profile
+    from tools.bot_relay import delivery_turn_author
+    from tui_gateway.methods_browser_control import _is_authenticated_identity
+    sender_fields = ("from_profile", "from_handle", "from_connection")
+    if (any(params.get(key) for key in sender_fields)
+            and _is_authenticated_identity(getattr(current_transport(), "auth_identity", None))):
+        return _err(rid, 4095, "a logged-in client cannot name the sender of a relayed dm")
+    author = delivery_turn_author(*(params.get(key) for key in sender_fields))
+    forwarded = {key: value for key, value in params.items() if key not in sender_fields}
+    if author:
+        forwarded["author"] = author
+    resolved = 'default' if profile.lower() == 'hermes' else profile
     root = _root()
     home = root if resolved == 'default' else root / 'profiles' / resolved
     try:
-        return _ok(rid, authority_delivery(home, {**params, 'profile': resolved}))
+        return _ok(rid, authority_delivery(home, {**forwarded, 'profile': resolved}))
     except Exception as exc:
         return _err(rid, 5094, str(exc), data={'reason': 'runtime_unavailable'})
 

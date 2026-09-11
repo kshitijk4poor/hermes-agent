@@ -285,6 +285,15 @@ def _runner_parts(command):
     return parts[marker + 1], parts[marker + 2], argv, profile_home
 
 
+def _runner_author(command):
+    """The parsed ``--author`` payload of a runner command, or None when the pair is absent."""
+    parts = shlex.split(command)
+    marker = parts.index("--run-delivery")
+    if parts[marker + 1] != "--author":
+        return None
+    return json.loads(parts[marker + 2])
+
+
 def test_local_delivery_admits_canonically_and_acks(tmp_path, monkeypatch):
     calls = _capture_spawn(monkeypatch)
     # These assertions target the -p/turn-args shape; pin the entrypoint resolution
@@ -607,6 +616,8 @@ def test_named_profile_sender_prefix(tmp_path, monkeypatch):
     )
     assert result["status"] == "queued"
     assert authority.calls[0][1]["message"].startswith("Message from 🤖 coder (@coder): ")
+    assert _runner_author(calls[0]["command"]) == {"id": "bot:coder", "name": "coder", "is_bot": True}
+
 
 
 def test_unavailable_authority_is_reported_never_worked_around(tmp_path, monkeypatch):
@@ -643,6 +654,8 @@ def test_notification_spawn_failure_is_reported_after_admission(tmp_path, monkey
     monkeypatch.setattr(bot_mode_dm, "_dm_dir", lambda: tmp_path)
     import tools.terminal_tool as terminal_tool_module
 
+    def boom(command, **kwargs):
+        raise RuntimeError("spawn failed")
 
     monkeypatch.setattr(terminal_tool_module, "terminal_tool", boom)
     result = json.loads(
@@ -671,6 +684,7 @@ def test_live_dm_admitted_before_waiter_failure(tmp_path, monkeypatch):
     assert record["delivery_id"] == result["delivery_id"]
     assert record["profile_home"] == str(target.resolve())
     assert authority.records[result["delivery_id"]]["message"] == "Message from 🤖 hermes (@hermes): hello"
+    assert authority.calls[0][1]["author"] == {"id": "bot:default", "name": "hermes", "is_bot": True}
     assert "notification_error" in result
 
 
@@ -801,6 +815,37 @@ def test_delivery_main_child_env_carries_only_the_argv_author(tmp_path, monkeypa
     returncode = bot_mode_dm._delivery_main(
         ["--run-delivery", *author_args, mode, str(dm_file), "hermes", "-p", "researcher"])
 
+    assert returncode == 0
+    [(argv, kwargs)] = calls
+    assert argv[:3] == ["hermes", "-p", "researcher"]
+    assert kwargs["env"]["HERMES_DM_TEST_MARKER"] == "kept"
+    assert (json.loads(kwargs["env"][TURN_AUTHOR_ENV]) if TURN_AUTHOR_ENV in kwargs["env"] else None) == author
+    assert not dm_file.exists()
+
+
+def test_real_delivery_command_round_trip_carries_author(tmp_path):
+    """Through a real subprocess, the runner argv built by ``_delivery_command`` sets HERMES_TURN_AUTHOR on the child."""
+    dm_file = tmp_path / "message.txt"
+    dm_file.write_text("secret", encoding="utf-8")
+    observed = tmp_path / "observed.txt"
+    child = tmp_path / "child.py"
+    child.write_text(
+        "import os, pathlib, sys\n"
+        "pathlib.Path(sys.argv[1]).write_text(os.environ.get('HERMES_TURN_AUTHOR', 'unset'), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    author = {"id": "bot:default", "name": "hermes", "is_bot": True}
+    command = bot_mode_dm._delivery_command(
+        [sys.executable, str(child), str(observed)], str(dm_file), stdin_file=False, author=author
+    )
+
+    result = subprocess.run(shlex.split(command), check=False)
+
+    assert result.returncode == 0
+    assert json.loads(observed.read_text(encoding="utf-8")) == author
+    assert not dm_file.exists()
+
+
 def test_delivery_main_runs_peer_transport_and_unlinks(tmp_path):
     dm_file = tmp_path / "message.txt"
     dm_file.write_text("secret", encoding="utf-8")
@@ -816,13 +861,9 @@ def test_delivery_main_runs_peer_transport_and_unlinks(tmp_path):
         ["--run-delivery", "stdin", str(dm_file), sys.executable, str(child), str(observed)]
     )
 
-    result = subprocess.run(shlex.split(command), check=False)
-
-    assert result.returncode == 0
-    assert json.loads(observed.read_text(encoding="utf-8")) == author
+    assert returncode == 0
+    assert observed.read_text(encoding="utf-8") == "secret"
     assert not dm_file.exists()
-
-
 
 
 def test_delivery_main_maps_launch_exception_to_one_and_unlinks(tmp_path, monkeypatch):

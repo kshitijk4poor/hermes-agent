@@ -625,7 +625,8 @@ class WebhookAdapter(BasePlatformAdapter):
         if route_config.get("cron_job"):
             return self._handle_cron_trigger(prompt, route_config, route_name, event_type, delivery_id, profile)
         if route_config.get("deliver_only"):
-            return await self._handle_deliver_only(prompt, payload, route_config, route_name, event_type, delivery_id)
+            return await self._handle_deliver_only(prompt, payload, route_config, route_name, event_type, delivery_id,
+                                                   profile)
         return await self._dispatch_agent_run(request, route_config, route_name, profile, payload, prompt, event_type,
                                         delivery_id, now)
 

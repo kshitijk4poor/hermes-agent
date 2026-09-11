@@ -417,7 +417,7 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
     return acquire_turn_lock(_hermes_root(Path(_default_home())), argv[2])
 
 
-def _admit_live_dm(profile_home: Path | None, dm_file: str) -> dict | None:
+def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dict] = None) -> dict | None:
     """Pin intent before admission; retries may inspect, never change transport."""
     from tools.bot_live_delivery import deliver_to_live_owner, find_canonical_live_owner, read_delivery_result
     from utils import fsync_directory
@@ -432,7 +432,8 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str) -> dict | None:
         if owner is None:
             raise ValueError("canonical Bot Chat target is unavailable; no local fallback")
         intent = dict(owner=owner, message=Path(dm_file).read_text(encoding="utf-8"),
-                      delivery_id=hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest())
+                      delivery_id=hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest(),
+                      **({"author": author} if author else {}))
         try:
             fd = os.open(intent_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
@@ -503,7 +504,7 @@ def _runner_argv(args: list[str]) -> tuple[Optional[str], str, str, list[str]] |
 
 
 def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool,
-                  profile_home: Path | None = None) -> int:
+                  profile_home: Path | None = None, author: Optional[dict] = None) -> int:
     """Admit local DMs only through the profile authority; retain uncertain intent.
 
     The optional peer stdin transport remains an explicit remote route, never a

@@ -1437,9 +1437,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         setStatus('waiting for input…')
         ringPromptBell()
 
-        if (!id) {
-          return
-        }
+        return
+      }
 
       case 'approval.request': {
         const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
@@ -1463,6 +1462,32 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         })
         setStatus('approval needed')
         ringPromptBell()
+
+        return
+      }
+
+      case 'sudo.request':
+        patchOverlayState({ sudo: { requestId: ev.payload.request_id } })
+        setStatus('sudo password needed')
+        ringPromptBell()
+
+        return
+
+      case 'secret.request':
+        patchOverlayState({
+          secret: { envVar: ev.payload.env_var, prompt: ev.payload.prompt, requestId: ev.payload.request_id }
+        })
+        setStatus('secret input needed')
+        ringPromptBell()
+
+        if (!id) {
+          return
+        }
+
+        // A password/secret/vault card that timed out vanished silently; say
+        // what happened and how to get it back. Clarify already records its
+        // own "(timed out)" line via tool.complete.
+        const timeoutNotice = promptTimeoutNotice(ev.payload?.method, ev.payload?.reason)
 
         if (timeoutNotice) {
           sys(timeoutNotice)

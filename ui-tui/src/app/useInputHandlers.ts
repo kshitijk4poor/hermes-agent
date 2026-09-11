@@ -266,23 +266,6 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
         .then(r => r && fresh() && (patchOverlayState({ approval: null }), patchTurnState({ outcome: 'denied' })))
     }
 
-    // The connection card has no local dismissal: the operation belongs to the running turn, so
-    // ending the turn is what settles it (as `interrupt`) and closes the card.
-    if (overlay.connection) {
-      const sid = getUiState().sid
-
-      if (!sid) {
-        return
-      }
-
-      return turnController.interruptTurn({
-        appendMessage: actions.appendMessage,
-        gw: gateway.gw,
-        sid,
-        sys: actions.sys
-      })
-    }
-
     if (overlay.sudo || overlay.secret || overlay.vaultUnlock) {
       return dismissSensitivePrompt(overlay, gateway.rpc, actions.sys)
     }

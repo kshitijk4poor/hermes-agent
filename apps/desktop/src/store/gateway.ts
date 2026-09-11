@@ -2178,6 +2178,89 @@ export function reconnectSecondaryGateways({ forceOpenSockets = false }: { force
   }
 }
 
+// How many non-primary backends currently hold an open socket. Hover-intent
+// prewarming consults this before spawning: a speculative spawn that pushes
+// the pool past its cap causes the Electron main to LRU-evict a warm backend
+// — often one the user is about to click — turning the prewarm into churn
+// (the #91545 evict/respawn cascade). The active gateway's backend is
+// primary-routed and never counts toward the pool cap.
+export function openSecondaryCount(): number {
+  let count = 0
+
+  for (const entry of g.secondaries.values()) {
+    if (isOpen(entry.gateway)) {
+      count += 1
+    }
+  }
+
+  return count
+}
+
+// Keep the idle reaper from killing a backend we still need: ping every live
+// secondary. The active one is pinged separately (touchActiveGatewayBackend).
+// "Live" means the socket is OPEN: a wantOpen entry stuck in its reconnect
+// backoff has no consumer on that backend, and pinging it anyway kept a
+// tile-pinned backend keepalive-fresh forever, so LRU eviction and the idle
+// reaper never freed its pool slot (#103375). Each ping also carries whether a
+// prompt turn leases the scope, so a foreground dial that must retire a
+// resident can skip leased ones early (the backend probe stays the proof).
+export function touchSecondaryGateways(): void {
+  // Older Desktop hosts own pooled children. Canonical hosts expose no touch
+  // capability: their gateway lifetime is independent of renderer keepalives.
+  const desktop = window.hermesDesktop as (typeof window.hermesDesktop & {
+    touchBackend?: (scope: string) => Promise<unknown>
+  })
+
+  for (const entry of g.secondaries.values()) {
+    if (entry.wantOpen && isOpen(entry.gateway)) {
+      void desktop?.touchBackend?.(entry.scope, { activeTurn: scopeHasTurnLease(entry.scope) }).catch(() => undefined)
+    }
+  }
+}
+
+// A local child is pooled under the bare profile (legacy route) or
+// `conn:local::<profile>`; both renderer scopes ride the same child, so a
+// retirement of either key parks both.
+function secondaryRidesPoolKey(entry: Secondary, poolKey: string): boolean {
+  if (entry.scope === poolKey) {
+    return true
+  }
+
+  const local = !entry.connectionId || entry.connectionId === 'local'
+  const profile = normKey(entry.profile)
+
+  return local && (profile === poolKey || `conn:local::${profile}` === poolKey)
+}
+
+// Main is retiring the pooled backend under `poolKey` for a foreground open
+// (electron/pool-retire.ts). Park every scope riding it BEFORE the socket
+// drops: the 'closed' state must not scheduleReconnect, and the focus/wake
+// nudge must not re-arm it either — both would queue a background redial for
+// the slot the retirement freed. The entry stays (bot tiles keep their card);
+// the next explicit open of the scope re-arms it. Returns the parked scopes.
+export function parkSecondariesForRetiredBackend(poolKey: string): string[] {
+  const key = String(poolKey || '').trim()
+  const parked: string[] = []
+
+  if (!key) {
+    return parked
+  }
+
+  for (const entry of g.secondaries.values()) {
+    if (!secondaryRidesPoolKey(entry, key)) {
+      continue
+    }
+
+    entry.wantOpen = false
+    entry.retiredByPool = true
+    entry.stalledDials = 0
+    clearTimer(entry)
+    parked.push(entry.scope)
+  }
+
+  return parked
+}
+
 // Tear a secondary down: stop its reconnect loop, detach listeners, close the
 // socket. Caller handles removal from the map.
 function disposeSecondary(entry: Secondary): void {
