@@ -564,9 +564,10 @@ def test_peer_delivery_author_carries_the_sender_hostname_and_local_stays_bare(t
     calls = _capture_spawn(monkeypatch)
     monkeypatch.setattr("socket.gethostname", lambda: " eri/mac\x00.local ")
     home = _managed_home(tmp_path, teammates=("researcher", "coder"), peers=("spark",))
+    _canonical_target(monkeypatch, home / "profiles" / "researcher")
     agent = _FakeAgent(home / "profiles" / "coder", title="Bot Chat")
 
-    assert json.loads(bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent))["status"] == "queued"
+    assert json.loads(bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent))["status"] == "sent"
     assert json.loads(bot_mode_dm.message_agent_tool(target="researcher", message="ping", agent=agent))["status"] == "queued"
 
     assert _runner_author(calls[0]["command"]) == {"id": "bot:erimac.local/coder", "name": "coder", "is_bot": True}
@@ -605,7 +606,7 @@ def test_renamed_primary_signs_with_its_friendly_name_and_is_reachable_by_it(tmp
 
 def test_named_profile_sender_prefix(tmp_path, monkeypatch):
     """A named-profile bot signs with its own handle, not @hermes."""
-    _capture_spawn(monkeypatch)
+    calls = _capture_spawn(monkeypatch)
     home = _managed_home(tmp_path, teammates=("researcher", "coder"))
     authority = _canonical_target(monkeypatch, home / "profiles" / "researcher")
     monkeypatch.setattr(bot_mode_dm, "_dm_dir", lambda: tmp_path)
@@ -618,6 +619,31 @@ def test_named_profile_sender_prefix(tmp_path, monkeypatch):
     assert authority.calls[0][1]["message"].startswith("Message from 🤖 coder (@coder): ")
     assert _runner_author(calls[0]["command"]) == {"id": "bot:coder", "name": "coder", "is_bot": True}
 
+
+def test_delivery_command_author_json_survives_quoting(tmp_path):
+    """The optional author JSON survives shell quoting before the delivery mode."""
+    author = {"id": "bot:default", "name": "hermes", "is_bot": True}
+    command = bot_mode_dm._delivery_command(["hermes", "-p", "x"], str(tmp_path / "dm.txt"),
+                                            stdin_file=False, author=author)
+    parts = shlex.split(command)
+    assert parts[2:4] == ["--run-delivery", "--author"]
+    assert json.loads(parts[4]) == author
+    assert parts[5] == "query-file"
+    assert _runner_parts(command) == ("query-file", str(tmp_path / "dm.txt"), ["hermes", "-p", "x"], None)
+
+    # Without an author the optional argv pair is absent.
+    command = bot_mode_dm._delivery_command(["hermes"], "dm.txt", stdin_file=True)
+    assert shlex.split(command)[2:4] == ["--run-delivery", "stdin"]
+    assert _runner_author(command) is None
+
+
+@pytest.mark.windows_only
+def test_delivery_command_preserves_author_during_windows_slash_rewrite():
+    command = bot_mode_dm._delivery_command(["hermes", "-p", "x"], "C:\\Users\\me\\dm.txt",
+                                            stdin_file=False, author={"id": "bot:default", "name": 'q"q', "is_bot": True})
+    parts = shlex.split(command)
+    assert json.loads(parts[4]) == {"id": "bot:default", "name": 'q"q', "is_bot": True}
+    assert parts[6] == "C:/Users/me/dm.txt"
 
 
 def test_unavailable_authority_is_reported_never_worked_around(tmp_path, monkeypatch):
@@ -791,9 +817,8 @@ def test_local_delivery_runner_surfaces_refusal_and_retains_payload(tmp_path, mo
 
 @pytest.mark.parametrize("mode, author", [
     ("stdin", {"id": "bot:eri-mac.local/coder", "name": "coder", "is_bot": True}),
-    ("query-file", {"id": "bot:coder", "name": "coder", "is_bot": True}),
-    ("query-file", None),
-], ids=["stdin", "query-file", "no author"])
+    ("stdin", None),
+], ids=["author", "no author"])
 def test_delivery_main_child_env_carries_only_the_argv_author(tmp_path, monkeypatch, mode, author):
     """The ``--author`` payload becomes HERMES_TURN_AUTHOR on the child. Without it the runner drops the
     variable it inherited from the sending bot's own turn instead of passing it on as the recipient's author."""
@@ -823,6 +848,32 @@ def test_delivery_main_child_env_carries_only_the_argv_author(tmp_path, monkeypa
     assert not dm_file.exists()
 
 
+@pytest.mark.parametrize("author", [{"id": "bot:coder", "name": "coder", "is_bot": True}, None])
+def test_local_runner_sends_only_argv_author_to_authority(tmp_path, monkeypatch, author):
+    from agent.turn_author import TURN_AUTHOR_ENV
+
+    target = tmp_path / "profiles" / "researcher"
+    target.mkdir(parents=True)
+    authority = _canonical_target(monkeypatch, target)
+    dm_file = tmp_path / "message.txt"
+    dm_file.write_text("hello", encoding="utf-8")
+    monkeypatch.setenv(TURN_AUTHOR_ENV, json.dumps({"id": "bot:previous", "name": "previous", "is_bot": True}))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("no local inference child"))
+    waited = []
+    monkeypatch.setattr(bot_mode_dm, "_wait_live_dm", lambda home, key: waited.append((home, key)) or 0)
+    command = bot_mode_dm._delivery_command(
+        ["hermes", "-p", "researcher"], str(dm_file), stdin_file=False,
+        profile_home=target, author=author,
+    )
+    assert bot_mode_dm._delivery_main(shlex.split(command)[2:]) == 0
+    [(home, params)] = authority.calls
+    assert home == target.resolve()
+    assert params.get("author") == author
+    assert params["message"] == "hello"
+    assert waited == [(str(target.resolve()), params["id"])]
+    assert dm_file.exists(), "local admission retains its evidence, not peer-child cleanup"
+
+
 def test_real_delivery_command_round_trip_carries_author(tmp_path):
     """Through a real subprocess, the runner argv built by ``_delivery_command`` sets HERMES_TURN_AUTHOR on the child."""
     dm_file = tmp_path / "message.txt"
@@ -836,7 +887,7 @@ def test_real_delivery_command_round_trip_carries_author(tmp_path):
     )
     author = {"id": "bot:default", "name": "hermes", "is_bot": True}
     command = bot_mode_dm._delivery_command(
-        [sys.executable, str(child), str(observed)], str(dm_file), stdin_file=False, author=author
+        [sys.executable, str(child), str(observed)], str(dm_file), stdin_file=True, author=author
     )
 
     result = subprocess.run(shlex.split(command), check=False)
