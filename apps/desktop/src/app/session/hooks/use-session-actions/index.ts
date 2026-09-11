@@ -706,10 +706,10 @@ export function useSessionActions({
         const legacyProfileIntent = isLegacyNewChatProfile(capturedProfile)
 
         const params = {
-          ...(await desktopSessionCreateParams(cwd, capturedRoute, capturedProfile, legacyProfileIntent)),
-          ...sessionCreateOverrideParams(createOverrides, seedMessages)
+          ...(await desktopSessionCreateParams(cwd, capturedRoute)),
+          ...sessionCreateOverrideParams(createOverrides, seedMessages),
+          request_id: createIntent
         }
-        params.request_id = createIntent
 
         // Lease the owner socket for the whole create → owner-publication
         // sequence (#93602 primitive). The per-request lease inside
