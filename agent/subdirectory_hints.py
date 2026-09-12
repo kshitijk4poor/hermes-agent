@@ -188,7 +188,9 @@ class SubdirectoryHintTracker:
         """Return formatted hint text for newly visited directories, or None."""
         from agent.safe_worker_policy import safe_worker_enabled
 
-        if safe_worker_enabled():
+        if not self.enabled or safe_worker_enabled():
+            return None
+        if self._home_is_working_dir:
             return None
         all_hints = [h for d in self._extract_directories(tool_name, tool_args) if (h := self._load_hints_for_directory(d))]
         return "\n\n" + "\n\n".join(all_hints) if all_hints else None

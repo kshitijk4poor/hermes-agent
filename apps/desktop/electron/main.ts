@@ -8231,7 +8231,167 @@ async function readGatewayFileDataUrl(connection: GatewayFileConnection, request
     throw new Error('Gateway returned no file data')
   }
 
-  return dataUrl
+  const buffer = parseDataUrlToBuffer(dataUrl)
+  const filename = ctx.suggested || ctx.fallbackName
+
+  const result = await dialog.showSaveDialog(mainWindow, {
+    defaultPath: filename,
+    title: 'Save File'
+  })
+
+  if (result.canceled || !result.filePath) {
+    return { canceled: true, saved: false }
+  }
+
+  // Same failure-atomic contract as the streaming path: a direct writeFile
+  // truncates an existing destination before the write completes (#96597).
+  await writeBufferToFile(buffer, result.filePath, fsPumpDeps())
+
+  return { path: result.filePath, saved: true }
+}
+
+// Mint a single-use WS ticket for a gated gateway.
+// Ticket POSTs are replay-safe; arbitrary REST mutations never use this retry loop.
+async function mintGatewayWsTicket(baseUrl, headers = {}) {
+  return withTransientRetries(
+    () =>
+      mintOauthGatewayWsTicket(
+        baseUrl,
+        {
+          ensureNativeAccessToken,
+          fetchJson,
+          fetchJsonViaOauthSession
+        },
+        headers
+      ),
+    {
+      isRetryable: (error: unknown) => !(error instanceof NativeAuthChangedError) && !isGatewayAuthRejection(error)
+    }
+  )
+}
+
+// Build a fresh WS URL for the *current* connection. Critical for reconnects:
+// OAuth WS tickets are single-use with a ~30s TTL, so the ticket baked into
+// the cached connection's wsUrl is stale on the second connect. The renderer
+// calls this immediately before every gateway.connect() so each WS upgrade
+// carries a freshly-minted ticket. For local/token connections this just
+// reuses the static token (no minting needed).
+async function freshGatewayWsUrl(profile, webContentsId) {
+  // Mint for the requested profile's backend, NOT always the primary. The
+  // renderer re-mints right before every gateway.connect(); when swapping to a
+  // pooled profile we must return THAT backend's ws URL, otherwise the connect
+  // silently lands back on the primary (default) backend and writes sessions to
+  // the wrong profile's DB. A null/empty profile resolves to the primary, so
+  // legacy callers and single-profile users are unchanged.
+  const connection = await ensureBackend(profile)
+
+  if (connection.gatewayEndpoint) {
+    return redialLocalGateway({
+      ensure: () => ensureBackend(profile),
+      forget: () => forgetLocalGatewayDescriptor(profile),
+      use: async current => {
+        const ticket = await mintLocalGatewayTicket(current.gatewayEndpoint)
+
+        return localGatewayDials.prepare(current.baseUrl, ticket, webContentsId)
+      }
+    })
+  }
+
+  if (connection.authMode === 'oauth') {
+    const ticket = await mintGatewayWsTicket(connection.baseUrl, connection.headers)
+    const wsUrl = buildGatewayWsUrlWithTicket(connection.baseUrl, ticket)
+
+    rememberRemoteWsHeaders(wsUrl, connection.headers)
+
+    return wsUrl
+  }
+
+  // Local/token: the cached wsUrl already carries the (long-lived) token.
+  rememberRemoteWsHeaders(connection.wsUrl, connection.headers)
+
+  return connection.wsUrl
+}
+
+// --- Hermes Cloud discovery + silent per-agent sign-in (cloud-auto-discovery
+// Phase 3) ---------------------------------------------------------------
+//
+// The "cloud" connection mode lets a user sign in to the Nous portal ONCE in
+// the OAuth session partition, then (a) discover their hosted agents and (b)
+// connect to any of them with no second interactive sign-in. Both ride the one
+// portal session cookie living in `persist:hermes-remote-oauth`:
+//   - discovery  → GET {portal}/api/agents over the partition-bound net; the
+//     portal session cookie authenticates it (NAS Phase 2.5 accepts the cookie).
+//   - cascade    → opening an agent's own /login in the same partition hits the
+//     portal's silent auto-approve (org member, existing session) and 302s back
+//     with that agent's session cookie — no prompt. Each agent still completes
+//     its own PKCE exchange; SSO removes the human click, not a security check.
+
+// Canonical Nous portal base URL, overridable for staging/dev. Mirrors the CLI
+// convention (hermes_cli/auth.py DEFAULT_NOUS_PORTAL_URL + the same env names)
+// so a single override flips every Hermes surface to the same portal.
+const DEFAULT_NOUS_PORTAL_URL = 'https://portal.nousresearch.com'
+
+function resolvePortalBaseUrl() {
+  const raw = process.env.HERMES_PORTAL_BASE_URL || process.env.NOUS_PORTAL_BASE_URL || DEFAULT_NOUS_PORTAL_URL
+
+  return String(raw).trim().replace(/\/+$/, '')
+}
+
+// Whether the OAuth partition currently holds a live Nous portal session — the
+// credential that powers both discovery and the silent cascade. The portal
+// authenticates via PRIVY, not the Hermes gateway session cookies, so this
+// checks for the `privy-token` cookie on the portal host (NOT
+// hasLiveOauthSession, which looks for hermes_session_at/rt that the portal
+// never sets). See connection-config.ts cookiesHavePrivySession.
+//
+// Mirrors hasLiveOauthSession's cold-start guard (#73495): a `persist:`
+// partition's cookie store hydrates lazily, so the FIRST read on a fresh boot
+// can come back empty even for a signed-in user. The renderer checks Cloud
+// status exactly once on entering cloud mode, so a single false-negative here
+// used to clear the discovered agent list and demand a re-login that a plain
+// retry would have avoided. Warm the store and re-read with a short backoff
+// before trusting a negative.
+async function hasLivePortalSession() {
+  const sess = getOauthSession()
+
+  if (!sess) {
+    return false
+  }
+
+  const portalBaseUrl = resolvePortalBaseUrl()
+  const parsed = new URL(portalBaseUrl)
+
+  const readPortal = async () => {
+    try {
+      const cookies = await sess.cookies.get({ url: portalBaseUrl })
+
+      return cookiesHavePrivySession(cookies)
+    } catch {
+      try {
+        const cookies = await sess.cookies.get({ domain: parsed.hostname })
+
+        return cookiesHavePrivySession(cookies)
+      } catch {
+        return false
+      }
+    }
+  }
+
+  if (await readPortal()) {
+    return true
+  }
+
+  await warmOauthCookieStore()
+
+  for (const delayMs of [30, 60, 90]) {
+    if (await readPortal()) {
+      return true
+    }
+
+    await new Promise(resolve => setTimeout(resolve, delayMs))
+  }
+
+  return readPortal()
 }
 
 // Recover a Cloud cookie only after a confirmed cookie-auth ticket 401.
@@ -8277,7 +8437,7 @@ async function mintGatewayWsTicket(baseUrl: string, headers: Record<string, stri
 // calls this immediately before every gateway.connect() so each WS upgrade
 // carries a freshly-minted ticket. For local/token connections this just
 // reuses the static token (no minting needed).
-async function freshGatewayWsUrl(profile, webContentsId) {
+async function freshGatewayWsUrl(profile) {
   // Mint for the requested profile's backend, NOT always the primary. The
   // renderer re-mints right before every gateway.connect(); when swapping to a
   // pooled profile we must return THAT backend's ws URL, otherwise the connect
@@ -8285,18 +8445,6 @@ async function freshGatewayWsUrl(profile, webContentsId) {
   // the wrong profile's DB. A null/empty profile resolves to the primary, so
   // legacy callers and single-profile users are unchanged.
   const connection = await ensureBackend(profile)
-
-  if (connection.gatewayEndpoint) {
-    return redialLocalGateway({
-      ensure: () => ensureBackend(profile),
-      forget: () => forgetLocalGatewayDescriptor(profile),
-      use: async current => {
-        const ticket = await mintLocalGatewayTicket(current.gatewayEndpoint)
-
-        return localGatewayDials.prepare(current.baseUrl, ticket, webContentsId)
-      }
-    })
-  }
 
   if (connection.authMode === 'oauth') {
     const ticket = await mintGatewayWsTicket(connection.baseUrl, connection.headers)
@@ -12151,6 +12299,19 @@ async function dialPoolBackend(profile, entry, opts: { forceLocal?: boolean; poo
 // funnels through here so the verb stays in one place.
 async function stopPoolBackend(profile: string) {
   backendPool.delete(profile)
+}
+
+// Tell every window the pooled backend under `poolKey` is being retired so the
+// renderer parks that scope (wantOpen=false) instead of redialing into the
+// slot it just vacated. Fired BEFORE the SIGTERM (pool-retire.ts contract).
+function broadcastPoolBackendRetiring(poolKey: string) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    const { webContents } = win
+
+    if (webContents && !webContents.isDestroyed()) {
+      webContents.send('hermes:pool:retiring', { poolKey })
+    }
+  }
 }
 
 const poolRetirer = createPoolRetirer({
