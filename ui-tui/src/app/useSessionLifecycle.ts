@@ -15,6 +15,9 @@ import type {
   SessionActivateResponse,
   SessionCloseResponse,
   SessionCreateResponse,
+  SessionDetachResponse,
+  SessionInflightTurn,
+  SessionResumeResponse,
   SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
@@ -151,11 +154,62 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   const closeSession = useCallback(
     (targetSid?: null | string) =>
       targetSid && !gw.isCanonical ? rpc<SessionCloseResponse>('session.close', { session_id: targetSid }) : Promise.resolve(null),
-    [rpc]
+    [gw.isCanonical, rpc]
   )
 
   const cancelResumeScrollRef = useRef<null | (() => void)>(null)
   const attachmentFlight = useRef(0)
+  const canonicalSubscriptions = useRef(new Map<string, string>())
+  const canonicalDetachFlights = useRef(new Map<string, Promise<void>>())
+
+  const detachCanonical = useCallback((sessionId?: null | string, subscriptionId?: null | string) => {
+    if (!gw.isCanonical || !sessionId || !subscriptionId) {
+      return
+    }
+
+    const detach = () => rpc<SessionDetachResponse>('session.detach', {
+      session_id: sessionId,
+      subscription_id: subscriptionId
+    }).then(result => {
+      if (result?.detached && canonicalSubscriptions.current.get(sessionId) === subscriptionId) {
+        canonicalSubscriptions.current.delete(sessionId)
+      }
+    }).catch(() => undefined)
+    const previous = canonicalDetachFlights.current.get(sessionId)
+    const pending = previous ? previous.then(detach) : detach()
+
+    canonicalDetachFlights.current.set(sessionId, pending)
+    void pending.then(() => {
+      if (canonicalDetachFlights.current.get(sessionId) === pending) {
+        canonicalDetachFlights.current.delete(sessionId)
+      }
+    })
+  }, [gw.isCanonical, rpc])
+
+  const discardStaleAttachment = useCallback((result?: null | { session_id: string; subscription_id?: string }) => {
+    const subscriptionId = result?.subscription_id
+
+    if (result && subscriptionId && canonicalSubscriptions.current.get(result.session_id) !== subscriptionId) {
+      detachCanonical(result.session_id, subscriptionId)
+    }
+  }, [detachCanonical])
+
+  const adoptAttachment = useCallback((
+    result: { session_id: string; subscription_id?: string },
+    previousSid?: null | string,
+    previousSubscription?: null | string
+  ) => {
+    if (!gw.isCanonical || !result.subscription_id) {
+      return
+    }
+
+    canonicalSubscriptions.current.set(result.session_id, result.subscription_id)
+
+    if (previousSid && previousSubscription
+        && (previousSid !== result.session_id || previousSubscription !== result.subscription_id)) {
+      detachCanonical(previousSid, previousSubscription)
+    }
+  }, [detachCanonical, gw.isCanonical])
 
   const resetSession = useCallback(() => {
     cancelResumeScrollRef.current?.()
@@ -203,6 +257,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
     async (msg?: string, title?: string, keepCurrent = false) => {
       const flight = ++attachmentFlight.current
       const previousSid = getUiState().sid
+      const previousSubscription = previousSid ? canonicalSubscriptions.current.get(previousSid) : undefined
       const setup = gw.isCanonical ? null : await rpc<SetupStatusResponse>('setup.status', {})
 
       if (flight !== attachmentFlight.current) {return null}
@@ -223,7 +278,11 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       const r = await rpc<SessionCreateResponse>('session.create', gw.isCanonical
         ? { request_id: randomUUID(), ...localCreationOptions() } : { cols: colsRef.current })
 
-      if (flight !== attachmentFlight.current) {return null}
+      if (flight !== attachmentFlight.current) {
+        discardStaleAttachment(r)
+
+        return null
+      }
 
       if (!r) {
         patchUiState({ status: 'ready' })
@@ -287,10 +346,12 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       }
 
       signalFreshSessionBoundary(previousSid, r.session_id, onFreshSessionStarted)
+      adoptAttachment(r, previousSid, previousSubscription)
 
       return r.session_id
     },
-    [closeSession, colsRef, onFreshSessionStarted, panel, resetSession, rpc, setHistoryItems, setSessionStartedAt, sys]
+    [adoptAttachment, closeSession, colsRef, discardStaleAttachment, gw.isCanonical, onFreshSessionStarted, panel,
+      resetSession, rpc, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const newSession = useCallback(
@@ -310,15 +371,28 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
   const activateLiveSession = useCallback(
     (id: string) => {
       const flight = ++attachmentFlight.current
+      const previousSid = getUiState().sid
+      const previousSubscription = previousSid ? canonicalSubscriptions.current.get(previousSid) : undefined
       patchOverlayState({ sessions: false })
       patchUiState({ status: t('session.status.switchingSession') })
       // The card belongs to the session being left; the activated one answers with its own.
       clearConnectionOperation()
 
-      gw.request<SessionActivateResponse>('session.activate', { session_id: id })
+      const pendingDetach = canonicalDetachFlights.current.get(id)
+      const request = pendingDetach
+        ? pendingDetach.then(() => flight === attachmentFlight.current
+          ? gw.request<SessionActivateResponse>('session.activate', { session_id: id }) : null)
+        : gw.request<SessionActivateResponse>('session.activate', { session_id: id })
+
+      request
         .then(raw => {
-          if (flight !== attachmentFlight.current) {return}
           const r = asRpcResult<SessionActivateResponse>(raw)
+
+          if (flight !== attachmentFlight.current) {
+            discardStaleAttachment(r)
+
+            return
+          }
 
           if (!r) {
             sys(`error: ${t('session.common.invalidResponse', 'session.activate')}`)
@@ -352,6 +426,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
           cancelResumeScrollRef.current?.()
           cancelResumeScrollRef.current = scheduleResumeScrollToBottom(scrollRef)
+          adoptAttachment(r, previousSid, previousSubscription)
         })
         .catch((e: Error) => {
           if (flight !== attachmentFlight.current) {return}
@@ -359,7 +434,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           patchUiState({ status: 'ready' })
         })
     },
-    [gw, resetSession, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [adoptAttachment, discardStaleAttachment, gw, resetSession, scrollRef, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const resumeById = useCallback(
@@ -367,6 +442,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       const flight = ++attachmentFlight.current
       const current = captureDestination()
       const previousSid = current.sid
+      const previousSubscription = previousSid ? canonicalSubscriptions.current.get(previousSid) : undefined
 
       const destination = current.sid === id || current.storedSid === id
         ? current : { ...current, sid: id, storedSid: id }
@@ -384,10 +460,21 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           return
         }
 
-        gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id })
+        const pendingDetach = canonicalDetachFlights.current.get(id)
+        const request = pendingDetach
+          ? pendingDetach.then(() => flight === attachmentFlight.current
+            ? gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id }) : null)
+          : gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id })
+
+        request
           .then(raw => {
-            if (flight !== attachmentFlight.current) {return}
             const r = asRpcResult<SessionResumeResponse>(raw)
+
+            if (flight !== attachmentFlight.current) {
+              discardStaleAttachment(r)
+
+              return
+            }
 
             if (!r) {
               sys(`error: ${t('session.common.invalidResponse', 'session.resume')}`)
@@ -433,6 +520,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             if (previousSid && previousSid !== r.session_id) {
               void closeSession(previousSid)
             }
+
+            adoptAttachment(r, previousSid, previousSubscription)
           })
           .catch((e: Error) => {
             if (flight !== attachmentFlight.current) {return}
@@ -441,7 +530,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           })
       })
     },
-    [closeSession, colsRef, gw, panel, resetSession, rpc, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [adoptAttachment, closeSession, colsRef, discardStaleAttachment, gw, panel, resetSession, rpc, scrollRef,
+      setHistoryItems, setSessionStartedAt, sys]
   )
 
   const guardBusySessionSwitch = useCallback(
@@ -477,8 +567,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
       newSession,
       resetSession,
       resetVisibleHistory,
-      resumeById,
-      trimTail
+      resumeById
     ]
   )
 }
