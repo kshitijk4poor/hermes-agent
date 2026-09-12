@@ -64,8 +64,6 @@ function renderSubmitHook({
   const onSteer = vi.fn(async () => true)
   const onSteerHidden = vi.fn(async () => true)
   const onSubmit = vi.fn(async () => true)
-  const loadIntoComposer = vi.fn()
-  const stashAt = vi.fn()
   const queueCurrentDraft = vi.fn(() => true)
   let updatePaneVisible: Dispatch<SetStateAction<boolean>> | undefined
 
@@ -143,8 +141,6 @@ function renderSubmitHook({
     onSteer,
     onSteerHidden,
     onSubmit,
-    loadIntoComposer,
-    stashAt,
     queueCurrentDraft,
     composerSurfaceId: resolvedSurfaceId,
     setPaneVisible(nextVisible: boolean) {
@@ -187,6 +183,8 @@ describe('useComposerSubmit external request routing', () => {
       await waitFor(() => expect(h.onSubmit).toHaveBeenCalledWith('keep guidance', expect.objectContaining({ fromQueue: true, sessionId: 'runtime-session', storedSessionId: 'stored-session' })))
       expect(getQueuedPrompts('stored-session')).toEqual([])
     } finally { $connection.set(null); $queuedPromptsBySession.set({}) }
+  })
+
   it.each([true, false])('steers a busy external visible submit and queues only on rejection (%s)', async accepted => {
     const { onSteer, onSubmit, clearDraft } = renderSubmitHook({ busy: true, text: 'unsent draft' })
     onSteer.mockResolvedValue(accepted)
