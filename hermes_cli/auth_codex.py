@@ -598,6 +598,7 @@ def clear_codex_pool_quota_cooldowns(access_token: Optional[str] = None) -> int:
                 _save_auth_store(auth_store, target_path=target)
     except Exception:
         logger.debug("Failed to clear Codex pool quota cooldowns", exc_info=True)
+        return 0  # a failed save persisted nothing, whatever was counted in memory
     return cleared
 
 
