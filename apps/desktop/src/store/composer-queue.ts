@@ -195,7 +195,7 @@ export const withQueueDrainClaim = <T>(sid: string, task: (queue: QueuedPromptEn
 
 export const enqueueQueuedPrompt = (
   key: string | null | undefined,
-  payload: { id?: string; text: string; attachments: ComposerAttachment[]; displayText?: string }
+  payload: { id?: string; text: string; attachments: ComposerAttachment[]; displayText?: string; displayKind?: 'hidden' }
 ): null | QueuedPromptEntry => {
   const sid = sidOf(key)
 
