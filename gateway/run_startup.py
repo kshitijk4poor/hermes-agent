@@ -588,13 +588,11 @@ class GatewayStartupMixin:
         for entry in candidates:
             # Canonical admissions own restart decisions, including unknown pauses.
             # Legacy synthetic resume must not race their restored FIFO.
-            authority = getattr(self, 'session_authority', None)
-            if authority is not None:
-                if authority.db._read_one(
+            from gateway.session_authorities import all_authorities
+            if any(authority.db._read_one(
                     'SELECT 1 FROM session_admissions WHERE target_session_id=? LIMIT 1',
-                    (entry.session_id,),
-                ):
-                    continue
+                    (entry.session_id,)) for authority in all_authorities(self)):
+                continue
             marker = entry.last_resume_marked_at or entry.updated_at
             if not _is_fresh_gateway_interruption(marker, window_secs=window):
                 continue

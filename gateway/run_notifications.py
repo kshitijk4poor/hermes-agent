@@ -1332,7 +1332,8 @@ class GatewayNotificationsMixin:
             _prime = getattr(adapter, "prime_routing_cache", None)
             if callable(_prime):
                 _prime(synth_event)
-            authority = getattr(self, 'session_authority', None)
+            from gateway.session_authorities import active_authority
+            authority = active_authority(self)
             if authority is not None:
                 from gateway.session_automation import producer_identity
                 from hermes_state_runtime import RuntimeStoreError
