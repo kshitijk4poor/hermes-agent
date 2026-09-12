@@ -375,7 +375,7 @@ class TestRunJobTerminalCwd:
         monkeypatch.setattr(
             sched, "_run_job_script_with_claim_heartbeat", run_script
         )
-        success, *_ = sched.run_job(
+        success, *_ = _run_owned_job(
             {
                 "id": "agent-script-workdir",
                 "name": "agent-script-workdir",
@@ -383,7 +383,8 @@ class TestRunJobTerminalCwd:
                 "script": "collect.py",
                 "workdir": str(workdir),
                 "schedule_display": "manual",
-            }
+            },
+            tmp_path,
         )
 
         assert success is True
