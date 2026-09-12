@@ -397,11 +397,12 @@ import {
   withoutInteractiveOauthLogin
 } from './oauth-rest-request'
 import { wireOauthSessionResponse } from './oauth-session-response'
-import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
-import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
-import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
-import { petOverlayClickThrough } from './pet-overlay'
-import { placePetOverlay, registerPetOverlayIpc } from './pet-overlay-ipc'
+import { createParentStartMarkerResolver } from './parent-process-identity'
+import { registerPetOverlayIpc } from './pet-overlay-ipc'
+import {
+  pendingNotice as pendingPluginCompatNotice,
+  recordDismissed as recordPluginCompatDismissed
+} from './plugin-compat-notice'
 import {
   buildRegistryProfileRoutes,
   isLocalEnumerationFailure,
@@ -12373,7 +12374,8 @@ function reapInstallRootedStragglers(excludePids: number[]): void {
 }
 
   stopBackendChild(primary)
-  await Promise.all([waitForBackendExit(primary), stopAllPoolBackends()])
+  // Bounded: a backend that ignores SIGTERM must not wedge app quit (main's 7 s teardown budget).
+  await waitForTeardown([localShutdown, waitForBackendExit(primary), stopAllPoolBackends()], 7_000)
 })
 
 const quitTeardown = createQuitTeardownCoordinator(() => app.quit())
