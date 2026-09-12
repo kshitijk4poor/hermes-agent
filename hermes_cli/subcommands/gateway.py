@@ -8,6 +8,13 @@ from typing import Callable
 from hermes_cli.subcommands._shared import add_accept_hooks_flag
 
 
+# `start`/`restart` on a named profile refuse while the default multiplexer serves it (a second gateway
+# would double-bind its platforms); `gateway run` carries its own broader --force text.
+_FORCE_SERVED_PROFILE_HELP = (
+    "Start a separate gateway for this profile even when the default multiplexer already serves it "
+    "(not recommended: two pollers on one bot token, port conflicts)")
+
+
 class _GatewayCommandParser(argparse.ArgumentParser):
     """Ensure's parser errors share its machine-readable command boundary."""
 

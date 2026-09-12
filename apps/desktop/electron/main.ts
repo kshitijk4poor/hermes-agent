@@ -394,8 +394,6 @@ import { registerNativeNotifications } from './notification-ipc'
 import { isExpectedOauthNavigationAbort } from './oauth-navigation'
 import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
-import { createParentStartMarkerResolver } from './parent-process-identity'
-import { registerPetOverlayIpc } from './pet-overlay-ipc'
 import {
   canShowInteractiveOauthLogin,
   mintGatewayWsTicket as mintOauthGatewayWsTicket,
@@ -406,9 +404,12 @@ import {
 import { wireOauthSessionResponse } from './oauth-session-response'
 import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
-import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
-import { petOverlayClickThrough } from './pet-overlay'
-import { placePetOverlay, registerPetOverlayIpc } from './pet-overlay-ipc'
+import { createParentStartMarkerResolver } from './parent-process-identity'
+import { registerPetOverlayIpc } from './pet-overlay-ipc'
+import {
+  pendingNotice as pendingPluginCompatNotice,
+  recordDismissed as recordPluginCompatDismissed
+} from './plugin-compat-notice'
 import {
   buildRegistryProfileRoutes,
   isLocalEnumerationFailure,
@@ -7992,49 +7993,24 @@ interface GatewayFileConnection extends RegistryBackendRequestScope {
   token?: null | string
 }
 
-  if (!tokens.refreshToken) {
-    // Access token expired and no RT to rotate — force re-login.
-    _clearNativeTokens(baseUrl)
-
-    return null
-  }
-
-  try {
-    const body = await postJsonNoAuth(
-      nativeRefreshUrl(baseUrl),
-      { refresh_token: tokens.refreshToken, provider: tokens.provider },
-      { timeoutMs: 10_000 }
-    )
-
-    const rotated = parseTokenResponse(body)
-    _storeNativeTokens(baseUrl, rotated)
-
-    return rotated.accessToken
-  } catch (error: any) {
-    // A 401 means the RT is dead (session_expired) — drop tokens so the UI
-    // prompts a fresh native login. A 503/transient keeps them for a retry.
-    if (error && error.statusCode === 401) {
-      _clearNativeTokens(baseUrl)
-
-      return null
-    }
-
-    throw error
-  }
+interface GatewayFileSavePayload {
+  sessionId?: string
+  connectionId?: unknown
+  path?: unknown
+  profile?: unknown
+  suggestedName?: unknown
 }
 
-// OAuth-session download that streams the response body straight to a
-// user-selected destination (via finalizeGatewayDownload). The connect timeout
-// is cleared once the response headers arrive.
-function downloadViaOauthSessionToFile(url, ctx, options: any = {}) {
-  return new Promise((resolve, reject) => {
-    const sess = getOauthSessionForUrl(url)
-
-    if (!sess) {
-      reject(new Error('OAuth session partition is unavailable.'))
-
-      return
-    }
+function gatewayFileRequestPath(
+  connection: GatewayFileConnection,
+  connectionId: null | string,
+  profile: null | string,
+  requestPath: string
+): string {
+  return connectionId
+    ? pathForRegistryBackendRequest(requestPath, profile, connection)
+    : pathWithGlobalRemoteProfile(requestPath, profile, profileRouteOptions(profile))
+}
 
     let parsed
 
@@ -8189,25 +8165,18 @@ interface GatewayFileSavePayload {
   suggestedName?: unknown
 }
 
-async function gatedFileAuth(connection: GatewayFileConnection) {
-  const nativeAt =
-    connection.authMode === 'oauth' ? await ensureNativeAccessToken(connection.baseUrl).catch(() => null) : null
-
-  return resolveGatedDownloadAuth(connection.authMode, nativeAt, connection.token)
-}
-
 function gatewayFileRequestPath(
   connection: GatewayFileConnection,
   connectionId: null | string,
   profile: null | string,
   requestPath: string
-): string {
+) {
   return connectionId
     ? pathForRegistryBackendRequest(requestPath, profile, connection)
     : pathWithGlobalRemoteProfile(requestPath, profile, profileRouteOptions(profile))
 }
 
-async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<GatewayFileSaveResult> {
+async function saveGatewayFile(payload: GatewayFileSavePayload = {}) {
   const filePath = gatewayFilePath(payload.path)
 
   if (!filePath) {
@@ -8229,7 +8198,10 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<Ga
     payload.sessionId
   )
 
-  const url = `${connection.baseUrl}${requestPaths.download}`
+  const deps: GatewayFileSaveDeps = {
+    showSaveDialog: (options: GatewaySaveDialogOptions): Promise<GatewaySaveDialogResult> =>
+      dialog.showSaveDialog(mainWindow, options)
+  }
 
   try {
     const auth = await gatedFileAuth(connection)
@@ -8981,15 +8953,6 @@ function headersForRemoteRequest(requestUrl) {
 
 function installRemoteHeaderRulesOnSession(sess) {
   if (!sess || remoteHeaderSessions.has(sess)) {
-    return
-  }
-
-  remoteHeaderSessions.add(sess)
-  attachRemoteRequestHeaderListener(sess, headersForRemoteRequest)
-}
-
-function installRemoteHeaderRules() {
-  if (remoteHeaderRulesInstalled) {
     return
   }
 
@@ -10857,6 +10820,18 @@ async function fetchJsonForProfile(profile, path) {
 async function requestJsonForProfile(profile: string, path: string, method: string, body?: string) {
   const conn = await ensureBackend(profile)
 
+  if (conn.authMode === 'oauth') {
+    // Native RFC 8252 flow: authenticate with the bearer token (cookieless)
+    // when we hold one for this gateway; otherwise use the cookie partition.
+    const nativeAt = await ensureNativeAccessToken(conn.baseUrl).catch(() => null)
+
+    if (nativeAt) {
+      return fetchJson(url, null, { ...opts, bearer: nativeAt, headers: conn.headers })
+    }
+
+    return fetchJsonViaOauthSession(url, { ...opts, headers: conn.headers })
+  }
+
   return fetchJson(url, conn.token, { ...opts, headers: conn.headers, gatewayDescriptor: conn.gatewayEndpoint ? conn : undefined })
 }
 
@@ -12258,6 +12233,16 @@ function reapInstallRootedStragglers(excludePids: number[]): void {
   await Promise.all([waitForBackendExit(primary), stopAllPoolBackends()])
 })
 
+const quitTeardown = createQuitTeardownCoordinator(() => app.quit())
+
+const quitFinalization = createQuitFinalization({
+  isWindows: IS_WINDOWS,
+  hardExit: code => {
+    rememberLog(`[quit] forcing Windows process exit after Electron quit finalization stalled`)
+    app.exit(code)
+  }
+})
+
 async function teardownSshForQuit(): Promise<void> {
   for (const scope of sshConnections.keys()) {
     void teardownSshConnection(scope || null).catch((error: unknown): void =>
@@ -12545,9 +12530,7 @@ async function startHermes(requestedProfile?: string) {
     const connection = await ensureLocalGateway(() => runGatewayEnsure({ ...setup.backend, env: desktopBackendSpawnEnv(setup.backend.env || {}, GUEST_ONBOARDING) }, resolveHermesCwd(), HERMES_HOME))
     void showPluginCompatNoticeOnce()
 
-    if (!backendConnectionState.isCurrentAttempt(connectionAttempt)) {
-      throw new Error('Hermes backend start was superseded by a newer connection attempt.')
-    }
+    backendConnectionState.assertCurrentAttempt(connectionAttempt)
 
     backendStartFailure = null
     updateBootProgress({ phase: 'backend.ready', message: 'Hermes gateway is ready', progress: 94, running: true, error: null })

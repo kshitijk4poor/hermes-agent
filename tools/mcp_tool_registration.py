@@ -411,8 +411,8 @@ def _register_server_tools(name: str, server: "MCPServerTask", config: dict) -> 
         server._editor_frozen_manifest = frozen
     registered = _register_candidates(
         name, _resolve_name_collisions(name, candidates),
-        check_fn=_make_check_fn(name), scope=lambda: _core._server_registry_scope(name), lazy=False)
-    if registered and not (_core._server_registry_scope(name) or '').startswith('editor-session:'):
+        check_fn=_make_check_fn(name), scope=lambda: _core._server_registry_scope(key), lazy=False, key=key)
+    if registered and not (_core._server_registry_scope(key) or '').startswith('editor-session:'):
         _write_schema_cache(name, server, config, should_register)
     return registered
 

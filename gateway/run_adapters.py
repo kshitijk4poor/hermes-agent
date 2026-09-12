@@ -1673,20 +1673,8 @@ class GatewayAdapterLifecycleMixin:
         register_transport_home(self, None, default_home)
 
         async def _handler(_runner, event):
-            source = event.source
-            # In-process only (serialization ignores dynamic attrs); route ≠ admitting bot.
-            source._authorization_profile_home = default_home
-            if (
-                not getattr(source, "profile", None)
-                and getattr(source, "profile_route_rejected", False) is not True
-                and not self._stamp_routed_profile(source)
-            ):
-                # Read by the ``_handle_message`` ingress gate, which drops fail-closed.
-                source.profile_route_rejected = True
-            profile_home = (
-                self._resolve_profile_home_for_source(source)
-                if getattr(source, "profile", None) else default_home
-            )
+            # A rejected route still enters ``_handle_message``, whose ingress gate drops it fail-closed.
+            profile_home = self._admit_primary_source(event.source, default_home) or default_home
             from gateway.session_ingress_context import native_callback
             with native_callback(self, event, default_home):
                 async with _async_profile_runtime_scope(profile_home):
@@ -1726,6 +1714,23 @@ class GatewayAdapterLifecycleMixin:
         """Return the correctly scoped handler for a primary adapter."""
         shared = getattr(self, 'session_authority', None) is not None
         return self._make_default_profile_message_handler() if self._multiplex_on() or shared else self._handle_message
+
+    def _primary_busy_session_handler(self):
+        """Return the correctly scoped busy-session handler for a primary adapter."""
+        if self._multiplex_on():
+            return self._make_default_profile_busy_session_handler()
+        return self._standalone_scoped(self._handle_active_session_busy_message)
+
+    def _standalone_scoped(self, handler):
+        """Standalone twin of the ``_make_default_profile_*`` wrappers: run ``handler`` under
+        ``_standalone_launch_scope`` so slash commands and turns keep resolving the launch profile's
+        credentials after a hosted room flipped the process-wide guard (#112878). Decided per event:
+        activation happens after the adapters were wired."""
+        async def _handler(*args):
+            with self._standalone_launch_scope():
+                return await handler(*args)
+
+        return _handler
 
     def _multiplex_on(self) -> bool:
         return bool(getattr(self.config, "multiplex_profiles", False))

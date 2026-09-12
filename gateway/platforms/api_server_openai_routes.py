@@ -1143,7 +1143,7 @@ class OpenAICompatRoutesMixin:
             user_message=user_message, conversation_history=conversation_history,
             ephemeral_system_prompt=instructions, session_id=session_id,
             gateway_session_key=gateway_session_key, bind_declared_conversation=_declared_selected,
-            **agent_overrides, route=route)
+            **agent_overrides, route=route, relay_metadata=relay_metadata)
         if getattr(self.gateway_runner, 'session_authority', None) is not None:
             key = request.headers.get('Idempotency-Key')
             if key:

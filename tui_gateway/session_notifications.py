@@ -654,9 +654,11 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     last_kanban_poll = last_loop_poll = last_bot_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
         now = time.monotonic()
-        if not session.get("running") and now - last_wisdom_poll >= _WISDOM_POLL_SECONDS:
-            last_wisdom_poll = now
-            _sync_wisdom_activity_notice(sid, session)
+        # Completions whose owner process died after this one started (#97202); throttled per profile home.
+        async_delegation.maybe_sweep_orphaned_completions(queue)
+        if now - last_bot_poll >= _BOT_DELIVERY_POLL_SECONDS:  # bot DM → live-owner delivery latency ≤ 5 s
+            last_bot_poll = now
+            _poll_bot_live_delivery_guarded(sid, session, now)
         # /loop and /heartbeat wakeup drivers: fire a due tick for THIS session while idle (same claim-under-lock
         # as kanban dispatch). An active non-parked /goal owns the idle boundary and defers the loop tick.
         if now - last_loop_poll >= _LOOP_POLL_SECONDS:
@@ -759,22 +761,11 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
 
 
 def _hud_surface_note(session: dict) -> str:
-    """The per-surface note for this turn ("" for the plain app window): HUD → the read-the-window-below
-    prior; voice-live → the spoken-delegation contract (transcript in, speakable prose out)."""
-    surface = session.get("client_surface")
-    if surface == "hud":
-        from agent.prompt_builder import hud_surface_note
-        from tools.tool_search_catalog import TOOL_CALL_NAME
-        agent = session.get("agent")
-        direct = getattr(agent, "valid_tool_names", None) or set()
-        if TOOL_CALL_NAME not in direct:
-            return hud_surface_note(direct)
-        from agent.tool_executor import _tool_search_scoped_names
-        return hud_surface_note(direct, _tool_search_scoped_names(agent))
-    if surface == "voice-live":
-        from tools.voice_live import voice_live_turn_note
-        return voice_live_turn_note(session.get("voice_live_context") or "")
-    return ""
+    """The HUD-mode note for this turn, or "" when it was not typed there."""
+    if session.get("client_surface") != "hud":
+        return ""
+    from agent.prompt_builder import hud_surface_note
+    return hud_surface_note(getattr(session.get("agent"), "valid_tool_names", None))
 
 
 def _prepend_note(run_message: Any, note: str) -> Any:

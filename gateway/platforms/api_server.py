@@ -4223,7 +4223,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
         confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False,
         request_id: Optional[str] = None, history_from_session: bool = False,
-        session_history_delivery: str = "", turn_author: Optional[Dict[str, Any]] = None) -> tuple:
+        session_history_delivery: str = "", turn_author: Optional[Dict[str, Any]] = None,
+        relay_metadata: Optional[Dict[str, Any]] = None, notification_category: str = "result",
+        resume_unanswered_turn: bool = False, approval_notify_callback=None,
+        approval_session_key: Optional[str] = None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
