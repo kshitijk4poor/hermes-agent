@@ -222,10 +222,10 @@ def _initialize_run_state(self, *, store_factory) -> None:
         self._run_owner_started = int(get_process_start_time(self._run_owner_pid) or 0)
     except Exception:
         self._run_owner_started = 0
-    # All keyed by run_id: SSE queues (+creation time for the TTL sweep), connected
-    # subscribers, live agent/task refs for cooperative stop (the executor thread may
-    # outlive the request, hence the separate stopping set), pollable statuses, and
-    # approval session keys (approval core resolves by session key, clients by run_id).
+    # All keyed by run_id: SSE fanout streams (+creation time for the TTL sweep), live
+    # agent/task refs for cooperative stop (the executor thread may outlive the request,
+    # hence the separate stopping set), pollable statuses, and approval session keys
+    # (approval core resolves by session key, clients by run_id).
     self._run_idempotency_ids: set[str] = set()
     self._stopping_run_ids: set[str] = set()
     self._shutdown_interrupted_run_ids: set[str] = set()
@@ -486,6 +486,29 @@ def _replay_or_conflict(self, request, outcome, record, gateway_session_key, _op
     original_id = str(record["run_id"])
     status = self._durable_run_status(request, original_id) or record["status"]
     return _accepted_response(original_id, status.get("status", "queued"), gateway_session_key, replayed=True)
+
+
+class _RunStream:
+    """Fanout transport for one run: every subscriber reads the whole ordered event log,
+    including events published before it connected; ``None`` is the close sentinel. A
+    shared ``asyncio.Queue`` would hand each event to exactly one reader and let the first
+    disconnect tear the stream down under the others."""
+
+    def __init__(self) -> None:
+        self.events: List[Optional[Dict]] = []
+        self.subscribers: set["asyncio.Queue[Optional[Dict]]"] = set()
+
+    def put_nowait(self, event: Optional[Dict]) -> None:
+        self.events.append(event)
+        for queue in self.subscribers:
+            queue.put_nowait(event)
+
+    def subscribe(self) -> "asyncio.Queue[Optional[Dict]]":
+        queue: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
+        for event in self.events:
+            queue.put_nowait(event)
+        self.subscribers.add(queue)
+        return queue
 
 
 @dataclass(slots=True)
@@ -1136,7 +1159,10 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
     else:
         return _run_not_found(_api_server._openai_error, run_id)
     stream = self._run_streams[run_id]
-    raw_last_seq = request.headers.get("Last-Event-ID") or request.query.get("last_seq")
+    q = stream.subscribe()
+    response = web.StreamResponse(status=200, headers={
+        "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    await response.prepare(request)
     try:
         last_seq = max(-1, int(str(raw_last_seq).strip())) if raw_last_seq is not None else -1
     except (TypeError, ValueError):
@@ -1203,8 +1229,9 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
             raise
         logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
     finally:
-        stream.detach(q)
-        self._release_run_owner_if_forgotten(run_id)
+        stream.subscribers.discard(q)
+        if not stream.subscribers:
+            _drop_run_transport(self, run_id)
     return response
 
 
@@ -1386,8 +1413,7 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
     if now is None:
         now = time.time()
     for run_id, created_at in list(self._run_streams_created.items()):
-        stream = self._run_streams.get(run_id)
-        if now - created_at <= self._RUN_STREAM_TTL or (stream is not None and stream.subscribers):
+        if now - created_at <= self._RUN_STREAM_TTL or self._run_streams[run_id].subscribers:
             continue
         logger.debug("[api_server] sweeping expired run transport %s", run_id)
         task = self._active_run_tasks.get(run_id)

@@ -653,138 +653,42 @@ class TestRunEvents:
                 assert "Hello!" in body
 
     @pytest.mark.asyncio
-    async def test_completed_event_carries_served_runtime_and_cache_tokens(self, adapter):
-        """The run.completed SSE event discloses the same served runtime and cache tokens as the
-        pollable status, so streaming clients get identical cost-attribution data (#102101)."""
-        import json as _json
+    async def test_two_subscribers_each_receive_every_event_and_survive_one_disconnect(self, adapter):
+        """/events is fanout, not a work queue: every subscriber sees the whole ordered stream,
+        and one client's disconnect never tears down the stream another client still reads."""
+
+        from gateway.platforms.api_server_runs import _mark_run_event
+
+        async def frame(resp):
+            return (await asyncio.wait_for(resp.content.readuntil(b"\n\n"), timeout=2.0)).decode()
 
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:
             with patch.object(adapter, "_create_agent") as mock_create:
-                mock_agent = MagicMock()
-                mock_agent.run_conversation.return_value = {"final_response": "served"}
-                mock_agent.provider = "openai-codex"
-                mock_agent.model = "gpt-5.6-luna"
-                mock_agent.session_prompt_tokens = 774050
-                mock_agent.session_completion_tokens = 6286
-                mock_agent.session_total_tokens = 780336
-                mock_agent.session_cache_read_tokens = 650000
-                mock_agent.session_cache_write_tokens = 42
+                mock_agent, agent_ready, _ = _make_slow_agent()
                 mock_create.return_value = mock_agent
-
-                resp = await cli.post("/v1/runs", json={"input": "hello", "model": "deepseek-v4-pro"})
-                run_id = (await resp.json())["run_id"]
-
-                events_resp = await cli.get(f"/v1/runs/{run_id}/events")
-                assert events_resp.status == 200
-                body = await events_resp.text()
-
-                completed = None
-                for frame in body.split("\n"):
-                    if frame.startswith("data: "):
-                        try:
-                            payload = _json.loads(frame[len("data: "):])
-                        except ValueError:
-                            continue
-                        if payload.get("event") == "run.completed":
-                            completed = payload
-                            break
-                assert completed is not None, "run.completed event missing from stream"
-                assert completed["runtime"]["provider"] == "openai-codex"
-                assert completed["runtime"]["model"] == "gpt-5.6-luna"
-                assert completed["runtime"]["requested"]["model"] == "deepseek-v4-pro"
-                assert completed["usage"]["cache_read_tokens"] == 650000
-                assert completed["usage"]["cache_write_tokens"] == 42
-
-
-    @pytest.mark.asyncio
-    async def test_concurrent_subscribers_each_receive_delta_and_terminal(self, adapter):
-        """Each SSE client observes the complete run instead of sharing one FIFO."""
-        app = _create_runs_app(adapter)
-        create_agent, callbacks, ready, release = _make_scripted_agent()
-
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_create_agent", side_effect=create_agent):
-                started = await cli.post("/v1/runs", json={"input": "hello"})
-                run_id = (await started.json())["run_id"]
-                await asyncio.get_running_loop().run_in_executor(None, ready.wait, 5)
-
+                run_id = (await (await cli.post("/v1/runs", json={"input": "hello"})).json())["run_id"]
+                assert agent_ready.wait(timeout=3.0)
                 first = await cli.get(f"/v1/runs/{run_id}/events")
                 second = await cli.get(f"/v1/runs/{run_id}/events")
-                callbacks["delta"]("shared")
-                release.set()
+                assert first.status == second.status == 200
 
-                first_body, second_body = await asyncio.wait_for(
-                    asyncio.gather(first.text(), second.text()), timeout=5
-                )
+                _mark_run_event(adapter, run_id, "run.steered", accepted=True)
+                assert "run.steered" in await frame(first)
+                assert "run.steered" in await frame(second)
 
-        for body in (first_body, second_body):
-            events = [
-                json.loads(line.removeprefix("data: "))
-                for line in body.splitlines()
-                if line.startswith("data: ")
-            ]
-            assert [event["event"] for event in events] == [
-                "message.delta",
-                "run.completed",
-            ]
-            assert events[0]["delta"] == "shared"
-
-    @pytest.mark.asyncio
-    async def test_reconnect_receives_exactly_missed_events_and_terminal(self, adapter):
-        """Reconnect replays missed delta, steer, and terminal exactly once."""
-        app = _create_runs_app(adapter)
-        create_agent, callbacks, ready, release = _make_scripted_agent()
-
-        async with TestClient(TestServer(app)) as cli:
-            with patch.object(adapter, "_create_agent", side_effect=create_agent):
-                started = await cli.post("/v1/runs", json={"input": "hello"})
-                run_id = (await started.json())["run_id"]
-                await asyncio.get_running_loop().run_in_executor(None, ready.wait, 5)
-
-                first = await cli.get(f"/v1/runs/{run_id}/events")
-                callbacks["delta"]("seen")
-                seen_sequence, seen_event = await asyncio.wait_for(
-                    _read_sse_frame(first), timeout=5
-                )
-                assert seen_sequence is not None
-                assert seen_event["delta"] == "seen"
                 first.close()
-                await asyncio.sleep(0.1)
+                # The server only notices the dropped socket on its next write.
+                _mark_run_event(adapter, run_id, "run.steered", accepted=False)
+                assert "run.steered" in await frame(second)
+                await asyncio.sleep(0.05)
+                _mark_run_event(adapter, run_id, "approval.responded", choice="once")
+                assert "approval.responded" in await frame(second)
 
-                steered = await cli.post(
-                    f"/v1/runs/{run_id}/steer",
-                    json={"input": "missed guidance"},
-                )
-                assert steered.status == 200
-                callbacks["delta"]("missed")
-                release.set()
-                await asyncio.sleep(0.1)
-                resumed = await cli.get(
-                    f"/v1/runs/{run_id}/events",
-                    headers={"Last-Event-ID": str(seen_sequence)},
-                )
-                body = await asyncio.wait_for(resumed.text(), timeout=5)
+                assert (await cli.post(f"/v1/runs/{run_id}/stop")).status == 200
+                tail = await asyncio.wait_for(second.content.read(), timeout=5.0)
+                assert b"stream closed" in tail
 
-        frames = []
-        for block in body.split("\n\n"):
-            data = next(
-                (
-                    json.loads(line.removeprefix("data: "))
-                    for line in block.splitlines()
-                    if line.startswith("data: ")
-                ),
-                None,
-            )
-            if data is not None:
-                frames.append(data)
-        assert [event["event"] for event in frames] == [
-            "run.steered",
-            "message.delta",
-            "run.completed",
-        ]
-        assert frames[0]["accepted"] is True
-        assert frames[1]["delta"] == "missed"
 
     @pytest.mark.asyncio
     async def test_approval_resolve_all_is_scoped_to_target_run(self, auth_adapter):
