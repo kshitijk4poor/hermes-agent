@@ -315,6 +315,8 @@ export interface SessionCloseResponse {
 }
 
 export interface SessionInterruptResponse {
+  execution_generation?: number
+  execution_state?: string
   ok?: boolean
 }
 
