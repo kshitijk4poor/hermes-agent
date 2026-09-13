@@ -192,8 +192,17 @@ def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
     return [sid for sid in found if sid not in seeds]
 
 
+def _retire_runtime_rows_before_delete(conn, session_ids: List[str]) -> None:
+    ids = [sid for sid in dict.fromkeys(session_ids) if sid]
+    if not ids:
+        return
+    from hermes_state_mutation_retirement import retire_terminal_receipts
+    retire_terminal_receipts(conn, ids)
+
+
 def _delete_delegate_children(conn, parent_ids: List[str]) -> List[str]:
     ids = _collect_delegate_child_ids(conn, parent_ids)
+    _retire_runtime_rows_before_delete(conn, ids)
     for chunk in _id_chunks(ids):
         ph = _session_ids_placeholders(chunk)
         conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
@@ -1622,6 +1631,7 @@ class SessionSessionsMixin:
                 for covered_id, expected in expected_display_messages.items()
             ):
                 return False
+            _retire_runtime_rows_before_delete(conn, [session_id])
             removed_ids.extend(_delete_delegate_children(conn, [session_id]))
             conn.execute(  # orphan remaining children (branches) so FK is satisfied
                 "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?", (session_id,),
@@ -1640,6 +1650,24 @@ class SessionSessionsMixin:
         """Delete *session_id* only if it has no messages, no title and no children; check and delete
         share one transaction so a concurrent flush can't be lost."""
         def _do(conn):
+            eligible = conn.execute(
+                """
+                SELECT 1 FROM sessions
+                WHERE id = ?
+                  AND title IS NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM messages WHERE messages.session_id = sessions.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sessions child
+                      WHERE child.parent_session_id = sessions.id
+                  )
+                """,
+                (session_id,),
+            ).fetchone()
+            if eligible is None:
+                return False
+            _retire_runtime_rows_before_delete(conn, [session_id])
             cursor = conn.execute(
                 """
                 DELETE FROM sessions
@@ -1681,21 +1709,7 @@ class SessionSessionsMixin:
             ).fetchall()]
             if not existing:
                 return 0
-            if exclude_active_write_guards:
-                # A root is skipped when it or any delegate child it would cascade is guarded, so the
-                # cascade below never deletes a guarded row reported back as kept.
-                # One batched check first; per-root attribution only when something is guarded.
-                active_ids: set = set()
-                if self._guarded_ids(conn, [*existing, *_collect_delegate_child_ids(conn, existing)]):
-                    active_ids = {
-                        sid for sid in existing
-                        if self._guarded_ids(conn, [sid, *_collect_delegate_child_ids(conn, [sid])])
-                    }
-                existing = [sid for sid in existing if sid not in active_ids]
-                if skipped_ids is not None:
-                    skipped_ids.extend(sorted(active_ids))
-                if not existing:
-                    return 0
+            _retire_runtime_rows_before_delete(conn, existing)
             removed_ids.extend(_delete_delegate_children(conn, existing))
             for chunk in _id_chunks(existing):
                 ph = _session_ids_placeholders(chunk)
@@ -1735,6 +1749,7 @@ class SessionSessionsMixin:
             ).fetchall()}
             if not session_ids:
                 return 0
+            _retire_runtime_rows_before_delete(conn, list(session_ids))
             for chunk in _id_chunks(session_ids):
                 ph = _session_ids_placeholders(chunk)
                 conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
