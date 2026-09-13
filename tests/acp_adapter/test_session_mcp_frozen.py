@@ -7,7 +7,7 @@ import pytest
 
 from gateway.session_policy import policy_scope
 from hermes_state_runtime import RuntimeStoreError
-from tests.acp.test_session_mcp_policy import owner, policy, server_spec  # noqa: F401
+from tests.acp_adapter.test_session_mcp_policy import owner, policy, server_spec  # noqa: F401
 
 
 def test_editor_manifest_stays_frozen_across_live_refresh(server_spec, tmp_path):

@@ -1,5 +1,5 @@
 """Compression cleanup keeps physical and logical lease identities separate."""
-from tests.state.test_runtime_worker_compression import worker  # noqa: F401
+from tests.hermes_state.test_runtime_worker_compression import worker  # noqa: F401
 
 
 def test_rotation_cleanup_releases_only_its_original_compression_holder(worker):

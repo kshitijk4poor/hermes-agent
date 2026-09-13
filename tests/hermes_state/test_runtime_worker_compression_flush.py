@@ -1,5 +1,5 @@
 """Compression's pre-publication flush uses the ordinary annotated append helper."""
-from tests.state.test_runtime_worker_compression import worker  # noqa: F401
+from tests.hermes_state.test_runtime_worker_compression import worker  # noqa: F401
 
 
 def test_compression_flush_returns_canonical_annotations_and_keeps_turn_guard(worker):

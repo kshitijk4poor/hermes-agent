@@ -5,7 +5,7 @@ import pytest
 
 from agent.turn_facade_lease import DurableTurnLease
 from hermes_state_runtime import mutate_worker_execution
-from tests.state.test_runtime_worker_compression import worker  # noqa: F401
+from tests.hermes_state.test_runtime_worker_compression import worker  # noqa: F401
 
 
 def test_admitted_parent_lease_releases_after_rotation_without_stealing_successor(worker):

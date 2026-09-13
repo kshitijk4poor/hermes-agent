@@ -8,7 +8,7 @@ import pytest
 
 from acp_adapter.server import HermesACPAgent
 from hermes_cli.gateway_client import GatewayClientError
-from tests.acp.test_gateway_sessions import daemon, editor, viewer, model_peer  # noqa: F401
+from tests.acp_adapter.test_gateway_sessions import daemon, editor, viewer, model_peer  # noqa: F401
 
 
 @pytest.mark.linux_only

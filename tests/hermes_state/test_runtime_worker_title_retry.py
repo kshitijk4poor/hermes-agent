@@ -3,7 +3,7 @@ import pytest
 
 from agent.title_generator import _persist_session_title
 from hermes_state_runtime import RuntimeStoreError, mutate_worker_execution
-from tests.state.test_runtime_worker_lifecycle import setup_store
+from tests.hermes_state.test_runtime_worker_lifecycle import setup_store
 
 
 def test_worker_title_collision_can_dedupe_without_poisoning_persistence(tmp_path):
