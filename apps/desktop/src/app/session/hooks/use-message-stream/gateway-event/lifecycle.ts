@@ -1,7 +1,7 @@
 import type { GatewayEvent } from '@hermes/shared'
 import type { HermesSkin } from '@hermes/shared/skin'
 
-import { clearClarifyRequest } from '@/store/clarify'
+import { eventSourceMatchesOwner, gatewayEventSource } from '@/lib/replay-gap-owner'
 import {
   notifyCronChanged,
   notifyPairingChanged,
@@ -170,34 +170,15 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
       ? deps.sessionStateByRuntimeIdRef.current.get(runtimeId)?.storedSessionId
       : null
 
-    const eventProfile = event.profile?.trim() || 'default'
-    const eventConnectionId = event.connectionId?.trim() || ''
-
-    const eventMatchesOwner = (owner: SessionOwnerScope) => {
-      if (!owner) {
-        return false
-      }
-
-      if (typeof owner === 'string') {
-        // A profile-only owner is the legacy/local pool route. It is safe only
-        // for an untagged primary event; an explicitly tagged source must have
-        // an exact route so same-named remote profiles remain isolated.
-        return !eventConnectionId && eventProfile === (owner.trim() || 'default')
-      }
-
-      return eventConnectionId === owner.connectionId.trim() && eventProfile === (owner.profile.trim() || 'default')
-    }
+    const source = gatewayEventSource(event)
 
     const ownerForStoredSession = (id: string): SessionOwnerScope =>
-      getSessionOwnerHint(id, {
-        connectionId: eventConnectionId,
-        profile: eventProfile
-      }) ?? knownSessionOwner(ownerLookupSessionRows(), id)
+      getSessionOwnerHint(id, source) ?? knownSessionOwner(ownerLookupSessionRows(), id)
 
     if (storedSessionId && runtimeId === deps.activeSessionIdRef.current) {
       const ownerRoute = ownerForStoredSession(storedSessionId)
 
-      if (eventMatchesOwner(ownerRoute)) {
+      if (eventSourceMatchesOwner(source, ownerRoute)) {
         requestSessionResume(storedSessionId, ownerRoute && typeof ownerRoute === 'object' ? ownerRoute : undefined, {
           authoritativeSnapshot: true
         })
@@ -211,7 +192,7 @@ export function handleLifecycleEvent(ctx: GatewayEventContext): boolean {
         return false
       }
 
-      return eventMatchesOwner(candidate.ownerRoute ?? ownerForStoredSession(candidate.storedSessionId))
+      return eventSourceMatchesOwner(source, candidate.ownerRoute ?? ownerForStoredSession(candidate.storedSessionId))
     })
 
     if (tile) {
