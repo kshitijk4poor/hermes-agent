@@ -117,35 +117,41 @@ def test_startup_repair_latches_after_a_refusal_and_warns_once(monkeypatch, capl
     assert meta.get('ghost_session_prune_v1')
 
 
-def test_local_reset_refuses_over_started_admission_then_fences_generation(tmp_path):
+def _local_session(db, epoch):
+    """Commit a local (CLI-owned) logical session; returns ``(session_id, reset_entry_dict)``."""
     from hermes_state_local import commit_local_session
-    from hermes_state_local_lineage import reset_local_target
     from gateway.config import Platform
     from gateway.session import SessionEntry, SessionSource
     from gateway.session_lifecycle import _now
     from gateway.session_local_recovery import local_identity
     from gateway.session_policy import build_policy
+    sid = local_identity('profile', 'human', 'r')
+    source = SessionSource(platform=Platform.LOCAL, chat_id=sid, user_id='human', chat_type='dm')
+    now = _now()
+    entry = SessionEntry('local:' + sid, sid, now, now, origin=source, platform=Platform.LOCAL)
+    policy = build_policy({'source': 'cli', 'cwd': '/', 'model': 'm', 'toolsets': []},
+                          {'platform_toolsets': {'cli': []}}, private_secrets={})
+    commit_local_session(db, epoch=epoch, receipt={
+        'profile_id': 'profile', 'principal_id': 'human', 'request_id': 'r', 'session_id': sid,
+        'route': entry.session_key, 'entry': entry.to_dict(), 'policy': asdict(policy)})
+    reset = SessionEntry(entry.session_key, 'child', now, now, origin=source,
+                         platform=Platform.LOCAL, is_fresh_reset=True)
+    return sid, reset.to_dict()
+
+
+def test_local_reset_refuses_over_started_admission_then_fences_generation(tmp_path):
+    from hermes_state_local_lineage import reset_local_target
     with closing(SessionDB(tmp_path / 'state.db')) as db:
         epoch = rt.begin_runtime_epoch(db, instance_id='owner')
-        sid = local_identity('profile', 'human', 'r')
-        source = SessionSource(platform=Platform.LOCAL, chat_id=sid, user_id='human', chat_type='dm')
-        now = _now()
-        entry = SessionEntry('local:' + sid, sid, now, now, origin=source, platform=Platform.LOCAL)
-        policy = build_policy({'source': 'cli', 'cwd': '/', 'model': 'm', 'toolsets': []},
-                              {'platform_toolsets': {'cli': []}}, private_secrets={})
-        commit_local_session(db, epoch=epoch, receipt={
-            'profile_id': 'profile', 'principal_id': 'human', 'request_id': 'r', 'session_id': sid,
-            'route': entry.session_key, 'entry': entry.to_dict(), 'policy': asdict(policy)})
-        reset = SessionEntry(entry.session_key, 'child', now, now, origin=source,
-                             platform=Platform.LOCAL, is_fresh_reset=True)
+        sid, reset = _local_session(db, epoch)
         started = _started_admission(db, epoch, sid)
         before = db.get_session(sid)
         with pytest.raises(rt.RuntimeStoreError, match='session_busy'):
-            reset_local_target(db, epoch=epoch, parent_session_id=sid, entry=reset.to_dict())
+            reset_local_target(db, epoch=epoch, parent_session_id=sid, entry=reset)
         assert db.get_session('child') is None and db.get_session(sid) == before
         rt.settle_session_input(db, epoch=epoch, admission_id=started['admission_id'],
                                 generation=started['generation'], outcome='completed')
-        reset_local_target(db, epoch=epoch, parent_session_id=sid, entry=reset.to_dict())
+        reset_local_target(db, epoch=epoch, parent_session_id=sid, entry=reset)
         after = db.get_session(sid)
         assert after['end_reason'] == 'session_reset' and db.get_session('child') is not None
         assert after['runtime_generation'] == before['runtime_generation'] + 1
@@ -154,6 +160,36 @@ def test_local_reset_refuses_over_started_admission_then_fences_generation(tmp_p
             rt.register_worker_execution(db, epoch=epoch, execution_id='stale', session_id=sid,
                                          generation=before['runtime_generation'], kind='compute',
                                          adoption_secret='private-fixture')
+
+
+@pytest.mark.parametrize('adopted', [False, True], ids=['registered', 'running'])
+def test_local_reset_refuses_over_live_compute_worker_but_not_a_queued_follower(tmp_path, adopted):
+    """A registered/running worker is executing even though no admission is 'started' (an
+    idle-registered worker has none; an adopted one may finish through execution.finish). Reset
+    over it would bump the generation, strand the worker's persists as stale_generation and
+    leave the queued follower unclaimable. A queued follower alone must still allow reset."""
+    from hermes_state_local_lineage import reset_local_target
+    with closing(SessionDB(tmp_path / 'state.db')) as db:
+        epoch = rt.begin_runtime_epoch(db, instance_id='owner')
+        sid, reset = _local_session(db, epoch)
+        scope = dict(execution_id='worker', session_id=sid, generation=0)
+        rt.register_worker_execution(db, epoch=epoch, **scope, kind='compute',
+                                     adoption_secret='private', require_idle=True)
+        if adopted:
+            rt.adopt_worker_execution(db, epoch=epoch, **scope, adoption_secret='private')
+        follower = rt.admit_session_input(db, epoch=epoch, principal_id='human', session_id=sid,
+                                          request_id='follower', payload={'text': 'next'})
+        before = db.get_session(sid)
+        with pytest.raises(rt.RuntimeStoreError, match='session_busy'):
+            reset_local_target(db, epoch=epoch, parent_session_id=sid, entry=reset)
+        assert db.get_session(sid) == before and db.get_session('child') is None
+        rt.persist_worker_message(db, epoch=epoch, **scope, sequence=1, role='assistant', content='ok')
+        rt.finish_worker_execution(db, epoch=epoch, **scope)
+        # Worker terminal, follower still queued: /reset is exactly what the follower waits on.
+        reset_local_target(db, epoch=epoch, parent_session_id=sid, entry=reset)
+        assert db.get_session(sid)['runtime_generation'] == before['runtime_generation'] + 1
+        claimed = rt.claim_session_input(db, epoch=epoch, session_id=sid)
+        assert claimed is not None and claimed['admission_id'] == follower['admission_id']
 
 
 def test_adopted_worker_finish_settles_linked_admission_and_frees_follower(tmp_path):
