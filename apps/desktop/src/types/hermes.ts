@@ -531,8 +531,20 @@ export interface PaginatedSessions {
   /** Per-profile read failures from the cross-profile aggregator (e.g. a locked
    *  or corrupt state.db). Present only on `/api/profiles/sessions`. */
   errors?: Array<{ profile: string; error: string }>
-  /** `{profile: 'corrupt'}` for each listed profile whose state.db is structurally damaged. */
-  storage?: Record<string, 'corrupt'>
+}
+
+export interface RpcEvent<T = unknown> {
+  payload?: T
+  /** Owner execution stamp on canonical gateways: the integer runtime epoch and
+   * the claimed generation, spread onto the params beside `type`/`payload`. */
+  authority_epoch?: number
+  execution_generation?: number
+  profile?: string
+  /** Registry connection whose socket delivered the event (renderer-side tag;
+   * absent for the local/legacy primary path). */
+  connectionId?: string
+  session_id?: string
+  type: string
 }
 
 export interface SessionCreateResponse {
