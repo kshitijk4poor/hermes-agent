@@ -26,7 +26,11 @@ from hermes_state_runtime import RuntimeStoreError, _epoch
 _BINDING = 'gateway.hosted.transport.v1:'
 _OPERATIONS = frozenset({'resolve_exact', 'create', 'resume', 'submit', 'history',
                          'info', 'interrupt', 'discard', 'approve'})
-_CHUNK_BYTES = 24576
+# One chunk per private-socket exchange. The response is a single JSON line capped at
+# gateway.control_socket._MAX_RESPONSE_BYTES (512 KiB) on both the POSIX socket and the
+# Windows pipe: 360 KiB raw -> 480 KiB base64, leaving 32 KiB for the envelope (owner
+# subject, target home, digest); the attachment attest result carries no prompt/manifest.
+_CHUNK_BYTES = 360 * 1024
 _CAPS = frozenset({'session:create', 'session:read', 'session:submit',
                    'session:control', 'session:approve'})
 

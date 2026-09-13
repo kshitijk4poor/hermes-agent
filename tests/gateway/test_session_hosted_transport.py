@@ -214,3 +214,44 @@ def test_source_chunk_reads_only_the_requested_slice(tmp_path, monkeypatch):
         blob.write_bytes(source.data[:-1] + bytes([source.data[-1] ^ 1]))
         with pytest.raises(RuntimeStoreError, match='permission_denied'):
             transport._attachment_data(source.binding, attested, params)
+
+
+def test_attachment_chunks_fill_the_response_line_without_overflowing_it(tmp_path, monkeypatch):
+    """Chunks nearly fill the single 512 KiB response line shared by the POSIX socket and
+    the Windows pipe, never overflow it even with a long owner subject, and the transfer
+    spends round-trips proportional to size / chunk."""
+    import math
+    from gateway.control_socket import _MAX_RESPONSE_BYTES
+    from gateway import session_hosted_transport as transport
+    from gateway.session_hosted_transport import _CHUNK_BYTES
+    size = 2 * _CHUNK_BYTES + 1
+    source = _SourceTask(tmp_path, monkeypatch, bytes(range(256)) * (size // 256 + 1),
+                         name='blob.bin', mime='application/octet-stream')
+    with source.db:
+        service, params = source.service, source.params
+        monkeypatch.setattr(service, '_owner', lambda room_id: 'o' * 4096)
+        lines = []
+        server = _server(tmp_path)
+        real_handle = server.handle_request_line
+        def handle(raw, *args):
+            response = real_handle(raw, *args)
+            if b'"hosted-attest"' in raw:
+                lines.append(len(response))
+            return response
+        server.handle_request_line = handle
+        loop = asyncio.new_event_loop()
+        thread = threading.Thread(target=loop.run_forever)
+        thread.start()
+        transport.install_hosted_transport(server, source.authority, loop, attest=service.attest)
+        assert asyncio.run_coroutine_threadsafe(server.start(), loop).result()
+        try:
+            attested = service.attest(source.selector, 'submit', params)
+            assert transport._attachment_data(source.binding, attested, params) == [(source.bound[0], source.data)]
+        finally:
+            asyncio.run_coroutine_threadsafe(server.stop(), loop).result()
+            loop.call_soon_threadsafe(loop.stop)
+            thread.join()
+            loop.close()
+        assert len(lines) == math.ceil(len(source.data) / _CHUNK_BYTES) == 3
+        assert max(lines) <= _MAX_RESPONSE_BYTES
+        assert max(lines) > _MAX_RESPONSE_BYTES * 3 // 4, 'chunks leave most of the response line unused'
