@@ -563,26 +563,6 @@ def _restore_epoch_source(src: Path, dst: Path):
 def _restore_db_pages(src: Path, dst: Path) -> bool:
     """Restore snapshot *src* into live *dst* through the backup() API; unlink+move fallback.
 
-    Writing pages into the live file preserves its inode and WAL state, so other holders (gateway,
-    dashboard, another CLI) see the restored data instead of stale pages from a replaced inode.
-    The fallback runs ONLY when no other process or in-process connection holds the file
-    (replacing the inode under a live holder is the #90950 split-brain); otherwise it fails closed
-    (``False``) and the caller reports the file as skipped.
-    """
-    try:
-        with closing(sqlite3.connect(str(dst))) as dst_conn:
-            # Checkpoint first so the backup starts clean rather than writing on top of a deep WAL.
-            with suppress(Exception):
-                dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            with closing(sqlite3.connect(f"file:{src}?mode=ro", uri=True)) as src_conn:
-                src_conn.backup(dst_conn)
-        with suppress(Exception):
-            dst.chmod(src.stat().st_mode)
-        return True
-    except Exception as exc:
-        logger.warning("SQLite safe restore failed for %s -> %s: %s", src, dst, exc)
-        return _unlink_move_restore_db(src, dst)
-
     ZipFile.write finalizes its destination member while unwinding a source-read
     failure, so the partial bytes can otherwise become a CRC-valid archive member.
     This runs immediately after that failed write, so the dropped bytes are the tail
@@ -606,10 +586,53 @@ def _write_zip_file(zf: zipfile.ZipFile, path: Path, arcname: str) -> None:
     """Write one member while keeping a failed partial write out of the central directory."""
     filelist_len = len(zf.filelist)
     try:
-        zf.write(path, arcname=arcname)
-    except Exception:
-        _discard_failed_zip_members(zf, filelist_len)
-        raise
+        with closing(sqlite3.connect(str(dst))) as dst_conn:
+            # Checkpoint first so the backup starts clean rather than writing on top of a deep WAL.
+            with suppress(Exception):
+                dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            with closing(sqlite3.connect(f"file:{src}?mode=ro", uri=True)) as src_conn:
+                src_conn.backup(dst_conn)
+        with suppress(Exception):
+            dst.chmod(src.stat().st_mode)
+        return True
+    except Exception as exc:
+        logger.warning("SQLite safe restore failed for %s -> %s: %s", src, dst, exc)
+        return _unlink_move_restore_db(src, dst)
+
+
+def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
+    """Fallback restore: unlink+move. Only safe when no process holds the DB open.
+
+    Replacing the inode under a live holder is the #90950 corruption class (the holder keeps
+    writing through a deleted-inode fd and loses its WAL index), so fail closed. The foreign-pid
+    scan excludes THIS process, so ``offline_file_access`` also fails CLOSED on any live
+    in-process connection to *dst* and holds the connection-lifecycle lock across the swap.
+    """
+    from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
+    try:
+        holders = _foreign_db_holder_pids(dst)
+        if holders:
+            logger.error("Refusing unlink+move restore of %s: process(es) %s still "
+                         "hold the database or its WAL open. Stop them and retry.", dst, holders)
+            return False
+        with offline_file_access(dst, what="unlink+move restore of"):
+            tmp = dst.parent / f".{dst.name}.snap_restore"
+            shutil.copy2(src, tmp)
+            dst.unlink(missing_ok=True)
+            # The snapshot owns no WAL, so any -wal/-shm here belongs to the DB just unlinked (a
+            # killed gateway leaves them — exactly when a restore runs); SQLite would replay that
+            # foreign WAL over the restored file: "malformed" or resurrected post-snapshot rows.
+            for _sidecar_suffix in ("-wal", "-shm", "-journal"):
+                dst.with_name(dst.name + _sidecar_suffix).unlink(missing_ok=True)
+            shutil.move(str(tmp), str(dst))
+        return True
+    except LiveConnectionError as exc2:
+        logger.error("Refusing unlink+move restore of %s: %s Close the in-process "
+                     "database handles (or restart Hermes) and retry.", dst, exc2)
+        return False
+    except Exception as exc2:
+        logger.error("Fallback restore also failed for %s -> %s: %s", src, dst, exc2)
+        return False
 
 
 def _zip_sqlite_snapshot(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, out_path: Path) -> Optional[int]:
@@ -853,6 +876,19 @@ def _import_member_rel(member: str, prefix: str) -> tuple[str, bool]:
     rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
     return rel, _import_skipped(rel)
 
+def _import_db_member(
+    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
+    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
+    try:
+        with exclusive_maintenance([target.absolute().parent, target.resolve().parent]):
+            _import_db_member_exclusive(zf, member, target, new_file_mode)
+    except OwnershipConflict as exc:
+        raise OSError(str(exc)) from exc
+
+
+def _import_db_member_exclusive(
+    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
+    """Publish a SQLite ``.db`` member onto *target* without replacing its inode.
 
 def run_import(args) -> Optional[int]:
     """Restore a Hermes backup; return 1 on damaged archives or incomplete restores."""
@@ -873,12 +909,30 @@ def run_import(args) -> Optional[int]:
     # restore at the live root while the profile directory stays empty.
     hermes_root = get_hermes_home()
 
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        # Validate
-        ok, reason = _validate_backup_zip(zf)
-        if not ok:
-            print(f"Error: {reason}")
-            sys.exit(1)
+def _import_members(
+    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Reserve all affected profiles before publishing even the first config file."""
+    from gateway.runtime_ownership import exclusive_maintenance
+    homes = {hermes_root}
+    for member in members:
+        rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
+        parts = Path(rel).parts
+        if len(parts) >= 3 and parts[0] == 'profiles':
+            home = hermes_root / parts[0] / parts[1]
+            if _is_within(home, hermes_root.resolve()):
+                homes.add(home)
+        target = hermes_root / rel
+        if target.suffix == '.db' and _is_within(target, hermes_root.resolve()):
+            homes.update([target.absolute().parent, target.resolve().parent])
+    with exclusive_maintenance(homes):
+        return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
+
+
+def _import_members_exclusive(
+    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
 
         prefix = _detect_prefix(zf)
         members = [n for n in zf.namelist() if not n.endswith("/")]
@@ -887,19 +941,8 @@ def run_import(args) -> Optional[int]:
         print(f"Backup contains {file_count} files")
         print(f"Target: {display_hermes_home()}")
 
-def _import_db_member(
-    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
-    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
-    try:
-        with exclusive_maintenance([target.absolute().parent, target.resolve().parent]):
-            _import_db_member_exclusive(zf, member, target, new_file_mode)
-    except OwnershipConflict as exc:
-        raise OSError(str(exc)) from exc
-
-
-def _import_db_member_exclusive(
-    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
-    """Publish a SQLite ``.db`` member onto *target* without replacing its inode.
+        if prefix:
+            print(f"Detected archive prefix: {prefix!r} (will be stripped)")
 
         # Check for existing installation
         has_config = (hermes_root / "config.yaml").exists()
@@ -978,30 +1021,11 @@ def _import_db_member_exclusive(
                     print(f"  {restored}/{file_count} files ...")
                 continue
 
-def _import_members(
-    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
-) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
-    """Reserve all affected profiles before publishing even the first config file."""
-    from gateway.runtime_ownership import exclusive_maintenance
-    homes = {hermes_root}
-    for member in members:
-        rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
-        parts = Path(rel).parts
-        if len(parts) >= 3 and parts[0] == 'profiles':
-            home = hermes_root / parts[0] / parts[1]
-            if _is_within(home, hermes_root.resolve()):
-                homes.add(home)
-        target = hermes_root / rel
-        if target.suffix == '.db' and _is_within(target, hermes_root.resolve()):
-            homes.update([target.absolute().parent, target.resolve().parent])
-    with exclusive_maintenance(homes):
-        return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
-
-
-def _import_members_exclusive(
-    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
-) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
-    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
+            # Strip prefix if detected
+            if prefix and member.startswith(prefix):
+                rel = member[len(prefix):]
+            else:
+                rel = member
 
             if not rel:
                 continue

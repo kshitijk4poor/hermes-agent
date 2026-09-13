@@ -316,8 +316,7 @@ class HostedRoomPolicyCheckpoint:
     def snapshot(self, *, room_id: str, latest_seq: int) -> PolicySnapshot:
         """Return only the oldest active discussion and its watermark set."""
         self.sync(room_id=room_id, latest_seq=latest_seq)
-        with self._connect() as conn:
-            conn.execute("BEGIN")
+        with self._transaction() as conn:
             cursor = conn.execute(
                 "SELECT through_seq, stopped_through_seq FROM hosted_room_policy_cursors WHERE room_id=?", (room_id,)).fetchone()
             if cursor is None:
@@ -357,8 +356,7 @@ class HostedRoomPolicyCheckpoint:
                         input_context: Mapping[str, Any] | None = None,
                         task_id: str | None = None) -> list[dict[str, Any]]:
         """Load one bounded discussion projection for terminal reconstruction."""
-        with self._connect() as conn:
-            conn.execute("BEGIN")
+        with self._transaction() as conn:
             published = self._published_task_events(conn, room_id=room_id, task_id=task_id)
             if input_context is not None:
                 context = validate_task_input(input_context)

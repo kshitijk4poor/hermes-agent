@@ -364,7 +364,7 @@ export const sessionCommands: SlashCommand[] = [
           // Resume hydrates destination authority/history before closing the
           // source; changing only sid would inherit the source owner's epoch.
           ctx.session.resumeById(r.session_id)
-          ctx.transcript.sys(`branched → ${r.title ?? ''}`)
+          ctx.transcript.sys(t('slashCmd.session.branch.branched', r.title ?? ''))
         })
       )
     }
@@ -733,7 +733,7 @@ export const sessionCommands: SlashCommand[] = [
               patchUiState({ busyInputMode: next })
             }
 
-            ctx.transcript.sys(`busy input mode: ${next}`)
+            ctx.transcript.sys(t('slashCmd.session.busy.mode', next))
           })
         )
         .catch(ctx.guardedErr)

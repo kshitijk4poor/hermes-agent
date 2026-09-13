@@ -16,8 +16,6 @@ import type {
   SessionCloseResponse,
   SessionCreateResponse,
   SessionDetachResponse,
-  SessionInflightTurn,
-  SessionResumeResponse,
   SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
@@ -496,8 +494,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         const pendingDetach = canonicalDetachFlights.current.get(id)
         const request = pendingDetach
           ? pendingDetach.then(() => flight === attachmentFlight.current
-            ? gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id }) : null)
-          : gw.request<SessionResumeResponse>('session.resume', { cols: colsRef.current, session_id: id })
+            ? gw.request<SessionResumeResponse<SessionInfo>>('session.resume', { cols: colsRef.current, session_id: id }) : null)
+          : gw.request<SessionResumeResponse<SessionInfo>>('session.resume', { cols: colsRef.current, session_id: id })
 
         return request
           .then(raw => {

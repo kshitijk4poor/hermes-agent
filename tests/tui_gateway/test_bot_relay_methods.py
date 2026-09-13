@@ -318,3 +318,95 @@ def test_relay_sender_attribution_obeys_transport_identity(home, monkeypatch, bo
         assert _result(result)["status"] == "queued"
         assert forwarded[0]["author"] == SENDER_AUTHOR
         assert not any(key in forwarded[0] for key in SENDER)
+
+
+@pytest.mark.parametrize("subdir", ["profiles/ops", "dev"])
+def test_gateway_drains_the_mailbox_the_tools_write_to(tmp_path, monkeypatch, subdir):
+    """Both ends of the relay mailbox derive the install root from HERMES_HOME with ONE formula.
+    The writer side (``message_agent``'s ``_hermes_root``) and the drain side
+    (``methods_bot_relay._relay_root``) must agree for a ``profiles/<name>`` home AND for an
+    arbitrary subdir of the native ``~/.hermes`` — a split here is silent non-delivery."""
+    from tools.bot_mode_probe import _default_home, _hermes_root
+    from tui_gateway import methods_bot_relay
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home = tmp_path / ".hermes" / subdir
+    home.mkdir(parents=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    writer_root = _hermes_root(Path(_default_home()))
+    target = {"profile": "scout", "handle": "scout", "connection_id": "cloud-1",
+              "connection_label": "", "title": "", "description": ""}
+    env = bot_relay.enqueue_envelope(
+        writer_root, target=target, message="m", sender_profile="default", sender_handle="hermes")
+
+    assert methods_bot_relay._relay_root() == writer_root
+    drained = _result(srv._methods["bot_relay.outbox.drain"](1, {}))
+    assert [e["id"] for e in drained["envelopes"]] == [env["id"]]
+
+
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def _child_argv(monkeypatch, body: str) -> dict:
+    """Stand in a Python child for the ``hermes`` transport; it imports ``hermes_cli`` from this checkout."""
+    argv = [sys.executable, "-c", textwrap.dedent(body)]
+    monkeypatch.setattr(bot_relay, "local_delivery_command", lambda prof, tmp: argv)
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(p for p in (_REPO_ROOT, os.environ.get("PYTHONPATH")) if p)}
+
+
+def _spy_popen():
+    procs, real_popen = [], subprocess.Popen
+
+    def spy(*args, **kwargs):
+        procs.append(real_popen(*args, **kwargs))
+        return procs[-1]
+
+    return procs, spy
+
+
+def test_reported_turn_still_lingering_at_the_cap_is_booked_from_its_latest_report_not_killed(tmp_path, monkeypatch):
+    """#114980: the cap bounds the TURN. A child that reported its turn and then lingers for a
+    nested notify_on_complete reply (bounded by oneshot_completion_wait_seconds, default == the
+    cap) is booked at the cap from its report — the answer a follow-up turn last wrote there,
+    exit code 0, never delivery_timeout — and is NOT killed, so its own handoff survives."""
+    env = _child_argv(monkeypatch, """
+        import os, time
+        from hermes_cli.quiet_single_query import TURN_REPORT_FILE_ENV, write_turn_report
+        path = os.environ.pop(TURN_REPORT_FILE_ENV)
+        write_turn_report(path, exit_code=0, reply="asking the teammate")
+        time.sleep(0.5)
+        write_turn_report(path, exit_code=0, reply="teammate says: done")
+        time.sleep(30)
+        """)
+    procs, spy = _spy_popen()
+    tmp = tmp_path / "dm.txt"
+    tmp.write_text("hi", encoding="utf-8")
+    started = time.monotonic()
+    try:
+        with mock.patch.object(subprocess, "Popen", side_effect=spy) as popen:
+            result = methods_bot_relay._run_delivery("ops", str(tmp), env, timeout=2)
+        elapsed = time.monotonic() - started
+        assert (result.returncode, result.stdout, result.stderr) == (0, "teammate says: done", "")
+        assert 2 <= elapsed < 8, elapsed
+        assert procs[0].poll() is None, "the lingering child must survive the booking"
+        assert not (tmp_path / "dm.txt.turn.json").exists(), "the report is the runner's to clean up"
+        # Decoding stays pinned through the runner (#93590 sibling defect): without encoding= the
+        # child's UTF-8 output is decoded with the locale codec — cp1252/GBK on Windows — mangling
+        # non-ASCII replies; errors="replace" keeps a bad byte from raising instead of delivering.
+        assert popen.call_args.kwargs["encoding"] == "utf-8" and popen.call_args.kwargs["errors"] == "replace"
+    finally:
+        for proc in procs:
+            proc.kill()
+            proc.wait(timeout=10)
+
+
+def test_turn_that_never_ends_is_still_a_delivery_timeout(tmp_path, monkeypatch):
+    """Control: with no turn report the cap stays the guard it always was."""
+    env = _child_argv(monkeypatch, "import time; time.sleep(30)")
+    tmp = tmp_path / "dm.txt"
+    tmp.write_text("hi", encoding="utf-8")
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        methods_bot_relay._run_delivery("ops", str(tmp), env, timeout=1)
+    assert time.monotonic() - started < 8

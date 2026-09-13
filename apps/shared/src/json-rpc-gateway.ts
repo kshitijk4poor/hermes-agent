@@ -1,50 +1,16 @@
-export type GatewayEventName =
-  | 'gateway.ready'
-  | 'session.info'
-  | 'session.usage'
-  | 'message.start'
-  | 'message.delta'
-  | 'message.interim'
-  | 'message.complete'
-  | 'thinking.delta'
-  | 'reasoning.delta'
-  | 'reasoning.available'
-  | 'status.update'
-  | 'tool.start'
-  | 'tool.progress'
-  | 'tool.complete'
-  | 'tool.generating'
-  | 'todo.updated'
-  | 'clarify.request'
-  | 'approval.request'
-  | 'sudo.request'
-  | 'secret.request'
-  | 'background.complete'
-  | 'error'
-  | 'skin.changed'
-  /** Synthetic, client-side: a reconnect replay could not cover the gap for
-   * `session_id` (epoch changed / ring truncated); the watermark was dropped
-   * and consumers must re-resume the session for a snapshot. */
-  | 'session.replay_gap'
-  | (string & {})
+import type { GatewayEvent, GatewayEventName } from './gateway-events.js'
+import {
+  DEFAULT_HEARTBEAT_DEADLINE_MS,
+  DEFAULT_HEARTBEAT_INTERVAL_MS,
+  type GatewayRequestId,
+  JsonRpcRequestChannel,
+  type JsonRpcRequestChannelOptions,
+  type JsonRpcTransport,
+  type ServerRequestHandler,
+  wireFrameText
+} from './json-rpc-channel.js'
 
-export interface GatewayEvent<P = unknown> {
-  payload?: P
-  /** Owner execution stamp on canonical gateways: the integer runtime epoch and
-   * the claimed generation, spread onto the params beside `type`/`payload`. */
-  authority_epoch?: number
-  execution_generation?: number
-  /** Renderer-side source tag added by the Desktop gateway registry. */
-  profile?: string
-  /** Registry connection whose socket delivered the event (renderer-side tag;
-   * absent for the local/legacy primary path). */
-  connectionId?: string
-  /** Session-scoped replay generation on canonical gateways. */
-  replay_epoch?: string
-  session_id?: string
-  type: GatewayEventName
-}
-
+export type { GatewayEvent, GatewayEventName } from './gateway-events.js'
 export type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'error'
 
 export type WebSocketLike = WebSocket
@@ -182,7 +148,6 @@ export class JsonRpcGatewayClient {
    */
   private replayEpoch: string | null = null
   private replayEpochBySession = new Map<string, string>()
-  private readonly eventHandlers = new Map<string, Set<(event: GatewayEvent) => void>>()
   private readonly stateHandlers = new Set<(state: ConnectionState) => void>()
   private readonly options: Required<
     Omit<GatewayClientOptions, 'onRequestHandlerError' | 'onUnhandledRequest' | 'socketFactory'>
@@ -690,7 +655,11 @@ export class JsonRpcGatewayClient {
       }
     }
 
-    this.replayEpoch = epoch
+          this.dispatchIfNewer({ ...event, replayed: true })
+        }
+      }
+    }
+  }
 
   /** Returns true when an established session numbering has changed. */
   private adoptSessionReplayEpoch(sid: string, epoch: unknown): boolean {
@@ -702,21 +671,6 @@ export class JsonRpcGatewayClient {
     this.replayEpochBySession.set(sid, epoch)
 
     return changed
-  }
-
-  /** Release frames parked during a replay fetch, seq-gated against dupes. */
-  private flushReplayHold(): void {
-    const hold = this.replayHold
-    this.replayHold = null
-
-    if (!hold) {
-      return
-    }
-
-          this.dispatchIfNewer({ ...event, replayed: true })
-        }
-      }
-    }
   }
 
   /** Release frames parked during a replay fetch, seq-gated against dupes. */

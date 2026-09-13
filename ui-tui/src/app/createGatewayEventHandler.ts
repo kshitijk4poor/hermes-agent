@@ -877,7 +877,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       case 'session.info': {
         const current = getUiState().info
-        const incoming = ev.payload
+        const incoming = ev.payload as SessionInfo | undefined
+
+        if (!incoming) {
+          return
+        }
 
         if (incoming.profile_name && current?.profile_name && incoming.profile_name !== current.profile_name) {
           return
@@ -1405,6 +1409,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       }
 
       case 'clarify.request': {
+        if (!ev.payload) {
+          return
+        }
+
         const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
 
         const sharedControl = shared.prompt_id && ev.session_id && typeof shared.execution_generation === 'number'
@@ -1440,7 +1448,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       }
 
-      case 'approval.request': {
+        if (!id) {
+          return
+        }
+
         const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
 
         const sharedControl = shared.prompt_id && ev.session_id && typeof shared.execution_generation === 'number'
@@ -1467,30 +1478,8 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       }
 
       case 'sudo.request':
-        patchOverlayState({ sudo: { requestId: ev.payload.request_id } })
-        setStatus('sudo password needed')
-        ringPromptBell()
-
-        return
-
-      case 'secret.request':
-        patchOverlayState({
-          secret: { envVar: ev.payload.env_var, prompt: ev.payload.prompt, requestId: ev.payload.request_id }
-        })
-        setStatus('secret input needed')
-        ringPromptBell()
-
-        if (!id) {
+        if (!ev.payload) {
           return
-        }
-
-        // A password/secret/vault card that timed out vanished silently; say
-        // what happened and how to get it back. Clarify already records its
-        // own "(timed out)" line via tool.complete.
-        const timeoutNotice = promptTimeoutNotice(ev.payload?.method, ev.payload?.reason)
-
-        if (timeoutNotice) {
-          sys(timeoutNotice)
         }
 
         forgetServerRequest(id)

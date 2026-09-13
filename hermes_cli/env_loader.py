@@ -471,7 +471,10 @@ def load_hermes_dotenv(
     # profile behavior, external secret plugins, or managed env in this worker.
     if worker_config_snapshot() is not None:
         return []
-    home_path = Path(hermes_home or os.getenv("HERMES_HOME", Path.home() / ".hermes"))
+    # Process home on purpose (never the per-turn override): a startup .env load must not follow a routed
+    # profile — see the multiplex guard below.
+    from hermes_constants import get_process_hermes_home
+    home_path = Path(hermes_home) if hermes_home else get_process_hermes_home()
 
     # Multiplex gateway: while a routed profile-home override is active, copying that profile's .env
     # into os.environ would expose its credentials to sibling turns and every spawned child. The launch

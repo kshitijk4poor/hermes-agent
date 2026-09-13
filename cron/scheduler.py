@@ -3117,11 +3117,20 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
         from cron.jobs import update_job
         update_job(job["id"], {"last_delivery_queued": None})
         job["last_delivery_queued"] = None
-    mark_kwargs = {"delivery_error": d.delivery_error}
+    mark_kwargs: dict = {"delivery_error": d.delivery_error}
     from cron.scheduler_authority import journal_path
     journal = journal_path(job['id'], execution_id)
     if not job.get('no_agent'):
         mark_kwargs['execution_id'] = execution_id
+    if not d.success and job.pop("_model_unreachable", False):
+        # Never-reached-the-model failure: schedule the Cowork-style bounded re-run
+        # (cron/unreachable_retry.py) inside the same fenced store write.
+        mark_kwargs["model_unreachable"] = True
+    _hold_s = job.pop("_quota_hold_seconds", None)
+    if not d.success and _hold_s:
+        # Provider window closed for a known duration: park past it (cron/quota_hold.py, #89376).
+        mark_kwargs["quota_hold_seconds"] = _hold_s
+        mark_kwargs["recover_consumed_fire"] = bool(job.get("_scheduled_instant"))
     if d.success and not d.delivery_error and d.should_deliver and job.get("last_delivery_queued"):
         mark_kwargs["status"] = "delivery_queued"
     if fire_owner is not None:

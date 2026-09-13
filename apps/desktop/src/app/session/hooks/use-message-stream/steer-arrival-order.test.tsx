@@ -27,7 +27,7 @@ import type { ClientSessionState } from '@/app/types'
 import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { setSessionTileDelegate } from '@/store/session-states'
-import type { RpcEvent } from '@/types/hermes'
+
 
 import { STREAM_DELTA_FLUSH_MS } from './utils'
 

@@ -186,21 +186,6 @@ export interface SessionCreateResponse {
   subscription_id?: string
 }
 
-export interface SessionResumeResponse {
-  stored_session_id?: string
-  session_key?: string
-  inflight?: null | SessionInflightTurn
-  info?: SessionInfo
-  message_count?: number
-  messages: GatewayTranscriptMessage[]
-  resumed?: string
-  running?: boolean
-  session_id: string
-  started_at?: number
-  status?: LiveSessionStatus
-  subscription_id?: string
-}
-
 export type LiveSessionStatus = 'idle' | 'starting' | 'waiting' | 'working'
 
 export interface SessionActiveItem {

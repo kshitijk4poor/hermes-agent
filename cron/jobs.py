@@ -2466,6 +2466,9 @@ def mark_job_run(
     *,
     expected_fire_owner: Optional[str] = None,
     execution_id: Optional[str] = None,
+    model_unreachable: bool = False,
+    quota_hold_seconds: Optional[float] = None,
+    recover_consumed_fire: bool = False,
 ) -> bool:
     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
     and retire the record as a terminal completion when the repeat limit is reached.

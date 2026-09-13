@@ -1686,7 +1686,7 @@ def _terminal_may_leak_cpr() -> bool:
 
     Delayed CPR replies (``ESC[<row>;<col>R`` / visible ``^[[<row>;<col>R``) leak into the status line and
     can freeze input when the reply is slow (#13870 on SSH/slow PTYs). The same race hits local POSIX TTYs
-    under heavy subagent / status-line load — see ``tests/cli/test_cpr_local_leak.py``.
+    under heavy subagent / status-line load — see ``tests/hermes_cli/test_cpr_local_leak.py``.
     """
     return os.environ.get("PROMPT_TOOLKIT_NO_CPR", "") == "1" or sys.platform != "win32"
 
@@ -1717,9 +1717,16 @@ def _build_cpr_disabled_output(stdout):
         return None
 
 
-def _select_classic_cli_pt_output(stdout):
-    """CPR-disabled ``Vt100_Output`` when CPR may leak, else None (Application keeps pt's default)."""
-    return _build_cpr_disabled_output(stdout) if _terminal_may_leak_cpr() else None
+    if _worktree_has_unpushed_commits(wt_path, timeout=10):
+        if _repo_is_shallow(repo_root):
+            # Shallow boundary makes the unpushed verdict unreliable; the startup pruner reaps later.
+            _cprint(f"\n\033[33m{_t('cli.worktree.shallow_clone_keeping', path=wt_path)}\033[0m")
+            print(f"  {_t('cli.worktree.next_session_deepens')}")
+        else:
+            _cprint(f"\n\033[33m{_t('cli.worktree.unpushed_keeping', path=wt_path)}\033[0m")
+            print(f"  {_t('cli.worktree.clean_up_manually', path=wt_path)}")
+        _active_worktree = None
+        return
 
     # Release the tree's language servers while the path still exists, then unlock so `remove`
     # isn't blocked by the lock placed at creation. Fail-soft.

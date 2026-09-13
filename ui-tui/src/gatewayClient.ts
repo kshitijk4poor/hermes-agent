@@ -16,7 +16,8 @@ import { reconnectBackoffDelayMs } from '@hermes/shared/reconnect-backoff'
 import { WebSocket as UndiciWebSocket } from 'undici'
 
 import { canonicalEvent, canonicalRequest, canonicalResult, type CreationContract } from './canonicalGateway.js'
-import type { GatewayEvent } from './gatewayTypes.js'
+import type { AnyGatewayEvent } from './gatewayTypes.js'
+import { t } from './i18n/runtime.js'
 import { CircularBuffer } from './lib/circularBuffer.js'
 import { recordParentLifecycle } from './lib/parentLog.js'
 
@@ -428,11 +429,11 @@ export class GatewayClient extends EventEmitter {
 
     for (const prompt of result.prompts ?? []) {
       this.publishLocalEvent({ type: `${prompt.kind}.request`, session_id: result.session_id,
-        payload: { ...prompt, execution_epoch: String(result.authority_epoch) } } as unknown as GatewayEvent)
+        payload: { ...prompt, execution_epoch: String(result.authority_epoch) } } as unknown as AnyGatewayEvent)
     }
   }
 
-  publishLocalEvent(ev: GatewayEvent) {
+  publishLocalEvent(ev: AnyGatewayEvent) {
     const frame = JSON.stringify({ jsonrpc: '2.0', method: 'event', params: ev })
 
     this.mirrorEventToSidecar(frame)
@@ -457,6 +458,13 @@ export class GatewayClient extends EventEmitter {
     if (frame.method === 'event') {
       this.mirrorEventToSidecar(text)
     }
+  }
+
+  private protocolError(what: string, text: string, emptyLabel: string) {
+    const preview = text.trim().slice(0, MAX_LOG_PREVIEW) || emptyLabel
+
+    this.pushLog(`[protocol] ${what}: ${preview}`)
+    this.publish({ type: 'gateway.protocol_error', payload: { preview } })
   }
 
   private startLocalGateway() {

@@ -1,3 +1,8 @@
+---
+title: Gateway local sessions
+description: Local CLI/TUI sessions as canonical gateway admissions
+---
+
 # Gateway-owned fresh local sessions
 
 The composed gateway listener can create fresh local **CLI, TUI, or GUI-policy** sessions without

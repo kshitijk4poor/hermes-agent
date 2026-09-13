@@ -407,7 +407,7 @@ def write_reply(root: Path | str, envelope_id: str, *, reply: str = "", error: s
             if any(existing.get(key) != value for key, value in outcome.items()):
                 raise ValueError("delivery already has a different reply")
             return path
-        _write(path, {"id": safe, "at": int(time.time()), **outcome})
+        _atomic_write_json(path, {"id": safe, "at": int(time.time()), **outcome})
     return path
 
 

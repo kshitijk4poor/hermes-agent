@@ -1,3 +1,8 @@
+---
+title: Classic gateway client
+description: How hermes chat / --cli attach to the gateway authority
+---
+
 # Classic gateway client (initial migration)
 
 Normal `hermes --cli`, `hermes chat`, `hermes chat -q '…' -Q`, and top-level

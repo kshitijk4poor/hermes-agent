@@ -10,10 +10,6 @@ import { $settingsRequestProfile } from '@/store/settings-scope'
 
 import type { ConfigSettings as ConfigSettingsType } from './config-settings'
 
-// The vi.mock factory below replaces the computed (read-only) atom with a
-// writable one; narrow the import back so tests can drive it.
-const scopeProfileMock = $settingsRequestProfile as unknown as { set: (value: string) => void }
-
 import { ConfigSettings } from './config-settings'
 
 const getHermesConfigRecord = vi.fn()
@@ -82,7 +78,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-function renderConfigSettings() {
+function renderConfigSettings(activeSectionId = 'safety') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const importInputRef = createRef<HTMLInputElement>()
 

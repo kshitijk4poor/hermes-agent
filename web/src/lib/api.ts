@@ -1,7 +1,13 @@
-import { buildHermesWebSocketUrl } from "@hermes/shared";
+import {
+  buildHermesWebSocketUrl,
+  type ModelOptionProvider,
+  type ModelOptionsResult,
+} from "@hermes/shared";
 import { createDashboardSessionMutations } from "./session-mutations";
 
 const mutateSessionHttp = createDashboardSessionMutations(fetchJSON);
+
+import { dashboardServingProfile } from "./profile-bootstrap";
 
 // The dashboard can be served either at the root of its host (e.g.
 // https://kanban.tilos.com/) or under a URL prefix when reverse-proxied

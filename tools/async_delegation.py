@@ -103,6 +103,13 @@ def _connect() -> sqlite3.Connection:
     from agent.runtime_session_store import WorkerPersistenceError, is_worker_process
     if is_worker_process():
         raise WorkerPersistenceError('worker_delegation_ledger_unavailable')
+    from hermes_cli.sqlite_util import open_db
+    # Same state.db as hermes_state.SessionDB -- reuse its owner-only (0600)
+    # hardening so this writer doesn't create/leave the file (and its WAL
+    # sidecars) at the process umask. See hermes_state._secure_state_db_files.
+    from hermes_constants import mkdir_under_hermes_home
+    from hermes_state import _secure_state_db_files
+
     path = _db_path()
     # A late replay or writer must not resurrect a removed named profile (#123265).
     mkdir_under_hermes_home(path.parent)
