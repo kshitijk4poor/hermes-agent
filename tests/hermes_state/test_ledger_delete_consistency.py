@@ -259,3 +259,23 @@ def test_adopted_worker_finish_settles_linked_admission_and_frees_follower(tmp_p
         assert settled['status'] == 'terminal' and settled['outcome'] == 'completed'
         claimed = rt.claim_session_input(db, epoch=epoch, session_id='s')
         assert claimed is not None and claimed['admission_id'] == follower['admission_id']
+
+
+def test_discarding_an_unadmitted_row_leaves_no_fence_but_an_admitted_row_is_fenced(tmp_path):
+    """Seed-copy compensation removes a row nobody was admitted against WITHOUT the retirement
+    marker (the lazy first-prompt path must be able to recreate the id); once any receipt
+    exists the same call takes the fenced delete so the id cannot be resurrected."""
+    from hermes_state_mutation_retirement import RETIRED_PREFIX
+    with closing(SessionDB(db_path=tmp_path / 'state.db')) as db:
+        db.create_session('fresh', source='desktop')
+        assert db.discard_unadmitted_session('fresh') is True
+        assert db.get_session('fresh') is None
+        assert db.get_meta(RETIRED_PREFIX + 'fresh') is None
+        db.create_session('fresh', source='desktop')  # lazy recreation still allowed
+        assert db.get_session('fresh') is not None
+
+        db.create_session('used', source='desktop')
+        epoch = rt.begin_runtime_epoch(db, instance_id='owner')
+        _settled_admission(db, epoch, 'used')
+        assert db.discard_unadmitted_session('used') is True
+        assert db.get_meta(RETIRED_PREFIX + 'used') is not None

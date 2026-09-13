@@ -1640,6 +1640,24 @@ class SessionSessionsMixin:
             self._remove_session_files(sessions_dir, sid)
         return bool(deleted)
 
+    def discard_unadmitted_session(self, session_id: str) -> bool:
+        """Abort a row this same flow just created and nobody has been admitted against (seed-copy
+        compensation): remove it WITHOUT the retirement fence so the id can be lazily recreated.
+        A row with any admission or worker receipt is a real session and takes the fenced
+        :meth:`delete_session` path instead."""
+        def _do(conn):
+            if conn.execute(
+                "SELECT 1 FROM session_admissions WHERE target_session_id=? UNION ALL "
+                "SELECT 1 FROM worker_executions WHERE session_id=? LIMIT 1", (session_id, session_id)).fetchone():
+                return None
+            conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
+            cur = conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            return cur.rowcount > 0
+        result = self._execute_write(_do)
+        if result is None:
+            return self.delete_session(session_id)
+        return bool(result)
+
     def delete_session_if_empty(self, session_id: str, sessions_dir: Optional[Path] = None) -> bool:
         """Delete *session_id* only if it has no messages, no title and no children; check and delete
         share one transaction so a concurrent flush can't be lost."""
