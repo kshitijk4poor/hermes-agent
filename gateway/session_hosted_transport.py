@@ -98,20 +98,25 @@ def _attest(binding, operation, params):
 
 
 def source_attachment_chunk(service, member, room_id, manifest, params):
-    """Read scoped source bytes only on the source owner's authenticated handler."""
+    """Read scoped source bytes only on the source owner's authenticated handler.
+
+    Serves one slice per call; the row's stored SHA-256 (verified at upload) rides along
+    so the target can verify the reassembled file without the source re-hashing 15 MB
+    per 24 KiB chunk.
+    """
     index, offset = params.get('index'), params.get('offset')
     if (type(index) is not int or not 0 <= index < len(manifest)
             or type(offset) is not int or not 0 <= offset < manifest[index]['size']):
         raise RuntimeStoreError('permission_denied')
     from gateway.hosted_room_attachments import HostedRoomAttachmentStore
     item = manifest[index]
-    saved = HostedRoomAttachmentStore(service.db_path).read(room_id=room_id,
-        attachment_id=item['attachment_id'], event_id=item['event_id'], recipient_member_id=member)
+    saved = HostedRoomAttachmentStore(service.db_path).read_range(room_id=room_id,
+        attachment_id=item['attachment_id'], event_id=item['event_id'], recipient_member_id=member,
+        offset=offset, length=_CHUNK_BYTES)
     if any(saved.attachment[key] != item[key] for key in ('kind', 'name', 'mime', 'size')):
         raise RuntimeStoreError('permission_denied')
-    data = saved.data
-    return {'data_base64': base64.b64encode(data[offset:offset + _CHUNK_BYTES]).decode('ascii'),
-            'sha256': hashlib.sha256(data).hexdigest()}
+    return {'data_base64': base64.b64encode(saved.data).decode('ascii'),
+            'sha256': saved.attachment['sha256']}
 
 
 def _attachment_data(binding, attested, params):

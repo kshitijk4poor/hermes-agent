@@ -87,51 +87,65 @@ def test_authenticated_owner_transport_rechecks_source_and_cold_binding(owner, t
             asyncio.run_coroutine_threadsafe(server.stop(), loop).result()
 
 
-def test_source_attestation_binds_bytes_to_task_member_and_current_home(tmp_path, monkeypatch):
-    import base64
-    import time
-    from types import SimpleNamespace
-    from gateway.session_hosted_service import CanonicalHostedRoomService
-    from gateway import hosted_room_driver as tasks
-    from gateway.hosted_rooms import create_room, local_authority_gateway_id
-    from gateway.hosted_room_attachments import HostedRoomAttachmentStore
-    from hermes_state import SessionDB
-    from hermes_state_runtime import begin_runtime_epoch, RuntimeStoreError
-    from tui_gateway.hosted_room_driver import HostedRoomBinding
-    import gateway.run
-    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
-    homes = {'other': str(tmp_path / 'profiles' / 'other')}
-    monkeypatch.setattr(gateway.run, '_load_gateway_config', lambda: {'hosted_rooms': {'profiles': homes}})
-    with SessionDB(tmp_path / 'state.db') as db:
-        authority = SimpleNamespace(db=db, profile_id=str(tmp_path), epoch=begin_runtime_epoch(db, instance_id='test'))
-        service = CanonicalHostedRoomService(authority, None)
-        service.authorize_room('alice', 'room', create=True)
-        gateway = local_authority_gateway_id()
-        create_room(db.db_path, room_id='room', name='Room', authority_gateway_id=gateway, members=[
+class _SourceTask:
+    """One committed attachment bound to a running task on a real source owner."""
+
+    def __init__(self, tmp_path, monkeypatch, data, *, name='note.txt', mime='text/plain', kind='file'):
+        import time
+        from types import SimpleNamespace
+        from gateway.session_hosted_service import CanonicalHostedRoomService
+        from gateway import hosted_room_driver as tasks
+        from gateway.hosted_rooms import create_room, local_authority_gateway_id
+        from gateway.hosted_room_attachments import HostedRoomAttachmentStore
+        from hermes_state import SessionDB
+        from hermes_state_runtime import begin_runtime_epoch
+        import gateway.run
+        monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+        self.homes = {'other': str(tmp_path / 'profiles' / 'other')}
+        monkeypatch.setattr(gateway.run, '_load_gateway_config', lambda: {'hosted_rooms': {'profiles': self.homes}})
+        self.db = db = SessionDB(tmp_path / 'state.db')
+        self.authority = SimpleNamespace(db=db, profile_id=str(tmp_path), epoch=begin_runtime_epoch(db, instance_id='test'))
+        self.service = CanonicalHostedRoomService(self.authority, None)
+        self.service.authorize_room('alice', 'room', create=True)
+        self.gateway = local_authority_gateway_id()
+        create_room(db.db_path, room_id='room', name='Room', authority_gateway_id=self.gateway, members=[
             {'member_id': 'one', 'profile': 'default', 'handle': 'one'},
             {'member_id': 'two', 'profile': 'other', 'handle': 'two'}])
-        data = b'owned source bytes' * 4000
-        store = HostedRoomAttachmentStore(db.db_path)
-        saved = store.put(room_id='room', upload_id='upload', kind='file', name='note.txt', mime='text/plain', data=data)
+        self.data = data
+        self.store = store = HostedRoomAttachmentStore(db.db_path)
+        saved = store.put(room_id='room', upload_id='upload', kind=kind, name=name, mime=mime, data=data)
         manifest = [{k: saved[k] for k in ('attachment_id', 'kind', 'name', 'size', 'mime')}]
         store.commit_message(room_id='room', event_id='event', manifest=manifest, recipient_member_ids=['two'])
-        bound = [{**manifest[0], 'event_id': 'event'}]
-        identity = tasks.TaskIdentity('room', 'task', 'thread', 'turn')
+        self.bound = [{**manifest[0], 'event_id': 'event'}]
+        self.identity = tasks.TaskIdentity('room', 'task', 'thread', 'turn')
         payload = {'target_profile': 'other', 'target_member_id': 'two', 'source_event_seq': 1,
-                   'prompt': 'frozen', 'attachments': bound}
-        tasks.admit_task(db.db_path, identity, payload=payload, clock=time.time)
-        lease = tasks.acquire_lease(db.db_path, room_id='room', gateway_id=gateway, authority_epoch=1,
-                                   process_generation='test', ttl_seconds=30, clock=time.time)
-        tasks.start_task(db.db_path, identity, lease, expected_cancel_generation=0, clock=time.time)
-        task, = tasks.list_tasks(db.db_path, room_id='room')
-        selector = dict(room_id='room', member_id='two', profile='other')
-        params = dict(task=asdict(identity), execution_generation=task['execution_generation'],
-                      prompt='frozen', attachments=bound, _target_home=homes['other'])
+                   'prompt': 'frozen', 'attachments': self.bound}
+        tasks.admit_task(db.db_path, self.identity, payload=payload, clock=time.time)
+        lease = tasks.acquire_lease(db.db_path, room_id='room', gateway_id=self.gateway, authority_epoch=1,
+                                    process_generation='test', ttl_seconds=30, clock=time.time)
+        tasks.start_task(db.db_path, self.identity, lease, expected_cancel_generation=0, clock=time.time)
+        self.task, = tasks.list_tasks(db.db_path, room_id='room')
+        self.selector = dict(room_id='room', member_id='two', profile='other')
+        self.params = dict(task=asdict(self.identity), execution_generation=self.task['execution_generation'],
+                           prompt='frozen', attachments=self.bound, _target_home=self.homes['other'])
+        self.binding = {'source_home': str(tmp_path), 'target_home': self.homes['other'], 'selector': self.selector}
+
+
+def test_source_attestation_binds_bytes_to_task_member_and_current_home(tmp_path, monkeypatch):
+    import base64
+    from hermes_state_runtime import RuntimeStoreError
+    from tui_gateway.hosted_room_driver import HostedRoomBinding
+    from gateway.session_hosted_transport import _CHUNK_BYTES
+    source = _SourceTask(tmp_path, monkeypatch, b'owned source bytes' * 4000)
+    with source.db:
+        service, data, bound, task, gateway, homes, authority = (
+            source.service, source.data, source.bound, source.task, source.gateway, source.homes, source.authority)
+        selector, params = source.selector, source.params
         with pytest.raises(RuntimeStoreError, match='permission_denied'):
             service.attest(selector, 'submit', {**params, 'attachments': []})
         assert service.attest(selector, 'submit', params)['attachments'] == bound
         chunks = []
-        for offset in range(0, len(data), 24576):
+        for offset in range(0, len(data), _CHUNK_BYTES):
             result = service.attest(selector, 'attachment', {**params, 'index': 0, 'offset': offset})
             chunks.append(base64.b64decode(result['data_base64']))
         assert b''.join(chunks) == data
@@ -145,7 +159,7 @@ def test_source_attestation_binds_bytes_to_task_member_and_current_home(tmp_path
         install_hosted_transport(server, authority, loop, attest=service.attest)
         assert asyncio.run_coroutine_threadsafe(server.start(), loop).result()
         try:
-            transport_binding = {'source_home': str(tmp_path), 'target_home': homes['other'], 'selector': selector}
+            transport_binding = source.binding
             attested = service.attest(selector, 'submit', params)
             assert _attachment_data(transport_binding, attested, params) == [(bound[0], data)]
         finally:
@@ -166,3 +180,37 @@ def test_source_attestation_binds_bytes_to_task_member_and_current_home(tmp_path
         homes.clear()
         with pytest.raises(RuntimeStoreError, match='permission_denied'):
             service._resolve_member_transport(binding, task)
+
+
+def test_source_chunk_reads_only_the_requested_slice(tmp_path, monkeypatch):
+    """Source cost per chunk is bounded by the chunk, not by the whole blob; the
+    target still refuses a blob whose bytes drifted from the attested digest."""
+    import base64
+    import hashlib
+    from gateway.hosted_room_attachments import HostedRoomAttachmentStore
+    from gateway import session_hosted_transport as transport
+    from hermes_state_runtime import RuntimeStoreError
+    source = _SourceTask(tmp_path, monkeypatch, bytes(range(256)) * (4 * transport._CHUNK_BYTES // 256 + 1),
+                         name='blob.bin', mime='application/octet-stream')
+    with source.db:
+        service, params = source.service, source.params
+        monkeypatch.setattr(HostedRoomAttachmentStore, '_read_blob',
+                            lambda *a, **k: pytest.fail('chunk request read the whole blob'))
+        hashed = []
+        real_sha256 = hashlib.sha256
+        monkeypatch.setattr(hashlib, 'sha256', lambda data=b'': (hashed.append(len(data)), real_sha256(data))[1])
+        result = service.attest(source.selector, 'attachment',
+                                {**params, 'index': 0, 'offset': transport._CHUNK_BYTES})
+        chunk = base64.b64decode(result['data_base64'])
+        assert chunk == source.data[transport._CHUNK_BYTES:2 * transport._CHUNK_BYTES]
+        assert result['sha256'] == real_sha256(source.data).hexdigest()
+        assert sum(hashed) < len(chunk), 'source re-hashed more than the served slice'
+        # End-to-end: the target verifies the assembled bytes against the attested digest.
+        monkeypatch.setattr(transport, 'owner_request', lambda home, verb, p, **kw: service.attest(
+            p['selector'], p['operation'], p['params']))
+        attested = service.attest(source.selector, 'submit', params)
+        assert transport._attachment_data(source.binding, attested, params) == [(source.bound[0], source.data)]
+        blob, = source.store.blob_root.iterdir()
+        blob.write_bytes(source.data[:-1] + bytes([source.data[-1] ^ 1]))
+        with pytest.raises(RuntimeStoreError, match='permission_denied'):
+            transport._attachment_data(source.binding, attested, params)
