@@ -21,13 +21,14 @@ import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { MAIN_COMPOSER_SCOPE } from '@/app/chat/composer/scope'
+import { useRuntimeMessageRepository } from '@/app/chat/runtime-repository'
 import { useSessionTileActions } from '@/app/chat/session-tile-actions'
 import { usePromptActions } from '@/app/session/hooks/use-prompt-actions'
 import type { ClientSessionState } from '@/app/types'
 import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
+import { IncrementalExternalStoreRuntimeCore } from '@/lib/incremental-external-store-runtime'
 import { setSessionTileDelegate } from '@/store/session-states'
-
 
 import { STREAM_DELTA_FLUSH_MS } from './utils'
 

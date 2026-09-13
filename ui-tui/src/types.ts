@@ -1,5 +1,6 @@
+import type { ProjectInfo, SessionLiveInfo, SubagentStatus, ToolLabel } from '@hermes/shared/gateway-events'
+
 import type { SharedControl } from './canonicalGateway.js'
-import type { SubagentStatus, Usage } from '@hermes/shared/gateway-events'
 
 export interface ActiveTool {
   context?: string
