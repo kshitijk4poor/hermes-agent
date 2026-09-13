@@ -207,7 +207,9 @@ class FanoutTransport:
     def _drain(self, peer: _FanoutPeer) -> None:
         while True:
             with self._lock:
-                if not peer.attached or not peer.pending:
+                # A detached peer's mailbox is empty except for the one overflow
+                # notice ``write`` leaves behind; deliver it, then let go.
+                if not peer.pending:
                     peer.writing = False
                     if not peer.attached:
                         self._remove(peer)
@@ -238,20 +240,13 @@ class FanoutTransport:
                     self._remove(peer)
                 return
 
-    def _signal_overflow_detach(self, transport: Transport) -> None:
-        # Outside the fanout lock: abort()/close() may re-enter contains/detach, and
-        # a WS close must not stall the emit turn or other subscribers. WSTransport
-        # aborts (1011 socket close, off-loop safe); other transports just close.
-        try:
-            abort = getattr(transport, "abort", None)
-            (abort or transport.close)()
-        except Exception:
-            logger.debug("fanout overflow close failed; membership already dropped", exc_info=True)
-
-    def write(self, obj: dict) -> bool:
-        # Freeze the queued frame so a caller cannot mutate it after admission. Same serialization
-        # guard as the single-peer transports: an unserializable frame reaches every peer as -32603.
-        encoded = serialize_frame(obj, "fanout", logger)
+    def write(self, obj: dict, *, overflow: Callable[[Transport], Optional[dict]] | None = None) -> bool:
+        """Fan *obj* out. A peer whose bounded backlog is full loses its subscription; *overflow*
+        (called with its transport, under the membership lock) may return one final frame that
+        replaces the dropped backlog, so a socket that is still healthy learns it must resume
+        rather than silently continuing with partial history."""
+        # Freeze the queued frame so a caller cannot mutate it after admission.
+        encoded = json.dumps(obj, ensure_ascii=False)
         size = len(encoded.encode("utf-8", errors="surrogatepass"))
         frame = json.loads(encoded)
         overflowed: list[Transport] = []
@@ -264,6 +259,15 @@ class FanoutTransport:
                     logger.warning("fanout subscriber backlog full; detaching peer")
                     overflowed.append(peer.transport)
                     self._remove(peer)
+                    notice = overflow(peer.transport) if overflow is not None else None
+                    if notice is not None:
+                        peer.pending.append((notice, 0))
+                        if peer not in self._peers:
+                            self._peers.append(peer)
+                        if not peer.writing:
+                            peer.writing = True
+                            threading.Thread(target=self._drain, args=(peer,),
+                                             name="tui-fanout", daemon=True).start()
                     continue
                 peer.pending.append((frame, size))
                 peer.pending_bytes += size
