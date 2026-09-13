@@ -757,8 +757,11 @@ class OpenAICompatRoutesMixin:
             session_history_delivery=("1" if provided_session_id else ""))
         if getattr(self.gateway_runner, 'session_authority', None) is not None:
             key = request.headers.get('Idempotency-Key')
-            run_kwargs.update(request_id=('chat:' + key) if key else None,
-                              history_from_session=bool(provided_session_id))
+            # The durable admission identity carries the authenticated namespace: a rotated
+            # API key (or another profile) reusing a client key is a new principal, not a retry.
+            run_kwargs.update(
+                request_id=f'chat:{self._run_idempotency_scope(request)}:{key}' if key else None,
+                history_from_session=bool(provided_session_id))
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
             # tool_call_ids with an emitted "running": a "completed" without one (internal/
@@ -1084,12 +1087,15 @@ class OpenAICompatRoutesMixin:
         if conversation and previous_response_id:
             return _error_response("Cannot use both 'conversation' and 'previous_response_id'", 400)
         durable_key = None
-        if getattr(self.gateway_runner, 'session_authority', None) is not None and request.headers.get('Idempotency-Key'):
+        idempotency_key = request.headers.get('Idempotency-Key')
+        canonical = getattr(self.gateway_runner, 'session_authority', None) is not None
+        if canonical and idempotency_key:
             # An exact retry replays the committed response BEFORE the conversation name is
             # expanded: the first success already advanced the conversation, so re-expanding
             # would build a different admission payload and refuse the retry as a conflict.
             from gateway.platforms.api_server import _make_request_fingerprint
-            durable_key = ('idem:' + self._run_idempotency_scope(request) + ':' + request.headers['Idempotency-Key'],
+            idempotency_scope = self._run_idempotency_scope(request)
+            durable_key = (f'idem:{idempotency_scope}:{idempotency_key}',
                            _make_request_fingerprint(body, keys=_RESPONSES_FINGERPRINT_KEYS))
             replay = self._response_store.get(durable_key[0])
             if replay is not None:
@@ -1173,15 +1179,16 @@ class OpenAICompatRoutesMixin:
             ephemeral_system_prompt=instructions, session_id=session_id,
             gateway_session_key=gateway_session_key, bind_declared_conversation=_declared_selected,
             **agent_overrides, route=route, relay_metadata=relay_metadata)
-        if getattr(self.gateway_runner, 'session_authority', None) is not None:
-            key = request.headers.get('Idempotency-Key')
-            if key:
-                import hashlib
-                # A fresh responses request must recover its target before admission.
-                if not stored_session_id and not gateway_session_key:
-                    session_id = 'response-' + hashlib.sha256(key.encode()).hexdigest()
-                    run_kwargs['session_id'] = session_id
-                run_kwargs['request_id'] = 'responses:' + key
+        if durable_key is not None:
+            import hashlib
+            # A fresh responses request must recover its target before admission; the target and
+            # the request identity carry the authenticated namespace so a rotated API key never
+            # lands on (or replays) another principal's admission.
+            if not stored_session_id and not gateway_session_key:
+                session_id = 'response-' + hashlib.sha256(
+                    f'{idempotency_scope}\0{idempotency_key}'.encode()).hexdigest()
+                run_kwargs['session_id'] = session_id
+            run_kwargs['request_id'] = f'responses:{idempotency_scope}:{idempotency_key}'
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
 
