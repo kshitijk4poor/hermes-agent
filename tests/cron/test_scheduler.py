@@ -1083,8 +1083,12 @@ class TestRunJobConfigLogging:
             with caplog.at_level(logging.WARNING):
                 _run_owned_job(job, tmp_path)
 
-        assert any("Failed to parse" in r.message and "config.yaml" in r.message for r in caplog.records), \
-            f"Expected a config.yaml parse warning in logs, got: {[r.message for r in caplog.records]}"
+        # The owner bridge fails closed on a corrupt config before load_config()'s
+        # fallback warning; either message names the file and the parse error.
+        assert any(
+            ("Failed to parse" in r.message or "is invalid" in r.message) and "config.yaml" in r.message
+            for r in caplog.records
+        ), f"Expected a config.yaml parse warning in logs, got: {[r.message for r in caplog.records]}"
 
 
 class TestRunJobConfigEnvVarExpansion:
