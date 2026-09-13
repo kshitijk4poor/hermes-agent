@@ -479,6 +479,7 @@ class SessionAuthority:
                 # mutations (session.updated) would carry a terminal generation and
                 # a versioned viewer fence would discard them as late frames.
                 live.event_stream.execution = {}
+            self.pending_stops.pop(ref.session_id, None)
             waiter = self.waiters.pop(admission_id, None)
             if waiter is not None and not waiter.done():
                 waiter.set_result(response)
