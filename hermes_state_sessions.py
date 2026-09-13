@@ -192,17 +192,10 @@ def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
     return [sid for sid in found if sid not in seeds]
 
 
-def _retire_runtime_rows_before_delete(conn, session_ids: List[str]) -> None:
-    ids = [sid for sid in dict.fromkeys(session_ids) if sid]
-    if not ids:
-        return
-    from hermes_state_mutation_retirement import retire_terminal_receipts
-    retire_terminal_receipts(conn, ids)
-
-
 def _delete_delegate_children(conn, parent_ids: List[str]) -> List[str]:
     ids = _collect_delegate_child_ids(conn, parent_ids)
-    _retire_runtime_rows_before_delete(conn, ids)
+    from hermes_state_mutation_retirement import retire_terminal_receipts
+    retire_terminal_receipts(conn, ids)
     for chunk in _id_chunks(ids):
         ph = _session_ids_placeholders(chunk)
         conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
@@ -1631,7 +1624,8 @@ class SessionSessionsMixin:
                 for covered_id, expected in expected_display_messages.items()
             ):
                 return False
-            _retire_runtime_rows_before_delete(conn, [session_id])
+            from hermes_state_mutation_retirement import retire_terminal_receipts
+            retire_terminal_receipts(conn, [session_id])
             removed_ids.extend(_delete_delegate_children(conn, [session_id]))
             conn.execute(  # orphan remaining children (branches) so FK is satisfied
                 "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?", (session_id,),
@@ -1667,25 +1661,13 @@ class SessionSessionsMixin:
             ).fetchone()
             if eligible is None:
                 return False
-            _retire_runtime_rows_before_delete(conn, [session_id])
-            cursor = conn.execute(
-                """
-                DELETE FROM sessions
-                WHERE id = ?
-                  AND title IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM messages WHERE messages.session_id = sessions.id
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM sessions child
-                      WHERE child.parent_session_id = sessions.id
-                  )
-                """,
-                (session_id,),
-            )
-            if cursor.rowcount > 0:
-                self._delete_unreferenced_system_prompts(conn)
-            return cursor.rowcount > 0
+            # Same BEGIN IMMEDIATE transaction as the check above: retire the ledger rows
+            # (ON DELETE RESTRICT) and delete without re-evaluating eligibility.
+            from hermes_state_mutation_retirement import retire_terminal_receipts
+            retire_terminal_receipts(conn, [session_id])
+            conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+            self._delete_unreferenced_system_prompts(conn)
+            return True
         deleted = self._execute_write(_do)
         if deleted:
             self._remove_session_files(sessions_dir, session_id)
@@ -1709,7 +1691,8 @@ class SessionSessionsMixin:
             ).fetchall()]
             if not existing:
                 return 0
-            _retire_runtime_rows_before_delete(conn, existing)
+            from hermes_state_mutation_retirement import retire_terminal_receipts
+            retire_terminal_receipts(conn, existing)
             removed_ids.extend(_delete_delegate_children(conn, existing))
             for chunk in _id_chunks(existing):
                 ph = _session_ids_placeholders(chunk)
@@ -1747,9 +1730,10 @@ class SessionSessionsMixin:
             session_ids = {row["id"] for row in conn.execute(
                 f"SELECT id FROM sessions WHERE {self._EMPTY_SESSION_WHERE}"
             ).fetchall()}
+            from hermes_state_mutation_retirement import retire_prunable
+            session_ids = retire_prunable(conn, sorted(session_ids))
             if not session_ids:
                 return 0
-            _retire_runtime_rows_before_delete(conn, list(session_ids))
             for chunk in _id_chunks(session_ids):
                 ph = _session_ids_placeholders(chunk)
                 conn.execute(f"UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id IN ({ph})", chunk)
