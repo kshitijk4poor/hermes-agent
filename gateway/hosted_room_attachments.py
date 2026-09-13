@@ -887,6 +887,28 @@ class HostedRoomAttachmentStore:
             )
             return AttachmentData(self._metadata(row), data)
 
+    def describe(
+        self,
+        *,
+        room_id: Any,
+        attachment_id: Any,
+        recipient_member_id: Any,
+        event_id: Any,
+    ) -> dict[str, Any]:
+        """``read`` without bytes: the metadata (including the upload-verified SHA-256) of a
+        committed attachment this recipient may read for this event."""
+        room_id = _identifier(room_id, label="room_id")
+        attachment_id = _attachment_id(attachment_id)
+        recipient_member_id = _identifier(recipient_member_id, label="recipient_member_id")
+        normalized_event = _identifier(event_id, label="event_id")
+        with self._transaction() as conn:
+            row = self._read_committed_row(
+                conn, room_id=room_id, attachment_id=attachment_id,
+                recipient_member_id=recipient_member_id,
+                normalized_event=normalized_event, viewer=False, now=float(self.clock()),
+            )
+            return self._metadata(row)
+
     def read_range(
         self,
         *,

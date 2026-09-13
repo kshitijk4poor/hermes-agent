@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import asdict
-from types import SimpleNamespace
 import hashlib
 import json
 import os
@@ -123,6 +122,24 @@ def source_attachment_chunk(service, member, room_id, manifest, params):
             'sha256': saved.attachment['sha256']}
 
 
+def source_attachment_digests(service, member, room_id, manifest):
+    """Upload-verified SHA-256 of every bound input, read on the source owner's handler.
+
+    Rides on the submit/execute attest result so the target can bind transferred bytes
+    to the attested input and the preflight can verify the durable row without bytes.
+    """
+    from gateway.hosted_room_attachments import HostedRoomAttachmentStore
+    store = HostedRoomAttachmentStore(service.db_path)
+    digests = []
+    for item in manifest:
+        saved = store.describe(room_id=room_id, attachment_id=item['attachment_id'],
+                               event_id=item['event_id'], recipient_member_id=member)
+        if any(saved[key] != item[key] for key in ('kind', 'name', 'mime', 'size')):
+            raise RuntimeStoreError('permission_denied')
+        digests.append(saved['sha256'])
+    return digests
+
+
 def _attachment_data(binding, attested, params):
     """Transfer bytes, not foreign filenames, with a task fence on every chunk."""
     from gateway.hosted_room_driver import validate_bound_task_manifest
@@ -130,20 +147,20 @@ def _attachment_data(binding, attested, params):
     if not manifest:
         return []
     manifest = validate_bound_task_manifest(manifest)
+    digests = attested.get('attachment_digests')
+    if not isinstance(digests, list) or len(digests) != len(manifest):
+        raise RuntimeStoreError('permission_denied')
     result = []
-    for index, item in enumerate(manifest):
+    for index, (item, digest) in enumerate(zip(manifest, digests)):
         data = bytearray()
-        digest = None
         while len(data) < item['size']:
             chunk = _attest(binding, 'attachment', {
                 'task': params['task'], 'execution_generation': params['execution_generation'],
                 'prompt': attested['prompt'], 'attachments': manifest, 'index': index, 'offset': len(data)})
             raw = base64.b64decode(chunk['data_base64'], validate=True)
             expected = min(_CHUNK_BYTES, item['size'] - len(data))
-            if (chunk['owner'] != attested['owner'] or len(raw) != expected
-                    or (digest is not None and digest != chunk['sha256'])):
+            if chunk['owner'] != attested['owner'] or len(raw) != expected or chunk['sha256'] != digest:
                 raise RuntimeStoreError('permission_denied')
-            digest = chunk['sha256']
             data.extend(raw)
         if hashlib.sha256(data).hexdigest() != digest:
             raise RuntimeStoreError('permission_denied')
@@ -273,10 +290,11 @@ def _check_remote_hosted_admission(authority, ref, row):
         attested = _attest(binding, 'execute', params)
         if attested['owner'] != binding['owner']:
             raise ValueError('owner changed')
-        from gateway.session_hosted_attachments import committed_submission_payload
-        rpc = SimpleNamespace(authority=authority, **binding['selector'],
-            hosted_attachment_data=_attachment_data(binding, attested, params))
-        if row['payload'] != committed_submission_payload(rpc, attested['prompt'], attested['attachments']):
+        # Bytes are not re-transferred here: the durable row is compared against the
+        # payload the attested prompt, manifest and source-verified digests commit to.
+        from gateway.session_hosted_attachments import attested_submission_payload
+        if row['payload'] != attested_submission_payload(
+                attested['prompt'], attested['attachments'], attested.get('attachment_digests')):
             raise ValueError('input changed')
     except (ValueError, KeyError, TypeError) as exc:
         raise RuntimeStoreError('permission_denied') from exc

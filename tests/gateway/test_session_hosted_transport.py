@@ -255,3 +255,63 @@ def test_attachment_chunks_fill_the_response_line_without_overflowing_it(tmp_pat
         assert len(lines) == math.ceil(len(source.data) / _CHUNK_BYTES) == 3
         assert max(lines) <= _MAX_RESPONSE_BYTES
         assert max(lines) > _MAX_RESPONSE_BYTES * 3 // 4, 'chunks leave most of the response line unused'
+
+
+def test_preflight_verifies_by_attested_digest_and_refuses_changed_source_bytes(owner, tmp_path, monkeypatch):
+    """check_remote_hosted_admission proves the durable row still matches the source's
+    bound input from source-attested digests, transferring no bytes; a source attachment
+    re-pointed at different bytes (same id, name and size) is still refused."""
+    from gateway import session_hosted_transport as transport
+    from gateway.session_hosted_transport import HostedRoomOwnerRPC, check_remote_hosted_admission
+    from gateway.session_contract import SessionRef
+    from hermes_state_runtime import list_session_admissions, RuntimeStoreError
+    authority, loop, _, _ = owner
+    target_home = tmp_path / 'profiles' / 'other'
+    target_home.mkdir(parents=True, mode=0o700)
+    authority.profile_id = str(target_home)
+    source = _SourceTask(tmp_path, monkeypatch, b'document bytes ' * 20000)
+    operations = []
+    real_request = transport.owner_request
+    def counting_request(home, verb, params, **kwargs):
+        operations.append(params.get('operation'))
+        return real_request(home, verb, params, **kwargs)
+    monkeypatch.setattr(transport, 'owner_request', counting_request)
+    servers = [_server(tmp_path), _server(target_home)]
+    with source.db:
+        transport.install_hosted_transport(servers[0], source.authority, loop, attest=source.service.attest)
+        transport.install_hosted_transport(servers[1], authority, loop, attest=lambda *a: None)
+        for server in servers:
+            assert asyncio.run_coroutine_threadsafe(server.start(), loop).result()
+        try:
+            rpc = HostedRoomOwnerRPC(home=target_home, source_home=tmp_path, **source.selector)
+            coords = dict(profile='other', source='bot_room')
+            sid = rpc.create(**coords, title='Group: room')['session_id']
+            rpc.submit(**coords, session_id=sid, prompt='frozen', task=source.identity,
+                       execution_generation=1, attachments=source.bound, on_terminal=lambda r: None)
+            row, = list_session_admissions(authority.db, session_id=sid, pending_only=False)
+            assert 'attachment' in operations
+            # Quiesce the driver-side history poller before counting the preflight.
+            with rpc._lock:
+                rpc.callbacks.clear()
+            rpc._monitor.join(5)
+            operations.clear()
+            ref = SessionRef(authority.profile_id, sid)
+            assert check_remote_hosted_admission(authority, ref, row) is True
+            assert operations == ['execute'], 'preflight must verify by digest, not re-transfer bytes'
+            # Same name and size, different bytes: re-point the committed row at another blob.
+            changed = source.store.put(room_id='room', upload_id='upload-2', kind='file', name='note.txt',
+                                       mime='text/plain', data=b'DOCUMENT BYTES ' * 20000)
+            assert changed['size'] == source.bound[0]['size'] and changed['sha256'] != source.store.read(
+                room_id='room', attachment_id=source.bound[0]['attachment_id'], event_id='event',
+                recipient_member_id='two').attachment['sha256']
+            with source.store._transaction() as conn:
+                conn.execute('UPDATE hosted_room_attachments SET sha256=?, blob_id=(SELECT blob_id FROM '
+                             'hosted_room_attachments WHERE attachment_id=?) WHERE attachment_id=?',
+                             (changed['sha256'], changed['attachment_id'], source.bound[0]['attachment_id']))
+            with pytest.raises(RuntimeStoreError, match='permission_denied'):
+                check_remote_hosted_admission(authority, ref, row)
+        finally:
+            with rpc._lock:
+                rpc.callbacks.clear()
+            for server in servers:
+                asyncio.run_coroutine_threadsafe(server.stop(), loop).result()

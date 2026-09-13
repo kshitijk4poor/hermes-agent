@@ -139,3 +139,34 @@ def committed_submission_payload(rpc, prompt, attachments=None):
     from gateway.session_ingress_media import admit_attachments
     payload = submission_payload(rpc, prompt, attachments)
     return {'text': payload['text'], **admit_attachments(payload.get('attachments'))}
+
+
+def attested_submission_payload(prompt, attachments, digests):
+    """The payload ``committed_submission_payload`` commits for these inputs, derived from
+    source-attested digests alone.
+
+    Retained inputs are content-addressed under ``native-inputs/<sha256>/<name>``, so the
+    durable row is a pure function of prompt, manifest and per-file digest; a source
+    attachment re-pointed at other bytes yields another payload and is refused without
+    transferring anything. ``restore_native_media`` re-verifies the bytes at execution.
+    """
+    if not attachments:
+        return {'text': prompt}
+    from gateway.hosted_room_driver import validate_bound_task_manifest
+    from gateway.hosted_room_attachments import _SHA256_RE
+    from gateway.session_ingress_media import _ATTACHMENT_MIMES, _media_root
+    manifest = validate_bound_task_manifest(attachments)
+    if (not isinstance(digests, list) or len(digests) != len(manifest)
+            or any(not isinstance(d, str) or _SHA256_RE.fullmatch(d) is None for d in digests)):
+        raise RuntimeStoreError('permission_denied')
+    root = _media_root()
+    documents, media, media_types = [], [], []
+    for item, digest in zip(manifest, digests):
+        if item['mime'] in _ATTACHMENT_MIMES:
+            media.append({'path': str(root / digest / (digest + Path(item['name']).suffix)),
+                          'sha256': digest, 'size': item['size']})
+            media_types.append(item['mime'])
+        else:
+            documents.append(str(root / digest / item['name']))
+    text = prompt + ''.join('\n[Shared attachment] file: ' + path + '\n' for path in documents)
+    return {'text': text, **({'attachments_v1': {'media': media, 'media_types': media_types}} if media else {})}

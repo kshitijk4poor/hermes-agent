@@ -84,7 +84,10 @@ class CanonicalHostedRoomService(HostedControls, HostedRoomService):
                 from gateway.session_hosted_transport import source_attachment_chunk
                 result.update(source_attachment_chunk(self, member, room_id, payload.get('attachments', []), params))
             else:
-                result.update(prompt=payload['prompt'], attachments=payload.get('attachments', []))
+                from gateway.session_hosted_transport import source_attachment_digests
+                manifest = payload.get('attachments', [])
+                result.update(prompt=payload['prompt'], attachments=manifest,
+                              attachment_digests=source_attachment_digests(self, member, room_id, manifest))
         return result
 
 
