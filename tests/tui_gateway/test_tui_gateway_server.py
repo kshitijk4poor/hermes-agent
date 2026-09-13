@@ -16532,7 +16532,7 @@ def test_session_create_seed_failure_after_row_compensates(monkeypatch):
         def append_messages_batch(self, session_id, messages, **kwargs):
             raise RuntimeError("transcript write failed")
 
-        def delete_session(self, session_id):
+        def discard_unadmitted_session(self, session_id):
             seen["deleted"] = session_id
             return True
 
