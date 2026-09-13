@@ -501,7 +501,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
         return request
           .then(raw => {
-            const r = asRpcResult<SessionResumeResponse>(raw)
+            const r = asRpcResult<SessionResumeResult>(raw)
 
             if (flight !== attachmentFlight.current) {
               discardStaleAttachment(r)
