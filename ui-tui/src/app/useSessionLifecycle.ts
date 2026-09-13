@@ -449,6 +449,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
             storedSid,
             usage: usageFrom(info)
           })
+          // resetSession dropped the previous session's controls; the snapshot's
+          // still-pending approval/clarify prompts are the only way they come back.
+          gw.hydrateSharedPrompts?.(r)
           hydrateLiveSessionInflight(r.inflight)
 
           if (r.pending_connection) {
