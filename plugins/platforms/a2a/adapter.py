@@ -520,9 +520,13 @@ class A2AAdapter(BasePlatformAdapter):
         protocol.metrics.inbound_total += 1
         self._register_inline_push(task_id, params, agent=agent)
         if not agent.get("local", True):
-            reply, state = self._forward_to_profile(agent, peer, context_id, framed, input_id=task_id)
-            self._record_outcome(task_id, context_id, peer, state, reply)
-            return protocol.build_task(task_id, context_id, state, reply, created_at=rec["created_iso"]), None
+            self._activate_task(task_id)
+            try:
+                reply, state = self._forward_to_profile(agent, peer, context_id, framed, input_id=task_id)
+                self._record_outcome(task_id, context_id, peer, state, reply)
+                return protocol.build_task(task_id, context_id, state, reply, created_at=rec["created_iso"]), None
+            finally:
+                self._pop_pending(task_id)
         if self._loop is None or self._message_handler is None:
             return self._end_task(rec, protocol.STATE_FAILED, "Agent gateway not ready to accept A2A tasks.")
         fut = self._add_pending(task_id, context_id)

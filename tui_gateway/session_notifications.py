@@ -602,7 +602,8 @@ def _notif_dispatch_completions(sid, session, notifications, registry, deferred)
     try:
         if text is not None:
             if not _notif_submit(f"__notif__{int(time.time() * 1000)}", sid, session, text,
-                                 "completion batch dispatch failed"):
+                                 "completion batch dispatch failed", display_kind=PROCESS_COMPLETE_DISPLAY_KIND,
+                                 display_metadata={"display_text": batch.display_text(registry)}):
                 for event, _text, claim in claimed:
                     _notif_defer_event(event, claim,
                         deferred.append if deferred is not None else registry.completion_queue.put)

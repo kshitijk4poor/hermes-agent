@@ -111,7 +111,8 @@ def default_terminal_scope() -> Dict[str, str]:
     return scope
 
 
-def build_profile_terminal_scope(hermes_home: "Any") -> Dict[str, str]:
+def build_profile_terminal_scope(
+    hermes_home: "Any", *, env_overlay: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     """Build the COMPLETE effective ``TERMINAL_*`` policy for a profile home.
 
     Projection: ``DEFAULT_CONFIG['terminal']`` <- profile ``.env`` TERMINAL_* <- *env_overlay*
