@@ -194,8 +194,8 @@ def _collect_delegate_child_ids(conn, parent_ids: List[str]) -> List[str]:
 
 def _delete_delegate_children(conn, parent_ids: List[str]) -> List[str]:
     ids = _collect_delegate_child_ids(conn, parent_ids)
-    from hermes_state_mutation_retirement import retire_terminal_receipts
-    retire_terminal_receipts(conn, ids)
+    from hermes_state_mutation_retirement import retire_sessions
+    retire_sessions(conn, ids)
     for chunk in _id_chunks(ids):
         ph = _session_ids_placeholders(chunk)
         conn.execute(f"DELETE FROM messages WHERE session_id IN ({ph})", chunk)
@@ -1624,8 +1624,8 @@ class SessionSessionsMixin:
                 for covered_id, expected in expected_display_messages.items()
             ):
                 return False
-            from hermes_state_mutation_retirement import retire_terminal_receipts
-            retire_terminal_receipts(conn, [session_id])
+            from hermes_state_mutation_retirement import retire_sessions
+            retire_sessions(conn, [session_id])
             removed_ids.extend(_delete_delegate_children(conn, [session_id]))
             conn.execute(  # orphan remaining children (branches) so FK is satisfied
                 "UPDATE sessions SET parent_session_id = NULL WHERE parent_session_id = ?", (session_id,),
@@ -1663,8 +1663,8 @@ class SessionSessionsMixin:
                 return False
             # Same BEGIN IMMEDIATE transaction as the check above: retire the ledger rows
             # (ON DELETE RESTRICT) and delete without re-evaluating eligibility.
-            from hermes_state_mutation_retirement import retire_terminal_receipts
-            retire_terminal_receipts(conn, [session_id])
+            from hermes_state_mutation_retirement import retire_sessions
+            retire_sessions(conn, [session_id])
             conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
             self._delete_unreferenced_system_prompts(conn)
             return True
@@ -1691,8 +1691,8 @@ class SessionSessionsMixin:
             ).fetchall()]
             if not existing:
                 return 0
-            from hermes_state_mutation_retirement import retire_terminal_receipts
-            retire_terminal_receipts(conn, existing)
+            from hermes_state_mutation_retirement import retire_sessions
+            retire_sessions(conn, existing)
             removed_ids.extend(_delete_delegate_children(conn, existing))
             for chunk in _id_chunks(existing):
                 ph = _session_ids_placeholders(chunk)

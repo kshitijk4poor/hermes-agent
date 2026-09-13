@@ -66,6 +66,53 @@ def test_legacy_delete_retires_terminal_ledger_rows_and_refuses_live_work(tmp_pa
             assert not c.execute('PRAGMA foreign_key_check').fetchall()
 
 
+@pytest.mark.parametrize('delete', [
+    lambda db, sid: db.delete_session(sid),
+    lambda db, sid: db.delete_sessions([sid]),
+    lambda db, sid: db.delete_session_if_empty(sid),
+    lambda db, sid: db.delete_empty_sessions(),
+    lambda db, sid: db.prune_sessions(older_than_days=30),
+    lambda db, sid: db.prune_empty_ghost_sessions(),
+], ids=['single', 'bulk', 'if_empty', 'empty_sweep', 'prune', 'ghost_prune'])
+def test_legacy_delete_publishes_the_full_retirement_fence(tmp_path, delete):
+    """Same contract as the canonical mutate(delete): the exact retry of a settled request
+    still returns its terminal receipt, and a late accounting backfill cannot recreate the
+    row (which would let the same request be admitted a second time)."""
+    from hermes_state_mutation_retirement import retired_session
+    with closing(SessionDB(tmp_path / 'state.db')) as db:
+        epoch = rt.begin_runtime_epoch(db, instance_id='owner')
+        _old_ended(db, 's', source='tui')
+        db.save_gateway_routing_entry('route:s', '{"session_id": "s"}')
+        request = dict(epoch=epoch, principal_id='human', session_id='s', request_id='once',
+                       payload={'text': 'x'})
+        admission_id = _settled_admission(db, epoch, 's', 'once')
+        assert delete(db, 's')
+        assert db.get_session('s') is None and retired_session(db, 's')
+        assert db.load_gateway_routing_entries() == {}
+        retry = rt.admit_session_input(db, **request)
+        assert retry['status'] == 'terminal' and retry['admission_id'] == admission_id
+        with pytest.raises(rt.RuntimeStoreError, match='not_found'):
+            db.update_token_counts('s', input_tokens=1, output_tokens=1, model='m')
+        assert db.get_session('s') is None
+
+
+def test_legacy_delete_fences_cascaded_delegate_children(tmp_path):
+    from hermes_state_mutation_retirement import retired_session
+    with closing(SessionDB(tmp_path / 'state.db')) as db:
+        epoch = rt.begin_runtime_epoch(db, instance_id='owner')
+        db.create_session('parent', source='cli')
+        db.create_session('child', source='cli', parent_session_id='parent',
+                          model_config={'_delegate_from': 'parent'})
+        admission_id = _settled_admission(db, epoch, 'child', 'sub')
+        assert db.delete_session('parent')
+        assert db.get_session('child') is None and retired_session(db, 'child')
+        retry = rt.admit_session_input(db, epoch=epoch, principal_id='human', session_id='child',
+                                       request_id='sub', payload={'text': 'x'})
+        assert retry['status'] == 'terminal' and retry['admission_id'] == admission_id
+        with pytest.raises(rt.RuntimeStoreError, match='not_found'):
+            db.ensure_session('child', source='unknown')
+
+
 def test_sweeps_skip_sessions_with_live_work_and_retire_the_rest(tmp_path):
     with closing(SessionDB(tmp_path / 'state.db')) as db:
         epoch = rt.begin_runtime_epoch(db, instance_id='owner')
