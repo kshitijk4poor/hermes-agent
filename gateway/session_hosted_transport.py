@@ -209,6 +209,10 @@ def install_hosted_transport(server, authority, loop, *, attest):
         attested = _attest(binding, operation, params)
         binding['owner'] = attested['owner']
         principal = _principal(authority, binding)
+        # Authorization already happened: every operation, including each attachment
+        # chunk, is re-attested at the SOURCE owner above before anything runs here, so
+        # the RPC's own authorize hook has nothing left to decide. A new operation must
+        # be added to _OPERATIONS (and therefore attested) before it can reach _call.
         rpc = HostedRoomAuthorityRPC(authority, loop, **selector, principal=principal,
                                     authorize=lambda *args: True)
         key = _BINDING + rpc.ref.session_id

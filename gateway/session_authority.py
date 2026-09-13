@@ -36,6 +36,14 @@ class LiveSession:
         self.controls = PendingControls(self.event_stream)
 
 
+def _log_drain_failure(task):
+    """A dead pump is the one failure this module must never swallow."""
+    if task.cancelled() or task.exception() is None:
+        return
+    import logging
+    logging.getLogger(__name__).error('Session drain task died: %r', task.exception())
+
+
 class SessionAuthority:
     def __init__(self, runner, *, profile_id, instance_id, db, epoch):
         self.runner = runner
@@ -53,6 +61,9 @@ class SessionAuthority:
         self.pending_stops = {}
 
     def authorize(self, actor, ref, capability):
+        """Every handler calls this first, so a later ``self.sessions[ref.session_id]`` is
+        safe: a deleted/evicted live entry surfaces here as ``not_found``, not as a KeyError
+        deeper in the handler."""
         if actor.profile_id != self.profile_id or ref.profile_id != self.profile_id:
             raise RuntimeStoreError('profile_mismatch')
         if capability not in actor.capabilities:
@@ -191,6 +202,7 @@ class SessionAuthority:
         live = self.sessions[ref.session_id]
         if live.task is None or live.task.done():
             live.task = asyncio.create_task(self._drain(ref))
+            live.task.add_done_callback(_log_drain_failure)
 
     async def admit_automation(self, adapter, event, identity):
         from gateway.session_automation import admit_automation
@@ -463,22 +475,34 @@ class SessionAuthority:
                 logging.getLogger(__name__).exception('Admitted turn %s failed', admission_id)
                 response = 'The admitted turn failed.'
                 outcome = 'failed'
-            with live.event_stream.lock:
-                from gateway.session_results import finish_result
-                settled, response = finish_result(self.db, epoch=self.epoch, row=row,
-                    response=response, outcome=outcome,
-                    result=self.pending_results.pop(admission_id, None))
-                live.controls.snapshot(ref.session_id, None)
-                from gateway.session_ingress_media import release_admission_media
-                release_admission_media(self.db, admission_id)
-                self._publish_pending(ref)
-                live.event_stream.publish(ref.session_id, {
-                    'text': response, 'content': response, 'admission_id': admission_id,
-                    'outcome': 'cancelled' if settled['outcome'] == 'interrupted' else settled['outcome']})
+            try:
+                with live.event_stream.lock:
+                    from gateway.session_results import finish_result
+                    settled, response = finish_result(self.db, epoch=self.epoch, row=row,
+                        response=response, outcome=outcome,
+                        result=self.pending_results.pop(admission_id, None))
+                    live.controls.snapshot(ref.session_id, None)
+                    from gateway.session_ingress_media import release_admission_media
+                    release_admission_media(self.db, admission_id)
+                    self._publish_pending(ref)
+                    live.event_stream.publish(ref.session_id, {
+                        'text': response, 'content': response, 'admission_id': admission_id,
+                        'outcome': 'cancelled' if settled['outcome'] == 'interrupted' else settled['outcome']})
+            except Exception:
+                # The settle fence lost (a reset/compression moved runtime_generation under
+                # the turn). The row stays `started` for recovery -> `unknown`; re-settling
+                # it here would forge an outcome the ledger refused. The pump itself must
+                # not die silently: log with the id and fall through to release observers.
+                import logging
+                logging.getLogger(__name__).exception(
+                    'Settlement of admission %s failed; left for recovery', admission_id)
+                response = 'The admitted turn could not be settled.'
+            finally:
                 # The stamp names a claimed, unsettled execution. Left in place, idle
                 # mutations (session.updated) would carry a terminal generation and
                 # a versioned viewer fence would discard them as late frames.
-                live.event_stream.execution = {}
+                with live.event_stream.lock:
+                    live.event_stream.execution = {}
             self.pending_stops.pop(ref.session_id, None)
             waiter = self.waiters.pop(admission_id, None)
             if waiter is not None and not waiter.done():
