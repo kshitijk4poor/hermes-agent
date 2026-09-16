@@ -95,8 +95,12 @@ class SessionAuthority:
 
     def logical_owner(self, session_id):
         """The FIFO/admission identity of a route: the root of its compression lineage.
-        Compression advances the physical transcript, never the admission identity."""
-        return self.db.get_compression_lineage(session_id)[0] if session_id else session_id
+        Compression advances the physical transcript, never the admission identity. A session this
+        store does not hold (another served profile's, under multiplex) keeps its own id."""
+        if not session_id:
+            return session_id
+        lineage = self.db.get_compression_lineage(session_id)
+        return lineage[0] if lineage else session_id
 
     def physical_target(self, ref):
         return self.db.get_compression_tip(ref.session_id) or ref.session_id
