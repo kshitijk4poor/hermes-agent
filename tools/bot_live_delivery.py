@@ -42,23 +42,6 @@ def _bot_chat_tip(home: Path) -> str | None:
         db.close()
 
 
-def find_canonical_owner(profile_home: Path | str) -> dict[str, Any] | None:
-    """Return the exact Bot Chat tip's active-session lease, including unsupported CLI owners.
-
-    A CLI process holding the tip live cannot consume authority deliveries (the door refuses with
-    ``runtime_coordination_required``); cron uses this to retain output until that owner releases."""
-    from hermes_cli.active_sessions import active_session_registry_snapshot
-
-    home = Path(profile_home).resolve()
-    session_id = _bot_chat_tip(home)
-    if not session_id:
-        return None
-    for entry in active_session_registry_snapshot(registry_home=home):
-        if entry["session_id"] == session_id:
-            return {**entry, "profile_home": str(home)}
-    return None
-
-
 def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None:
     """Discover the profile authority and its exact Bot Chat without acquiring a lease.
 
