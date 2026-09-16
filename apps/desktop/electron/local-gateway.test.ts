@@ -18,7 +18,9 @@ test.skipIf(process.platform === 'win32')('native HTTP mints fresh purpose-bound
   const path = await import('node:path')
   const net = await import('node:net')
   const { nativeGatewayHttpHeaders } = await import('./local-gateway')
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-http-'))
+  // macOS: os.tmpdir() is /var/..., a symlink to /private/var; the gateway canonicalises
+  // profile_id, so the endpoint must carry the realpath or identities never match.
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-http-')))
   const endpoint = { profile_id: home, instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
   const requests: any[] = []
 
@@ -113,7 +115,9 @@ test.skipIf(process.platform === 'win32')('a stopped gateway that unlinked its c
   const path = await import('node:path')
   const net = await import('node:net')
   const { mintLocalGatewayTicket, redialLocalGateway } = await import('./local-gateway')
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-redial-'))
+  // macOS: os.tmpdir() is /var/..., a symlink to /private/var; the gateway canonicalises
+  // profile_id, so the endpoint must carry the realpath or identities never match.
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-redial-')))
   const socketPath = path.join(home, 'gateway.sock')
   const endpoint = { profile_id: home, instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
 
@@ -170,7 +174,9 @@ test.skipIf(process.platform === 'win32')('a group-accessible control socket is 
   const path = await import('node:path')
   const net = await import('node:net')
   const { isStaleLocalGatewayError, mintLocalGatewayTicket } = await import('./local-gateway')
-  const home = await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-unsafe-'))
+  // macOS: os.tmpdir() is /var/..., a symlink to /private/var; the gateway canonicalises
+  // profile_id, so the endpoint must carry the realpath or identities never match.
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-unsafe-')))
   const socketPath = path.join(home, 'gateway.sock')
   const endpoint = { profile_id: home, instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
   const server = net.createServer(socket => socket.end())
