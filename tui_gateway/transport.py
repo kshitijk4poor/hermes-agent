@@ -218,14 +218,17 @@ class FanoutTransport:
                 frame, size = peer.pending.popleft()
                 peer.pending_bytes -= size
             try:
-                from tui_gateway.ws import WSTransport
-                if isinstance(peer.transport, WSTransport):
+                # Duck-typed on purpose: importing ``tui_gateway.ws`` here would pull
+                # ``tui_gateway.server`` in on this drain thread, racing any concurrent
+                # importer with a partially initialized module.
+                write_async = getattr(peer.transport, "write_async", None)
+                loop = getattr(peer.transport, "_loop", None)
+                if write_async is not None and loop is not None:
                     # write() acknowledges buffered tokens/timeouts, not socket
                     # progress. Await the real send so WS cannot move an
                     # unbounded backlog underneath this bounded mailbox.
                     from agent.async_utils import safe_schedule_threadsafe
-                    future = safe_schedule_threadsafe(
-                        peer.transport.write_async(frame), peer.transport._loop)
+                    future = safe_schedule_threadsafe(write_async(frame), loop)
                     ok = future is not None and future.result()
                 else:
                     ok = peer.transport.write(frame)

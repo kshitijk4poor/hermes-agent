@@ -82,12 +82,16 @@ from gateway.session_execution import GatewaySessionAgentMixin
 class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
     """Per-turn collaborator carrying ``GatewayRunner._run_agent_inner``'s tool-progress callbacks."""
 
+    # ``None`` is a legitimate state: a turn with no owning session authority (messaging
+    # adapters without a canonical session) publishes no execution events and takes no
+    # controls snapshot. Class-level so every publish/snapshot seam can read it unconditionally.
+    _approval_owner = None
+
     def __init__(self, runner: "GatewayRunner", ctx: TurnContext) -> None:
         self._runner = runner
         self._ctx = ctx
         from gateway.session_authorities import active_authority
         authority = active_authority(runner)
-        self._approval_owner = None
         if authority is not None:
             source = getattr(ctx, 'source', None)
             owner_id = (source.chat_id if getattr(source, 'platform', None) == Platform.LOCAL
