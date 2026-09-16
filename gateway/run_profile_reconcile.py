@@ -125,9 +125,10 @@ class GatewayProfileReconcileMixin:
                     del current[name]
             self._profile_own_gateway_warned = blocked
             sigs = self._served_profile_signatures or {}
+            from gateway.run_runtime import park_profile, unpark_profile
+            for name in [n for n in self._parked_profile_names() if n not in live]:
+                unpark_profile(self, name)
             parked = self._parked_profile_names()
-            for name in [n for n in parked if n not in live]:
-                parked.remove(name)
             # The watcher never re-parks the same profile every cycle; a creator's explicit signal does.
             retry_parked = reason == "control-socket"
             added = [n for n in live if n not in known and n != active and (retry_parked or n not in parked)]
@@ -141,13 +142,13 @@ class GatewayProfileReconcileMixin:
                 result["removed"].append(name)
             current = {n: h for n, h in live.items() if n in known or n == active}
             for name in list(added):
-                if not await self._serve_profile_runtime(name, live[name]):
+                reason = await self._serve_profile_runtime(name, live[name])
+                if reason is not None:
                     added.remove(name)
-                    if name not in parked:
-                        parked.append(name)
+                    park_profile(self, name, reason)
                     result["parked"].append(name)
                     continue
-                parked[:] = [n for n in parked if n != name]
+                unpark_profile(self, name)
                 current[name] = live[name]
             claimed = self._live_resource_claims(active)
             for name in added + changed:
@@ -186,34 +187,32 @@ class GatewayProfileReconcileMixin:
 
     def _parked_profile_names(self) -> list:
         """Profiles that exist but could not be served (unusable store, home owned elsewhere); boot's
-        ``initialize_gateway_runtime`` parks into the same descriptor list."""
-        descriptor = getattr(self, "session_runtime_descriptor", None)
-        if descriptor is None:
-            descriptor = self.session_runtime_descriptor = {}
-        return descriptor.setdefault("parked_profiles", [])
+        ``initialize_gateway_runtime`` parks into the same published ``name -> reason`` map."""
+        from gateway.run_runtime import parked_profile_map
+        return list(parked_profile_map(self))
 
-    async def _serve_profile_runtime(self, name: str, home: "Path") -> bool:
+    async def _serve_profile_runtime(self, name: str, home: "Path") -> Optional[str]:
         """Grow the reservation by *home* and build its session authority (boot's per-secondary
-        steps). False — parked, reservation released — when another gateway owns the home (a stray
-        per-profile daemon) or its store cannot be opened. An adapters-only runner (no authority
-        registry) grows the reservation alone."""
+        steps). Returns the park reason — reservation released — when another gateway owns the home
+        (a stray per-profile daemon) or its store cannot be opened; None when served. An
+        adapters-only runner (no authority registry) grows the reservation alone."""
         from gateway.run_runtime import release_profile_home, reserve_profile_home, serve_profile_runtime
         from gateway.runtime_ownership import OwnershipConflict
         try:
             reserve_profile_home(self, name, home)
         except (OwnershipConflict, OSError) as exc:
             logger.error("[MULTIPLEX] Profile '%s' not served: %s", name, exc)
-            return False
+            return f"home owned by another gateway: {exc}"
         if getattr(self, "session_authorities", None) is None:
-            return True
+            return None
         try:
             await serve_profile_runtime(self, name, home)
         except Exception as exc:
             logger.error("[MULTIPLEX] Profile '%s' not served: its session store is unusable (%s): %s",
                          name, home, exc)
             release_profile_home(self, home)
-            return False
-        return True
+            return f"session store unusable: {exc}"
+        return None
 
     def _live_resource_claims(self, active: str) -> Dict[tuple, str]:
         """Startup's ``claimed`` map rebuilt from what is live now: primary claims plus every connected

@@ -1199,8 +1199,7 @@ def _prepare_runtime_status_update(
     active_agents: Any = _UNSET, active_work: Any = _UNSET, platform: Any = _UNSET, platform_state: Any = _UNSET,
     error_code: Any = _UNSET, error_message: Any = _UNSET, needs_attention: Any = _UNSET,
     retrying_since: Any = _UNSET, served_profiles: Any = _UNSET, session_store: Any = _UNSET,
-    multiplex_standalone_reason: Any = _UNSET,
-    platform_metrics: Any = _UNSET,
+    parked_profiles: Any = _UNSET, multiplex_standalone_reason: Any = _UNSET,
     ingress_url: Any = _UNSET, listener_base: Any = _UNSET, clear_profile_platforms: bool = False,
     drop_profile_platforms: Optional[str] = None,
     load_existing: bool = True, reload_existing: bool = False,
@@ -1208,37 +1207,60 @@ def _prepare_runtime_status_update(
     """Merge one update into the process-wide canonical status snapshot."""
     global _runtime_status_state_path, _runtime_status_state
     path = _get_runtime_status_path()
-    with _runtime_status_state_lock:
-        if reload_existing or _runtime_status_state_path != path or _runtime_status_state is None:
-            _runtime_status_state_path = path
-            _runtime_status_state = (
-                (_read_json_file(path) if load_existing else None) or _build_runtime_status_record())
-        # The module snapshot is only ever reassigned (never mutated in place) and
-        # submit() copies again, so the previous snapshot can be handed out as-is.
-        previous_payload = _runtime_status_state
-        payload = copy.deepcopy(previous_payload)
-        current_record = _build_pid_record()
-        payload.setdefault("platforms", {})
-        if not isinstance(payload["platforms"], dict):
-            payload["platforms"] = {}
-        if clear_profile_platforms or drop_profile_platforms:
-            drop_prefix = f"{drop_profile_platforms}:" if drop_profile_platforms else None
-            payload["platforms"] = {
-                k: v for k, v in payload["platforms"].items()
-                if not isinstance(k, str) or ":" not in k
-                or (drop_prefix is not None and not k.startswith(drop_prefix))
-            }
-        payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time")})
-        payload["updated_at"] = _utc_now_iso()
-        payload.update(_get_code_identity_fields())
-        _apply_set_fields(payload, (
-            ("gateway_state", gateway_state, None), ("exit_reason", exit_reason, None),
-            ("restart_requested", restart_requested, bool),
-            ("active_agents", active_agents, parse_active_agents),
-            ("active_work", active_work, lambda v: list(v) if v else None),
-            ("served_profiles", served_profiles, lambda v: list(v or [])),
-            ("multiplex_standalone_reason", multiplex_standalone_reason, lambda v: str(v) if v else None),
-            ("session_store", session_store, _coerce_session_store),
+    payload = _read_json_file(path) or _build_runtime_status_record()
+    previous_payload = copy.deepcopy(payload)
+    current_record = _build_pid_record()
+    payload.setdefault("platforms", {})
+    if clear_profile_platforms or drop_profile_platforms:
+        # Secondary-profile entries are keyed ``<profile>:<platform>``. A fresh process must not
+        # inherit them or /api/status stays degraded until every old adapter re-emits.
+        platforms = payload["platforms"] if isinstance(payload["platforms"], dict) else {}
+        drop_prefix = f"{drop_profile_platforms}:" if drop_profile_platforms else None
+        payload["platforms"] = {
+            k: v for k, v in platforms.items()
+            if not isinstance(k, str) or ":" not in k or (drop_prefix is not None and not k.startswith(drop_prefix))
+        }
+    # Re-stamp identity + code fields on every write: the file can outlive its creator and the
+    # top-level record must describe the CURRENT writer.
+    payload.update({key: current_record[key] for key in ("kind", "pid", "argv", "start_time")})
+    payload["updated_at"] = _utc_now_iso()
+    payload.update(_get_code_identity_fields())
+    _apply_set_fields(payload, (
+        ("gateway_state", gateway_state, None), ("exit_reason", exit_reason, None),
+        ("restart_requested", restart_requested, bool),
+        ("active_agents", active_agents, parse_active_agents),
+        # Named in-flight units (see GatewayShutdownMixin._describe_active_work); None clears.
+        ("active_work", active_work, lambda v: list(v) if v else None),
+        # Multiplexed profiles; absent/empty for a single-profile gateway.
+        ("served_profiles", served_profiles, lambda v: list(v or [])),
+        # Profiles the multiplexer could not serve, name -> reason; clients fail fast on them.
+        ("parked_profiles", parked_profiles, lambda v: {str(k): str(r) for k, r in dict(v or {}).items()}),
+        # Why an unset-default (multiplex on) gateway is serving one profile; None clears it.
+        ("multiplex_standalone_reason", multiplex_standalone_reason, lambda v: str(v) if v else None),
+        ("session_store", session_store, _coerce_session_store),
+    ))
+    if platform is not _UNSET:
+        platform_payload = payload["platforms"].get(platform, {})
+        if platform_state == "connected":
+            # Every writer that publishes ``connected`` (startup stamp, adapter ``_mark_connected``,
+            # Telegram's in-place polling recovery) ends the retry episode; only the watcher's
+            # reconnect path used to say so, and a restart after a NEEDS_ATTENTION escalation
+            # carried the flag into a healthy record for weeks.
+            needs_attention = False if needs_attention is _UNSET else needs_attention
+            retrying_since = None if retrying_since is _UNSET else retrying_since
+        _apply_set_fields(platform_payload, (
+            ("state", platform_state, None), ("error_code", error_code, None),
+            ("error_message", error_message, None),
+            # Reconnect-loop escalation past the attention threshold: a signal for owners/fleet
+            # monitoring, not a circuit breaker (retry never stops). Cleared on reconnect.
+            ("needs_attention", needs_attention, bool),
+            # ISO start of the current retry episode; None clears it.
+            ("retrying_since", retrying_since, None),
+            # Shared-listener secondaries: the /p/<profile>/ callback URL the vendor console must target.
+            ("ingress_url", ingress_url, None),
+            # Bound listener (``http://host:port``) of the default's api_server/webhook: a served
+            # profile's mirror of that platform is reported off it (``<listener_base>/p/<profile>/...``).
+            ("listener_base", listener_base, None),
         ))
         if platform is not _UNSET:
             platform_payload = copy.deepcopy(payload["platforms"].get(platform, {}))

@@ -232,7 +232,7 @@ async def _start_gateway_start_control_socket(runner):
             payload = build_identify_payload()
             payload.update({key: descriptor[key] for key in (
                 "instance_id", "runtime_protocol", "authority_epoch", "state", "api_origin",
-                "served_profiles", "capabilities") if key in descriptor})
+                "served_profiles", "parked_profiles", "capabilities") if key in descriptor})
             if getattr(runner, '_draining', False):
                 payload.update(state='draining', capabilities=[])
             payload["supervisor"] = {"manual": "none", "desktop": "none"}.get(

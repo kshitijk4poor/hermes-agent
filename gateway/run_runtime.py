@@ -63,7 +63,37 @@ def _park_reserved_profile(runner, name, home, exc):
     logger.error("[MULTIPLEX] Profile '%s' not served: its session store is unusable (%s): %s",
                  name, home, exc)
     release_profile_home(runner, home)
-    runner.session_runtime_descriptor.setdefault('parked_profiles', []).append(name)
+    park_profile(runner, name, f'session store unusable: {exc}')
+
+
+def park_profile(runner, name, reason):
+    """Publish *name* under ``parked_profiles`` (name -> reason) in the runtime descriptor and the
+    root's ``gateway_state.json``: a client of that profile then gets a terminal ``profile_parked``
+    verdict from ``ensure`` instead of waiting its whole deadline for a service that never comes."""
+    parked = parked_profile_map(runner)
+    parked[name] = str(reason)[:500]
+    _record_parked_profiles(parked)
+
+
+def unpark_profile(runner, name):
+    parked = parked_profile_map(runner)
+    if parked.pop(name, None) is not None:
+        _record_parked_profiles(parked)
+
+
+def parked_profile_map(runner):
+    descriptor = getattr(runner, 'session_runtime_descriptor', None)
+    if descriptor is None:
+        descriptor = runner.session_runtime_descriptor = {}
+    return descriptor.setdefault('parked_profiles', {})
+
+
+def _record_parked_profiles(parked):
+    try:
+        from gateway.status import write_runtime_status
+        write_runtime_status(parked_profiles=dict(parked))
+    except Exception:
+        logger.debug('could not record parked_profiles', exc_info=True)
 
 
 async def initialize_gateway_runtime(runner):
@@ -93,6 +123,8 @@ async def initialize_gateway_runtime(runner):
             _park_reserved_profile(runner, name, home, exc)
     descriptor['authority_epoch'] = registry.launch.epoch
     descriptor['served_profiles'] = registry.served_profiles()
+    # Publish this boot's verdict (an empty map clears a previous run's parked set).
+    _record_parked_profiles(parked_profile_map(runner))
     runner.session_ticket_store = TicketStore(instance_id, registry.profile_ids())
 
 

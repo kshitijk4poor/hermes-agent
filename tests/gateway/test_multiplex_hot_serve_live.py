@@ -245,6 +245,19 @@ def test_broken_secondary_state_db_parks_only_that_profile(mux):
         assert served_homes(desc) == {root.resolve(), mux['boot'].resolve()}, desc
         assert recorded_served(root) == ['default', 'boot']
         assert "Profile 'broken' not served" in tail(mux), tail(mux)
+        # The park is published (identify + gateway_state.json), so the profile's clients fail fast
+        # with the real reason instead of waiting the whole deadline for a service that never comes.
+        assert 'broken' in desc.get('parked_profiles', {}), desc
+        recorded = json.loads((root / 'gateway_state.json').read_text(encoding='utf-8'))
+        assert 'broken' in recorded.get('parked_profiles', {}), recorded
+        started = time.monotonic()
+        ensured = subprocess.run([sys.executable, '-m', 'hermes_cli.main', '-p', 'broken', 'gateway', 'ensure',
+                                  '--json', '--timeout', '30'], cwd=ROOT, env=mux['env'], capture_output=True,
+                                 text=True, timeout=60)
+        payload = json.loads(ensured.stdout.strip().splitlines()[-1])
+        assert (payload['state'], payload['reason_code']) == ('inaccessible', 'profile_parked'), (payload, ensured.stderr)
+        assert 'unusable' in (payload.get('detail') or ''), payload
+        assert ensured.returncode == 7 and time.monotonic() - started < 20, (ensured.returncode, ensured.stderr)
         stop(proc)
     finally:
         stop(proc, expect=None)

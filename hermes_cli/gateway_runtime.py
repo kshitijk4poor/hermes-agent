@@ -32,6 +32,9 @@ class GatewayDiscovery:
     state: RuntimeState
     endpoint: GatewayEndpoint | None = None
     reason_code: str | None = None
+    # Human-readable cause behind a bounded ``reason_code`` when the owner published one (the
+    # multiplexer's park reason); never raw peer data.
+    detail: str | None = None
 
 
 def _canonical_home(home: str | Path) -> str:
@@ -100,6 +103,21 @@ def _multiplexer_starting(home: Path) -> bool:
     return root is not None and missing_owner_state(root) == "starting"
 
 
+def _parked_by_multiplexer(payload: dict, home: Path) -> GatewayDiscovery | None:
+    """A secondary the multiplexer could not serve (unusable store, home owned elsewhere) is
+    published under ``parked_profiles`` (name -> reason). That is a terminal verdict for its
+    clients: waiting for a ``served_profiles`` entry that will never appear is the wrong answer."""
+    parked = payload.get("parked_profiles")
+    if not isinstance(parked, dict):
+        return None
+    from hermes_cli.profiles import normalize_profile_name
+    name = normalize_profile_name(home.name)
+    reason = next((r for n, r in parked.items() if normalize_profile_name(str(n)) == name), None)
+    if reason is None:
+        return None
+    return GatewayDiscovery("inaccessible", reason_code="profile_parked", detail=str(reason)[:500] or None)
+
+
 def _served_by_multiplexer(home: Path, *, timeout: float) -> GatewayDiscovery | None:
     """A served secondary has no socket of its own: the default multiplexer's control socket
     answers for it, and its ``identify`` lists the home under ``served_profiles``. Only the
@@ -116,7 +134,7 @@ def _served_by_multiplexer(home: Path, *, timeout: float) -> GatewayDiscovery | 
         return None
     result = _endpoint(payload, home, control_home=root)
     if result.state == "inaccessible" and result.reason_code == "profile_mismatch":
-        return None  # the multiplexer does not serve this profile
+        return _parked_by_multiplexer(payload, home)  # else: the multiplexer does not serve this profile
     return result
 
 
