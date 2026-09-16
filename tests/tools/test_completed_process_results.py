@@ -151,6 +151,12 @@ def test_headless_terminal_result_survives_cli_exit(tmp_path, request):
             f"base_url={url!r}, toolsets='terminal', max_turns=3, ignore_rules=True)",
         ], cwd=tmp_path, env=env, stdin=subprocess.DEVNULL,
             capture_output=True, text=True, encoding="utf-8", timeout=60)
+        # The canonical CLI is a finite client: it exits on its turn's terminal event while
+        # the daemon that owns the child keeps its watcher. The owned completion is admitted
+        # there as a follow-up turn, so the model must stay reachable until it arrives.
+        deadline = time.monotonic() + 30
+        while not follow_ups and time.monotonic() < deadline:
+            time.sleep(0.1)
     finally:
         release.touch()
         server.shutdown()
@@ -162,9 +168,8 @@ def test_headless_terminal_result_survives_cli_exit(tmp_path, request):
     assert len(observed) == 1, (observed, producer.stdout, producer.stderr)
     process_id = observed[0]["session_id"]
     assert observed[0].get("notify_on_complete") is True, observed
-    # A terminal completion is an [IMPORTANT: Background process ...] event,
-    # not an [ASYNC DELEGATION ...] event. The same history entry can appear in
-    # several provider requests without being delivered a second time.
+    # The owned notify_on_complete completion resumes as ONE follow-up turn on the owning
+    # daemon session, carrying the child's real output and exit code to the model.
     assert len(follow_ups) == 1, follow_ups
     assert follow_ups[0].startswith(f"[IMPORTANT: Background process {process_id} exited (exit code 7).")
     assert "SYNTHETIC_REVIEW_COMPLETE" in follow_ups[0]
