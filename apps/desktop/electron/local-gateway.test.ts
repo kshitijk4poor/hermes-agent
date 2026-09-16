@@ -91,6 +91,17 @@ test('ensure consumes structured readiness without acquiring a child owner', asy
   await expect(ensureLocalGateway(async () => ({ code: 5, stdout: JSON.stringify({ state: 'starting', reason_code: 'deadline' }) }))).rejects.toThrow('starting')
 })
 
+test('an ensure child that never reached the protocol boundary is diagnosed from stderr, not as a JSON parse error', async () => {
+  // `main`'s hermes has no `gateway ensure` subcommand: argparse usage on stderr, nothing on stdout.
+  const legacy = { code: 2, stdout: '', stderr: "usage: hermes gateway [-h] ...\nhermes gateway: 'ensure' is not a `hermes gateway` command.\nRun `hermes gateway --help` to see all commands.\n" }
+  await expect(ensureLocalGateway(async () => legacy)).rejects.toThrow(/produced no result \(exit 2\): Run `hermes gateway --help`/)
+  // A missing profile: the CLI exits 1 before the ensure command runs.
+  await expect(ensureLocalGateway(async () => ({ code: 1, stdout: '', stderr: "Error: Profile 'gone' does not exist.\n" }))).rejects.toThrow(/exit 1\): Error: Profile 'gone' does not exist\./)
+  // A protocol outcome is never re-diagnosed: `incompatible` stays the gateway's own verdict.
+  await expect(ensureLocalGateway(async () => ({ code: 3, stdout: '{"endpoint":null,"reason_code":"runtime_protocol","state":"incompatible"}', stderr: 'noise' }))).rejects.toThrow('Gateway incompatible (runtime_protocol)')
+  await expect(ensureLocalGateway(async () => ({ code: 0, stdout: '', stderr: '' }))).rejects.toThrow(/produced no result \(exit 0\)\. Update Hermes/)
+})
+
 test('private dial credential is one-use and bound to the requesting native window', () => {
   const dials = createLocalGatewayDials()
   const dial = new URL(dials.prepare('http://127.0.0.1:1234', 'private-ticket', 7))
