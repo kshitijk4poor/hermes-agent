@@ -55,7 +55,7 @@ async def test_paused_fifo_releases_the_messaging_waiter_with_one_notice_per_epi
             'session_id': 's', 'admission_id': unknown['admission_id'], 'execution_generation': unknown['generation']}})
         await asyncio.wait_for(authority.sessions['s'].task, 5)
         assert executed == ['FOLLOWER', 'one', 'two']
-        assert authority.sessions['s'].paused is None and not authority.sessions['s'].pause_notified
+        assert not authority.sessions['s'].pause_notified
         await viewer.close()
     finally:
         store.close_all_db_handles()

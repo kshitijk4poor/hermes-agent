@@ -31,9 +31,8 @@ class LiveSession:
     subscribers: dict = field(default_factory=dict)
     event_stream: SessionEvents = field(default_factory=SessionEvents)
     controls: PendingControls = field(init=False)
-    # Why the FIFO is not advancing (unknown head, preflight refusal) or None. The
-    # messaging ingress tells the platform user once per pause episode, not per message.
-    paused: str | None = None
+    # The messaging ingress tells the platform user once per pause episode (unknown head,
+    # preflight refusal), not per message; the drain clears it when the FIFO moves again.
     pause_notified: bool = False
 
     def __post_init__(self):
@@ -217,8 +216,6 @@ class SessionAuthority:
         drain; only the process-local messaging delivery waiters on this session are released,
         with the reason instead of a reply, so an adapter loop is never parked on a turn that
         will not run. The ingress turns that refusal into one user-facing notice per episode."""
-        live = self.sessions[ref.session_id]
-        live.paused = reason
         for row in list_session_admissions(self.db, session_id=ref.session_id):
             admission_id = row['admission_id']
             if admission_id not in self.native_waiters:
@@ -485,7 +482,6 @@ class SessionAuthority:
                 self._pause(ref, exc.reason)
                 return
             # The FIFO is moving again (or empty): the next pause is a new episode.
-            live.paused = None
             live.pause_notified = False
             if row is None:
                 return
