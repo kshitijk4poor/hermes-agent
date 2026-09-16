@@ -162,11 +162,9 @@ def test_pipe_gone_after_kill_falls_back(live_server, monkeypatch):
     # the kernel tears the server's handles down.
     assert _wait_until(lambda: identify_gateway(home, timeout=0.5) is None)
 
-    # Consumer falls back to the state file. That file is a claim, not an
-    # identity: its sha classifies a row only when live_gateway_pid_for_home
-    # verifies the PID as this home's gateway via its live command line
-    # (#110420). A real process wearing a `gateway run` argv stands in for
-    # a gateway that lost its pipe.
+    # Consumer falls back to the state file. Its live pid is THIS test process, whose command
+    # line is not a gateway's, so the record's self-reported SHA must not classify it (#109680):
+    # a fail-open visibility row with state ``unknown``, never ``stale``/``current``.
     import hermes_cli.update_receipt as ur
 
     monkeypatch.setattr(
@@ -217,5 +215,5 @@ def test_pipe_gone_after_kill_falls_back(live_server, monkeypatch):
     assert len(fleet) == 1, fleet
     assert "source" not in fleet[0]
     assert fleet[0]["pid"] == os.getpid()
-    assert fleet[0]["code_sha"] is None
     assert fleet[0]["state"] == "unknown"
+    assert fleet[0]["code_sha"] is None
