@@ -49,6 +49,13 @@ async def test_paused_fifo_releases_the_messaging_waiter_with_one_notice_per_epi
         replies = await asyncio.wait_for(asyncio.gather(first, second), 5)
         assert sum(r is not None and PAUSE_MARKER in r for r in replies) == 1, replies
         assert executed == []
+        # A restart drain is transient: the saved row runs on the next owner, so the notice must
+        # not tell the user to /reset (that would discard the very message that is about to run).
+        from gateway.session_ingress import pause_notice
+        authority.sessions['s'].pause_notified = False
+        draining = pause_notice(authority, ref, 'runtime_draining')
+        assert 'restarting' in draining and '/reset' not in draining, draining
+        authority.sessions['s'].pause_notified = False
         # The operator resumes the FIFO; the saved followers run, no new notice was owed.
         viewer = AuthorityConnection(authority, Peer(), {'user_id': 'human'})
         await viewer.dispatch({'id': 1, 'method': 'prompt.resolve_unknown', 'params': {

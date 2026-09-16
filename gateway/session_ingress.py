@@ -33,6 +33,9 @@ def pause_notice(authority, ref, reason):
     if live.pause_notified:
         return None
     live.pause_notified = True
+    if reason == 'runtime_draining':
+        # Transient: the row runs when the restarted owner drains it, so /reset would be wrong advice.
+        return '⏳ Hermes is restarting — your message is saved and will be answered when it is back.'
     if reason == 'unknown_execution':
         cause = 'a previous turn did not finish when Hermes restarted, so nothing queued after it will run'
     else:
