@@ -11,7 +11,7 @@ def test_direct_query_alias_survives_noninteractive_launch(monkeypatch):
     from hermes_cli import gateway_chat_startup
     seen = []
 
-    async def run(args):
+    async def run(args, emitter=None):
         seen.append(args.q)
         return 0
 

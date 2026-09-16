@@ -8,13 +8,16 @@ from hermes_cli.gateway_client import GatewayClientError
 
 
 class GatewayChatView:
-    def __init__(self, client, snapshot, *, quiet=False):
+    def __init__(self, client, snapshot, *, quiet=False, emitter=None):
         self.client = client
         self.session_id = snapshot["stored_session_id"]
         self.generation = snapshot.get("execution_generation", 0)
         self.prompts = {p["prompt_id"]: p for p in snapshot.get("prompts", [])}
         self.pending = snapshot.get("pending", [])
-        self.quiet = quiet
+        # ``--format stream-json``: stdout belongs to the JSONL protocol, so every human line is
+        # replaced by an emitter event and the terminal record carries the exit code.
+        self.emitter = emitter
+        self.quiet = quiet or emitter is not None
         self.finite = False
         self.streams = {}
         self.completions = {}
@@ -58,6 +61,7 @@ class GatewayChatView:
             admission = params.get("admission_id") or payload.get("admission_id")
             handler = {
                 "message.delta": self._delta, "message.complete": self._complete,
+                "tool.start": self._tool_start, "tool.complete": self._tool_complete,
                 "approval.request": self._request, "clarify.request": self._request,
                 "approval.settled": self._settled, "clarify.settled": self._settled,
             }.get(kind)
@@ -65,9 +69,24 @@ class GatewayChatView:
                 handler(admission, payload)
             self.changed.set()
 
+    def _tool_start(self, admission, payload):
+        if self.emitter is not None:
+            self.emitter.on_tool_progress("tool.started", payload.get("tool_name"), None, payload.get("args"),
+                                          tool_call_id=payload.get("tool_call_id") or None)
+
+    def _tool_complete(self, admission, payload):
+        if self.emitter is not None:
+            self.emitter.on_tool_progress("tool.completed", payload.get("tool_name"), None, payload.get("args"),
+                                          tool_call_id=payload.get("tool_call_id") or None,
+                                          result=payload.get("result"), is_error=payload.get("is_error", False))
+
     def _delta(self, admission, payload):
         text = payload.get("text") or payload.get("delta") or payload.get("content") or ""
-        if isinstance(text, str) and not self.quiet:
+        if not isinstance(text, str):
+            return
+        if self.emitter is not None:
+            self.emitter.on_text_delta(text)
+        elif not self.quiet:
             self.streams[admission] = self.streams.get(admission, "") + text
             print(text, end="", flush=True)
 
@@ -168,8 +187,14 @@ class GatewayChatView:
                         return 3
                     await self.changed.wait()
                 terminal = self.completions[admission]
+                outcome = terminal.get("outcome")
+                if self.emitter is not None:
+                    return self.emitter.emit_result(
+                        {"final_response": terminal.get("text") or terminal.get("content") or "",
+                         "failed": outcome not in ("completed", "cancelled"), "interrupted": outcome == "cancelled"},
+                        session_id=self.session_id, exit_code=130 if outcome == "cancelled" else 0)
                 print(terminal.get("text") or terminal.get("content") or "", flush=True)
-                return 0 if terminal.get("outcome") == "completed" else 1
+                return 0 if outcome == "completed" else 1
             from prompt_toolkit import PromptSession
             from prompt_toolkit.patch_stdout import patch_stdout
             prompt = PromptSession()

@@ -1827,15 +1827,16 @@ _CHAT_PASSTHROUGH = (
 
 def cmd_chat(args):
     """Run interactive chat CLI."""
-    if _bypass_chat_launch(args) or not _resolve_use_tui(args):
+    from hermes_cli.stream_json import stream_json_requested
+    # Structured stdout is a non-interactive protocol: it overrides HERMES_TUI/display.interface too,
+    # so it is decided before the TUI gate and always rides the gateway transport.
+    if stream_json_requested(args) or _bypass_chat_launch(args) or not _resolve_use_tui(args):
         from hermes_cli.gateway_chat_startup import launch_gateway_chat
         sys.exit(launch_gateway_chat(args))
     _apply_safe_mode(args)
     _apply_user_config_bypass(args)
     _guard_noninteractive_user_config(args)
-    from hermes_cli.stream_json import stream_json_requested
-    # Structured stdout is a non-interactive protocol: it overrides HERMES_TUI/display.interface too.
-    use_tui = False if stream_json_requested(args) else _resolve_use_tui(args)
+    use_tui = _resolve_use_tui(args)
 
     _resolve_chat_session_args(args, use_tui)
 
