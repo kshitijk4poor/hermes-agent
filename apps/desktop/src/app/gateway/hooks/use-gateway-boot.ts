@@ -63,8 +63,8 @@ import {
   isCurrentGatewaySwitch,
   registerGatewaySwitchLifecycle
 } from '@/store/gateway-switch'
-import { checkLocalRuntimeUpdate, watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
-import { notify, notifyError } from '@/store/notifications'
+import { watchLocalRuntimeJobs } from '@/store/local-runtime-jobs'
+import { notify, notifyError, RECOVERY_ACTIONS } from '@/store/notifications'
 import {
   $activeGatewayProfile,
   normalizeProfileKey,

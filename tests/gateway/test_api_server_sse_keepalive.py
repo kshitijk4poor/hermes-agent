@@ -69,9 +69,8 @@ async def test_idle_run_events_stream_uses_shared_keepalive_cadence(monkeypatch,
     """``GET /v1/runs/{id}/events`` follows the same keepalive constant as the OpenAI routes."""
     monkeypatch.setattr(api_server, "CHAT_COMPLETIONS_SSE_KEEPALIVE_SECONDS", 0.2)
     from gateway.platforms.api_server_runs import _RunStream
-
-    stream = _RunStream()
-    adapter._run_streams["run_idle"] = stream
+    # The run stream is the fanout log every SSE subscriber reads, not a bare queue.
+    stream = adapter._run_streams["run_idle"] = _RunStream()
     adapter._set_run_status("run_idle", "running")
     monkeypatch.setattr(adapter, "_request_owns_run", lambda request, run_id: True)
 

@@ -139,7 +139,7 @@ class GatewayControlServer:
         self._bind_path: Optional[Path] = None
         self._pointer_file: Optional[Path] = None
         self._file_identities = {}
-        self._handlers: dict[str, Callable[[], dict[str, Any]]] = {
+        self._handlers: dict[str, Callable[..., dict[str, Any]]] = {
             "identify": build_identify_payload, "status": build_status_payload, **(verb_handlers or {})}
 
     async def start(self) -> bool:

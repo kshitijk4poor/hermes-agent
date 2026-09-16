@@ -9,7 +9,7 @@ import { hasClarifyRequest, skipClarifyRequest } from '@/store/clarify'
 import { clearSessionDraft, type ComposerAttachment, isFreshDraftScope } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import { enqueueQueuedPrompt, type QueuedPromptEntry, serverOwnsComposerQueue } from '@/store/composer-queue'
-import { hasMcpSetupRequest, skipMcpSetupRequest } from '@/store/mcp-setup'
+import { hasConnectionRequest, skipConnectionRequest } from '@/store/connection-request'
 import { hasBlockingPromptRequest } from '@/store/prompts'
 
 import { cloneAttachments, type QueueEditState } from '../composer-utils'

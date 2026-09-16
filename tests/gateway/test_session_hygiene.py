@@ -1112,7 +1112,7 @@ async def test_hygiene_does_not_wait_ceiling_after_fence_cancel(
         state = db.get_compression_failure_cooldown(session_id)
         assert state is not None and state["remaining_seconds"] > 0
         assert not any(
-            "Context compression timed out" in s["content"] for s in adapter.sent
+            "took too long" in s["content"] for s in adapter.sent
         ), "fence-cancel is not a summary-model timeout; no timeout toast"
         release_worker.set()
         await asyncio.wait_for(asyncio.to_thread(cleanup_done.wait), timeout=2)

@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
 import { translateNow } from '@/i18n'
+import { requestBackendRestart, requestRoute } from '@/store/recovery-requests'
 
 export type NotificationKind = 'error' | 'warning' | 'info' | 'success'
 
@@ -309,6 +310,7 @@ export function notifyError(
   const readable = readableError(error, fallback)
 
   return notify({
+    action: options.action ?? readable.action,
     kind: 'error',
     title: fallback,
     message: readable.message,

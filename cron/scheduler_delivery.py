@@ -717,16 +717,7 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
     )
     try:
         source_home = get_hermes_home().resolve()
-        from pathlib import Path
-        home = (Path(deferred["home"]) if deferred is not None else
-                get_profile_dir(profile) if profile else source_home).resolve()
-        for_failure = for_failure or bool((deferred or {}).get("for_failure"))
-        from gateway.warning_notifications import warning_notifications_enabled
-        from hermes_cli.config_effective import load_user_config_effective
-        suppress_notification = for_failure and not warning_notifications_enabled(
-            BOT_CHAT_POLICY_PLATFORM, load_user_config_effective(home / "config.yaml"))
-        if deferred is not None and not (home / "state.db").is_file():
-            return f"bot-chat delivery target no longer exists: {home}; do not resend"
+        home = (get_profile_dir(profile) if profile else source_home).resolve()
         # run_one_job/claim_fire attach the durable execution id before delivery. The
         # transient fallback supports direct helper callers, never deduping recurring
         # runs by their (potentially identical) output or previous last_run timestamp.
@@ -737,29 +728,8 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str) -> Optional[str]
             [str(source_home), job_id, str(run_id), str(home)],
             ensure_ascii=False, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
-        if deferred is not None:
-            key = deferred["id"]
         # Read BEFORE discovery: the previous owner may have exited after accepting.
         receipt = read_delivery_result(home, key)
-        if receipt is None and not deferred:
-            from cron.bot_chat_delivery import defer, read_pending
-            from tools.bot_live_delivery import find_canonical_owner
-
-            pending = read_pending(key)
-            # Suppression is a durable disposition, not a send: record it under the producer
-            # lock even when a live owner exists, so the deferred lane never replays it.
-            if (pending is not None or suppress_notification
-                    or (find_canonical_live_owner(home) is None and find_canonical_owner(home))):
-                pending = defer(key, dict(job), content, profile, home,
-                                for_failure=for_failure, suppressed=suppress_notification)
-            if pending is not None:
-                status = pending["status"]
-                target = f"bot-chat:{profile_label}"
-                job.setdefault("_bot_chat_delivery_receipts", {})[target] = {
-                    "status": status, "delivery_id": key}
-                if status == "suppressed":
-                    job["_notification_all_targets_suppressed"] = True
-                return None if status in ("settled", "suppressed") else f"{target} {status} (receipt {key}): completion unverified; do not resend"
         if receipt is None:
             owner = find_canonical_live_owner(home)
             if owner is None:

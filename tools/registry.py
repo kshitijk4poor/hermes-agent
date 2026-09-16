@@ -126,7 +126,7 @@ def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
         for module_name in module_names:
             importlib.import_module(module_name)
         return module_names
-    tools_path = Path(tools_dir) if tools_dir is not None else Path(__file__).resolve().parent
+    tools_path = (Path(tools_dir) if tools_dir is not None else Path(__file__).resolve().parent).resolve()
     cache = _load_discovery_cache()
     fresh_cache: Dict[str, list] = {}
     cache_dirty = False

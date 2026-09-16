@@ -297,60 +297,6 @@ class GatewayProfileReconcileMixin:
         logger.info("[MULTIPLEX] Profile '%s' deleted — %d adapter(s) stopped and unrouted", name, len(adapters))
 
 
-def _profile_lifecycle_verb(runner, *, serve: bool):
-    """Build on the owning loop; socket handlers themselves run on executor threads."""
-    loop = asyncio.get_running_loop()
-
-    async def apply(name):
-        from hermes_cli.profiles import profiles_to_serve, profile_is_parked
-        if not runner._multiplex_on() or not runner._running or runner._served_profile_homes is None:
-            return {"error": "host multiplexer is not ready"}
-        async with runner._reconcile_lock():
-            active = getattr(runner, "_primary_profile_name", None) or "default"
-            if not isinstance(name, str) or not name or name == active:
-                return {"error": "a non-launch profile name is required"}
-            known = dict(runner._served_profile_homes)
-            if not serve:
-                if name not in known:
-                    return {"error": f"profile '{name}' is not served"}
-                await runner._unserve_profile(name, known.pop(name))
-                runner._record_served_profiles(active, list(known.items()))
-                return {"unserved": name, "served_profiles": runner.served_profile_names()}
-            installed = dict(profiles_to_serve(True, include_parked=True))
-            if name not in installed:
-                return {"error": f"unknown profile '{name}'"}
-            if name != "default" and profile_is_parked(installed[name]):
-                return {"error": f"profile '{name}' is parked (gateway.parked)"}
-            if name in known:
-                return {"error": f"profile '{name}' is already served"}
-            known[name] = installed[name]
-            result = await runner._apply_profile_changes(known, [name], [], [], reason="control-socket")
-            if name not in result["served_profiles"]:
-                return {"error": f"profile '{name}' was removed or parked during startup"}
-            return {"served": name, "served_profiles": result["served_profiles"]}
-
-    def handler(params):
-        future = asyncio.run_coroutine_threadsafe(apply(params.get("name")), loop)
-        try:
-            return future.result(timeout=5.0)
-        except TimeoutError:
-            # Keep running: the client must not interpret an incomplete teardown as stopped.
-            return {"pending": True, "served_profiles": runner.served_profile_names()}
-        except Exception as exc:
-            logger.warning("Profile lifecycle request failed", exc_info=True)
-            return {"error": f"{type(exc).__name__}: {exc}"}
-
-    return handler
-
-
-def unserve_profile_verb(runner):
-    return _profile_lifecycle_verb(runner, serve=False)
-
-
-def serve_profile_verb(runner):
-    return _profile_lifecycle_verb(runner, serve=True)
-
-
 def _mcp_config_reconciler(runner=None):
     """Housekeeping chore keeping live MCP servers in step with ``mcp_servers`` on disk, every tick
     after the first (startup discovery owns that one). Reconciling on DRIFT rather than only on a

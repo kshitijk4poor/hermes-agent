@@ -1269,7 +1269,8 @@ def _strip_multiplex_flag(config_path: Path) -> None:
         config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
 
-def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path]) -> None:
+def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path],
+                           sync_imports: bool = False) -> None:
     """Fresh layout: bootstrap dirs, then either seed a model block (no source) or clone
     config files, installed skills (the dashboard's "clone from default" must keep bundled
     AND user-installed skills), and memory/identity files from *source_dir*.

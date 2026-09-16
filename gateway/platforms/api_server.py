@@ -3710,27 +3710,21 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 effective_session_id = result.get("session_id", session_id) if is_dict else session_id
                 turn_messages = self._turn_transcript_messages(history, user_message, result) if is_dict else []
                 effective_runtime = self._effective_turn_runtime(runtime_request, result, usage)
-                from gateway.platforms.api_server_openai_routes import _response_status
-                status = _response_status(result)
+                # Terminal status and flags come from the result (interrupted -> cancelled,
+                # unfinished -> failed); a late steer rides along as ``pending_steer`` for replay.
+                status, fields = _api_runs.terminal_run_status(result if is_dict else {})
                 await queue.put(_event_payload("assistant.completed", {
                     "session_id": effective_session_id, "message_id": message_id,
-                    "content": final_response, "completed": status == "completed",
-                    "partial": bool(result.get("partial")) if is_dict else False,
-                    "interrupted": status == "cancelled", "failed": status == "failed", "runtime": effective_runtime}))
-                # A steer accepted after the final reply lands in result["pending_steer"]; surface
-                # it so clients can replay it rather than lose it.
-                pending_steer = result.get("pending_steer") if is_dict else None
-                completed_payload = {
-                    "session_id": effective_session_id, "message_id": message_id, "completed": status == "completed",
-                    "status": status,
-                    "messages": turn_messages, "usage": usage, "runtime": effective_runtime}
-                if pending_steer:
-                    completed_payload["pending_steer"] = pending_steer
-                await queue.put(_event_payload("run." + status, completed_payload))
+                    "content": final_response, **fields, "runtime": effective_runtime}))
+                await queue.put(_event_payload(f"run.{status}", {
+                    "session_id": effective_session_id, "message_id": message_id, **fields,
+                    "messages": turn_messages, "usage": usage, "runtime": effective_runtime}))
                 self._set_run_status(
-                    run_id, status, session_id=effective_session_id, usage=usage,
-                    last_event="run." + status,
-                    **({"pending_steer": pending_steer} if pending_steer else {}))
+                    run_id, status, session_id=effective_session_id,
+                    # The reply text, so a caller whose stream died can still read it from
+                    # GET /v1/runs/{run_id}; POST /v1/runs already records output in `_finish`.
+                    output=final_response, usage=usage,
+                    last_event=f"run.{status}", **fields)
             except asyncio.CancelledError:
                 self._set_run_status(run_id, "cancelled", last_event="run.cancelled")
                 raise

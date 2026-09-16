@@ -4905,6 +4905,8 @@ def _wizard_post_setup() -> None:
     """Offer to install/start/restart the gateway once at least one platform has progress."""
     print()
     print(color("─" * 58, Colors.DIM))
+    if _served_profile_needs_no_service():
+        return
     service_installed = _is_service_installed()
     service_running = _is_service_running()
 

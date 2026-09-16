@@ -392,7 +392,7 @@ export function useSessionTileDelegate({
             return singleFlightSessionResume(
               storedSessionId,
               () =>
-                requestForSessionProfile<SessionResumeResponse>(owner, requestGateway, 'session.resume', {
+                requestForSessionProfile<SessionResumeResult>(owner, requestGateway, 'session.resume', {
                   session_id: storedSessionId,
                   cols: 96,
                   omit_messages: !authoritativeSnapshot,

@@ -437,8 +437,16 @@ def _(rid, params: dict) -> dict:
         requested = str(params.get("provider") or "").strip() or None
 
         def probe(profile, scoped):
-            return {**check_runtime_readiness(requested, strict_profile_scope=bool(profile)), **scoped}
-        return _readiness_check(rid, params, probe)
+            def resolve():
+                if requested:
+                    from hermes_cli.runtime_provider import resolve_runtime_provider
+                    model, _startup_provider = _resolve_startup_runtime()
+                    return model, resolve_runtime_provider(requested=requested, target_model=model or None)
+                return _resolve_agent_model_runtime(None, None)
+            return {**check_runtime_readiness(requested, strict_profile_scope=bool(profile), resolve=resolve),
+                    **scoped}
+        return _readiness_check(rid, params, probe, probe_key=f"runtime:{requested or ''}",
+                                wait_seconds=_READINESS_SHARE_WAIT_SECONDS)
     except Exception as e:
         return _ok(rid, {"ok": False, "error": str(e)})
 

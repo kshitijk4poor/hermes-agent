@@ -571,7 +571,7 @@ export async function stopGroupThread(group: string, thread: null | string, memb
  *  epoch and discards queued continuations.
  *  Watermarks are per thread+member (`${thread}::${memberKey}`), so parallel
  *  topics never eat each other's deltas. */
-export async function runGroupChatRounds(group: string, members: GroupMember[], thread: string) {
+export async function runGroupChatRounds(group: string, members: GroupMember[], thread: string, failedMembers = new Set<string>()) {
   if (group.startsWith('canonical:')) {throw new Error('Canonical rooms are driven by the gateway')}
 
   const binding = followGroupChat(group, name => {

@@ -1040,7 +1040,7 @@ class TestCuratorFasterPrune:
 
 
 class TestRetiredBotChatDeliveryTimeout:
-    def test_v44_drops_bot_chat_delivery_timeout_with_a_note(self, tmp_path, monkeypatch):
+    def test_v45_drops_bot_chat_delivery_timeout_with_a_note(self, tmp_path, monkeypatch):
         """The removed cron knob is dropped from existing configs with a one-time note;
         sibling cron settings and the rest of the file survive untouched."""
         from hermes_cli.config import DEFAULT_CONFIG
@@ -1048,12 +1048,12 @@ class TestRetiredBotChatDeliveryTimeout:
 
         config_path = tmp_path / "config.yaml"
         config_path.write_text(yaml.safe_dump({
-            "_config_version": 44,
+            "_config_version": 45,
             "cron": {"bot_chat_delivery_timeout_seconds": 900, "max_parallel_jobs": 2},
         }), encoding="utf-8")
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         results = {"env_added": [], "config_added": [], "warnings": []}
-        run_migrations(44, results, quiet=True)
+        run_migrations(45, results, quiet=True)
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         assert "bot_chat_delivery_timeout_seconds" not in raw["cron"]
         assert raw["cron"]["max_parallel_jobs"] == 2

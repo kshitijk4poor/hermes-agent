@@ -186,24 +186,14 @@ export interface McpServerStatus {
   transport: string
 }
 
-export interface ProjectInfo {
-  id: string
-  name: string
-  primary_path?: null | string
-  slug: string
-}
-
-export interface SessionInfo {
-  stored_session_id?: string
-  cwd?: string
-  fast?: boolean
+/** The gateway's `session.info` / resume `info` block — generated from `tui_gateway/contracts`,
+ *  plus the canonical-authority fields the legacy contract does not carry yet
+ *  (`gateway/session_events.py` owner stamps and the durable admission FIFO). */
+export interface SessionInfo extends SessionLiveInfo {
+  execution_epoch?: string
+  execution_generation?: number
+  execution_state?: string
   install_warning?: string
-  lazy?: boolean
-  mcp_servers?: McpServerStatus[]
-  model: string
-  profile_name?: string
-  project?: null | ProjectInfo
-  reasoning_effort?: string
   pending_submissions?: Array<{
     admission_id: string
     input_id?: string
@@ -213,20 +203,8 @@ export interface SessionInfo {
     user: string
     outcome?: string | null
   }>
-  execution_epoch?: string
-  execution_generation?: number
-  execution_state?: string
-  running?: boolean
-  release_date?: string
-  service_tier?: string
-  skills: Record<string, string[]>
-  system_prompt?: string
-  tools: Record<string, string[]>
-  update_behind?: number | null
-  update_command?: string
-  usage?: Usage
-  version?: string
 }
+export type { ProjectInfo }
 
 export interface SudoReq {
   requestId: string

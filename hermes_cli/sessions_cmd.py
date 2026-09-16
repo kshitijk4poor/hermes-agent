@@ -1198,33 +1198,24 @@ def cmd_sessions(args, sessions_parser=None):
     pre = _PRE_DB_HANDLERS.get(action)
     if pre is not None:
         return pre(args)
-    observational = action in _OBSERVATIONAL_DB_ACTIONS
-    from hermes_state import SessionDB, _default_db_path
+    from hermes_state import SessionDB
+    from hermes_constants import get_hermes_home
+    # Verified deletion is an explicit mutation, not a read-only export.
+    deleting_export = (
+        action == "export" and getattr(args, "delete_after_verified", False)
+        and getattr(args, "yes", False) and getattr(args, "session_id", None)
+        and getattr(args, "format", None) in ("md", "qmd")
+    )
+    observational = action in _OBSERVATIONAL_DB_ACTIONS or (action == "export" and not deleting_export)
+    # A served-profile process has no single default home: pass the store path explicitly.
+    path = get_hermes_home() / "state.db"
+    if observational and not path.exists():
+        return _print_empty_store(action, args)
     try:
-        from hermes_state import SessionDB
-        from hermes_constants import get_hermes_home
-        path = get_hermes_home() / "state.db"
-        empty_messages = {
-            "export": "No sessions found.",
-            "list": "No sessions found.",
-            "stats": "Total sessions: 0\nTotal messages: 0",
-            "pinned": "[]" if getattr(args, "json", False) else
-                "No pinned sessions. Pin one with: hermes sessions pin <session_id>",
-        }
-        # Verified deletion is an explicit mutation, not a read-only export.
-        deleting_export = (
-            action == "export" and getattr(args, "delete_after_verified", False)
-            and getattr(args, "yes", False) and getattr(args, "session_id", None)
-            and getattr(args, "format", None) in ("md", "qmd")
-        )
-        read_only = action in empty_messages and not deleting_export
-        if action in empty_messages and not path.exists():
-            print(empty_messages[action])
-            return
-        db = SessionDB(db_path=path, read_only=read_only) if action in empty_messages else SessionDB()
+        db = SessionDB(db_path=path, read_only=observational)
     except Exception as e:
         # mode=ro cannot create the store; a reader on a fresh profile reports empty rather than failing.
-        if observational and not _default_db_path().exists():
+        if observational and not path.exists():
             return _print_empty_store(action, args)
         print("Could not open your session history database. "
               "Run: hermes sessions repair to fix it (a backup is made first).")

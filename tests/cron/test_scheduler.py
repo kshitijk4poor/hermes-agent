@@ -24,20 +24,6 @@ from cron.scheduler import (
 from cron.scheduler_delivery import _resolve_origin, _send_media_via_adapter
 from tools.env_passthrough import clear_env_passthrough
 
-def test_cron_cleanup_worker_inherits_caller_contextvars():
-    """Profile-scoped secrets must remain visible during threaded cleanup."""
-    profile_scope = contextvars.ContextVar("test_cron_cleanup_profile_scope")
-    profile_scope.set("profile-key")
-    observed = []
-
-    assert _run_cron_cleanup_with_timeout(
-        lambda: observed.append(profile_scope.get(None)),
-        job_id="context-scope",
-        label="test cleanup",
-        timeout_seconds=1,
-    )
-    assert observed == ["profile-key"]
-
 def _run_owned_job(job, tmp_path, db=None):
     """Run the production owner bridge, preserving each test's agent/DB probes."""
     from gateway.session_contract import SessionRef
@@ -84,7 +70,19 @@ def _run_owned_job(job, tmp_path, db=None):
     finally:
         if owns_db:
             release(db)
+def test_cron_cleanup_worker_inherits_caller_contextvars():
+    """Profile-scoped secrets must remain visible during threaded cleanup."""
+    profile_scope = contextvars.ContextVar("test_cron_cleanup_profile_scope")
+    profile_scope.set("profile-key")
+    observed = []
 
+    assert _run_cron_cleanup_with_timeout(
+        lambda: observed.append(profile_scope.get(None)),
+        job_id="context-scope",
+        label="test cleanup",
+        timeout_seconds=1,
+    )
+    assert observed == ["profile-key"]
 
 class TestSummarizeCronFailureForDelivery:
     def test_embedded_429_in_source_identifier_is_not_a_rate_limit(self):
@@ -1083,12 +1081,8 @@ class TestRunJobConfigLogging:
             with caplog.at_level(logging.WARNING):
                 _run_owned_job(job, tmp_path)
 
-        # The owner bridge fails closed on a corrupt config before load_config()'s
-        # fallback warning; either message names the file and the parse error.
-        assert any(
-            ("Failed to parse" in r.message or "is invalid" in r.message) and "config.yaml" in r.message
-            for r in caplog.records
-        ), f"Expected a config.yaml parse warning in logs, got: {[r.message for r in caplog.records]}"
+        assert any("formatting error" in r.message and "config.yaml" in r.message for r in caplog.records), \
+            f"Expected a config.yaml parse warning in logs, got: {[r.message for r in caplog.records]}"
 
 
 class TestRunJobConfigEnvVarExpansion:
@@ -1393,7 +1387,7 @@ class TestRunJobModelResolution:
             success, _, _, error = _run_owned_job(job, tmp_path, fake_db)
 
         assert success is False
-        assert "Refusing non-interactive startup" in error
+        assert "Hermes stopped because your settings file" in error
         mock_agent_cls.assert_not_called()
 
 class TestRunJobSkillBacked:

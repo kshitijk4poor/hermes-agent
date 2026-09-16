@@ -547,6 +547,7 @@ export class JsonRpcGatewayClient {
         entries.map(([sid, lastSeen]) => {
           const epoch = this.replayEpochBySession.get(sid) ?? this.replayEpoch
 
+          // `open_requests` on the answer are re-delivered by the channel itself.
           return this.request<{ events?: Array<{ type: string; session_id?: string; seq?: number; payload?: unknown }> }>(
             'session.events.since',
             { session_id: sid, last_seen: lastSeen, ...(epoch ? { replay_epoch: epoch } : {}) },

@@ -81,7 +81,7 @@ class TestCronRunJobGuard:
             "cron_job": self._job(), "extra_prompt": None, "request_id": "guard-fire"}))
         previous = current_execution()
         try:
-            with pytest.raises(RuntimeError, match="Refusing non-interactive startup"):
+            with pytest.raises(RuntimeError, match="Hermes stopped because your settings file"):
                 await execute(owner, ref, admission, policy)
             success, output_doc, final_response, error = owner.pending_results["guard-fire"]["result"]["cron_result"]
             assert current_execution() is previous

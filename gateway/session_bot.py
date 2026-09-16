@@ -77,6 +77,12 @@ def _result(authority, record):
     if saved is not None:
         reply = saved['result'].get('final_response', '')
         status = 'settled' if row['outcome'] == 'completed' else 'failed'
+        # A successful bare silence marker is a delivery decision (same rule as the gateway and
+        # the live Bot Chat completion): the turn stays in the target's transcript, the sender
+        # never sees the marker as prose.
+        from gateway.response_filters import is_intentional_silence_response
+        if status == 'settled' and is_intentional_silence_response(reply):
+            reply = ''
     elif record.get('status') in {'settled', 'failed'}:
         status = record['status']
     return {k: v for k, v in dict(status=status, delivery_id=record['delivery_id'],

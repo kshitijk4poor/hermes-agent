@@ -627,12 +627,53 @@ class WebhookAdapter(BasePlatformAdapter):
         if route_config.get("deliver_only"):
             return await self._handle_deliver_only(prompt, payload, route_config, route_name, event_type, delivery_id,
                                                    profile)
+        coalesce = route_config.get("coalesce")
+        # A coalesced event waits in memory before it is durably admitted, so the ledger cannot dedupe
+        # a provider retry inside the window; the in-memory idempotency guard fills that gap here.
+        if isinstance(coalesce, dict) and not self._record_delivery_id(delivery_id, now):
+            logger.info("[webhook] Skipping duplicate delivery %s", delivery_id)
+            return web.json_response({"status": "duplicate", "delivery_id": delivery_id}, status=200)
+        if isinstance(coalesce, dict) and self._coalescer.enqueue(
+                route_name=route_name, coalesce=coalesce, payload=payload, event_type=event_type, prompt=prompt,
+                delivery_id=delivery_id, now=now, route_config=route_config, profile=profile):
+            return web.json_response({"status": "coalesced", "route": route_name, "event": event_type,
+                                      "delivery_id": delivery_id}, status=202)
         return await self._dispatch_agent_run(request, route_config, route_name, profile, payload, prompt, event_type,
                                         delivery_id, now)
 
     async def _dispatch_agent_run(self, request, route_config: dict, route_name: str, profile, payload: Any, prompt: str,
                             event_type: str, delivery_id: str, now: float) -> "web.Response":
         """Acknowledge only after the authority commits the immutable delivery."""
+        logger.info("[webhook] %s event=%s route=%s prompt_len=%d delivery=%s", request.method, event_type, route_name,
+                    len(prompt), delivery_id)
+        outcome = await self._admit_agent_run(payload, prompt, delivery_id, now, route_config=route_config,
+                                              route_name=route_name, profile=profile, event_type=event_type)
+        if outcome is None:
+            return _json_error("Admission unavailable; retry this delivery", 503)
+        if outcome == "duplicate":
+            return web.json_response({"status": "duplicate", "delivery_id": delivery_id}, status=200)
+        return web.json_response({"status": "accepted", "route": route_name, "event": event_type,
+                                  "delivery_id": delivery_id}, status=202)
+
+    def _spawn_agent_run(self, payload: Any, prompt: str, delivery_id: str, now: float, *, route_config: dict,
+                         route_name: str, profile, event_type: str) -> "asyncio.Task":
+        """Coalesced-path dispatch (settled timer / disconnect flush): admit the merged event as a task
+        so ``WebhookCoalescer.flush`` can await the hand-off. The HTTP ack for these deliveries was
+        already ``coalesced``; an admission failure is logged, never retried by the producer."""
+        async def _admit_or_log():
+            outcome = await self._admit_agent_run(payload, prompt, delivery_id, now, route_config=route_config,
+                                                  route_name=route_name, profile=profile, event_type=event_type)
+            if outcome is None:
+                logger.error("[webhook] Coalesced delivery %s on route %s was not admitted", delivery_id, route_name)
+        task = asyncio.create_task(_admit_or_log())
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
+    async def _admit_agent_run(self, payload: Any, prompt: str, delivery_id: str, now: float, *, route_config: dict,
+                               route_name: str, profile, event_type: str) -> Optional[str]:
+        """Record delivery info and admit the run through the durable producer (shared by the immediate
+        and coalesced paths). ``"accepted"`` / ``"duplicate"``, or None when admission failed."""
         # delivery_id in the session key → concurrent webhooks on one route get independent runs.
         session_chat_id = f"webhook:{route_name}:{delivery_id}"
         # ``profile`` rides along so the reply leg (``send`` → ``_deliver_cross_platform``) egresses through
@@ -651,23 +692,21 @@ class WebhookAdapter(BasePlatformAdapter):
             source.profile = profile
         event = MessageEvent(text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload,
                              message_id=delivery_id, timestamp=datetime.fromtimestamp(0, timezone.utc))
-        logger.info("[webhook] %s event=%s route=%s prompt_len=%d delivery=%s", request.method, event_type, route_name,
-                    len(prompt), delivery_id)
         from gateway.platforms.webhook_ingress import admit_producer
         try:
             receipt = await admit_producer(self, event)
         except Exception:
             logger.exception("[webhook] Durable admission failed for %s", delivery_id)
-            return _json_error("Admission unavailable; retry this delivery", 503)
+            return None
         if getattr(event, '_webhook_duplicate', False):
-            return web.json_response({"status": "duplicate", "delivery_id": delivery_id}, status=200)
+            return "duplicate"
         from gateway.session_authorities import active_authority, authority_for_profile_id
         runner = self._message_handler.__self__
         authority = authority_for_profile_id(runner, receipt.ref.profile_id) or active_authority(runner)
         task = asyncio.create_task(self._finalize_delivery(event, authority, receipt))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
-        return task
+        return "accepted"
 
     async def _finalize_delivery(self, event, authority, receipt):
         from hermes_state_runtime import get_session_admission

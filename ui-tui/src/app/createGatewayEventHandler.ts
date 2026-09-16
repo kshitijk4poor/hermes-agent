@@ -36,6 +36,7 @@ import type { GatewayEventHandlerContext, NoticeLevel } from './interfaces.js'
 import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { markBubbleShown, newlyStartedRows } from './pendingBubbles.js'
 import { flashGoodVibes, flashPet } from './petFlashStore.js'
+import { forgetServerRequest } from './serverRequestStore.js'
 import { captureDestination, isCurrentDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
 import { getTurnState } from './turnStore.js'
@@ -835,11 +836,11 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       }
     }
 
-    const settled = ev as unknown as { type: string; payload?: { prompt_id?: string } }
+    if (ev.type === 'approval.settled' || ev.type === 'clarify.settled') {
+      const kind = ev.type === 'approval.settled' ? 'approval' : 'clarify'
+      const promptId = ev.payload?.prompt_id
 
-    if (settled.type === 'approval.settled' || settled.type === 'clarify.settled') {
-      const kind = settled.type === 'approval.settled' ? 'approval' : 'clarify'
-      patchOverlayState(previous => previous[kind]?.sharedControl?.prompt_id === settled.payload?.prompt_id
+      patchOverlayState(previous => previous[kind]?.sharedControl?.prompt_id === promptId
         ? { ...previous, [kind]: null } : previous)
 
       return
@@ -886,7 +887,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           return
         }
 
-        const info = { ...current, ...incoming }
+        let info: SessionInfo = { ...current, ...incoming }
 
         // A busy-time admission painted no bubble at submit; paint it when the
         // authority starts it, so it lands after the previous assistant reply.
@@ -1421,78 +1422,23 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         return
       }
 
-      case 'clarify.request': {
-        if (!ev.payload) {
-          return
-        }
-
-        const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
-
-        const sharedControl = shared.prompt_id && ev.session_id && typeof shared.execution_generation === 'number'
-          ? { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id } : undefined
-
-        const batch = (ev.payload.questions ?? [])
-          .filter(q => typeof q?.qid === 'string' && q.qid && typeof q?.question === 'string' && q.question.trim())
-          .map(q => ({
-            choices: q.choices && q.choices.length > 0 ? q.choices : null,
-            multiSelect: q.multi_select === true,
-            qid: q.qid,
-            question: q.question.trim()
-          }))
-
-        patchOverlayState({
-          clarify: batch.length
-            ? {
-                answers: ev.payload.answers ?? {},
-                choices: null,
-                question: '',
-                questions: batch,
-                requestId: shared.prompt_id ?? ev.payload.request_id, sharedControl
-              }
-            : {
-                choices: ev.payload.choices ?? null,
-                question: ev.payload.question ?? '',
-                requestId: shared.prompt_id ?? ev.payload.request_id, sharedControl
-              }
-        })
-        setStatus('waiting for input…')
-        ringPromptBell()
-
-        return
-      }
+      case 'request.cancel': {
+        // The backend withdrew a server→client request (timeout / interrupt /
+        // session close): tear down whichever card carries that id. A clarify
+        // that timed out is persisted as an abandoned prompt by tool.complete.
+        const id = ev.payload?.id
 
         if (!id) {
           return
         }
 
-        const shared = ev.payload as typeof ev.payload & { prompt_id?: string; execution_generation?: number }
+        // A password/secret/vault card that timed out vanished silently; say
+        // what happened and how to get it back. Clarify already records its
+        // own "(timed out)" line via tool.complete.
+        const timeoutNotice = promptTimeoutNotice(ev.payload?.method, ev.payload?.reason)
 
-        const sharedControl = shared.prompt_id && ev.session_id && typeof shared.execution_generation === 'number'
-          ? { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id } : undefined
-
-        const description = String(ev.payload.description ?? 'dangerous command')
-        // Only an explicit false (tirith warning) drops the permanent-allow option.
-        const allowPermanent = ev.payload.allow_permanent !== false
-
-        patchOverlayState({
-          approval: {
-            allowPermanent,
-            sharedControl,
-            choices: ev.payload.choices,
-            command: String(ev.payload.command ?? ''),
-            description,
-            smartDenied: ev.payload.smart_denied === true
-          }
-        })
-        setStatus('approval needed')
-        ringPromptBell()
-
-        return
-      }
-
-      case 'sudo.request':
-        if (!ev.payload) {
-          return
+        if (timeoutNotice) {
+          sys(timeoutNotice)
         }
 
         forgetServerRequest(id)
@@ -1509,6 +1455,67 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
           return changed ? next : prev
         })
+
+        return
+      }
+
+      // Canonical gateways (`gateway/session_pending_controls.py`) publish
+      // generation-bound shared controls as events carrying `prompt_id`; they
+      // are answered through approval.respond / clarify.respond, never through
+      // a server→client request frame (that is the legacy tui_gateway path in
+      // createServerRequestHandler).
+      case 'clarify.request': {
+        const shared = ev.payload
+
+        if (!shared?.prompt_id || !ev.session_id || typeof shared.execution_generation !== 'number') {
+          return
+        }
+
+        const sharedControl = { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id }
+
+        const batch = (shared.questions ?? [])
+          .filter(q => typeof q?.qid === 'string' && q.qid && typeof q?.question === 'string' && q.question.trim())
+          .map(q => ({
+            choices: q.choices && q.choices.length > 0 ? q.choices : null,
+            multiSelect: q.multi_select === true,
+            qid: q.qid,
+            question: q.question.trim()
+          }))
+
+        patchOverlayState({
+          clarify: batch.length
+            ? { answers: shared.answers ?? {}, choices: null, question: '', questions: batch, requestId: shared.prompt_id, sharedControl }
+            : { choices: shared.choices ?? null, question: shared.question ?? '', requestId: shared.prompt_id, sharedControl }
+        })
+        setStatus('waiting for input…')
+        ringPromptBell()
+
+        return
+      }
+
+      case 'approval.request': {
+        const shared = ev.payload
+
+        if (!shared?.prompt_id || !ev.session_id || typeof shared.execution_generation !== 'number') {
+          return
+        }
+
+        const sharedControl = { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id }
+
+        patchOverlayState({
+          approval: {
+            // Only an explicit false (tirith warning) drops the permanent-allow option.
+            allowPermanent: shared.allow_permanent !== false,
+            choices: shared.choices,
+            command: String(shared.command ?? ''),
+            description: String(shared.description ?? 'dangerous command'),
+            requestId: shared.prompt_id,
+            sharedControl,
+            smartDenied: shared.smart_denied === true
+          }
+        })
+        setStatus('approval needed')
+        ringPromptBell()
 
         return
       }

@@ -109,7 +109,7 @@ def cmd_tools(args):
 def cmd_insights(args):
     db = None
     try:
-        from hermes_state import SessionDB, _default_db_path
+        from hermes_state import SessionDB
         from agent.insights import InsightsEngine
         from hermes_cli.config import get_hermes_home
         path = get_hermes_home() / "state.db"

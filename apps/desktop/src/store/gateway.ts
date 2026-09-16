@@ -42,6 +42,13 @@ import { stampSecondaryProfileOwner } from '@/store/session-event-provenance'
 
 const normKey = (profile: string | null | undefined): string => (profile ?? '').trim() || 'default'
 
+// Dial intent callers attach to a user-initiated open. The canonical
+// `hermes gateway ensure` path has no local slot pool, so the hint changes
+// nothing about the dial itself; it survives as the option shape the SDK,
+// Settings scopes and session creation pass so an explicit user gesture stays
+// distinguishable from ambient hydration at the call site.
+export type SpawnPriority = 'foreground' | 'background'
+
 // Read connection state through a call so TS control-flow analysis doesn't
 // narrow the getter to a constant across guards (it genuinely changes).
 const isOpen = (gateway: HermesGateway | null): boolean => gateway?.connectionState === 'open'
@@ -1233,12 +1240,11 @@ export async function requestGatewayForProfile<T>(
   params: Record<string, unknown> = {},
   timeoutMs?: number,
   signal?: AbortSignal,
-  { spawnPriority = 'background' }: { spawnPriority?: SpawnPriority } = {}
+  // Dial intent (#111651): accepted so Settings-scoped callers keep one call
+  // shape; the canonical ensure path has no slot to reserve.
+  _options: { spawnPriority?: SpawnPriority } = {}
 ): Promise<T> {
-  // A user-initiated Settings-scoped RPC (the Vault tab's "Applies to" pick)
-  // dials `foreground` so a cold profile spawn is not queued behind background
-  // work (#111651); ambient callers keep the background default.
-  const route = await gatewayForProfile(profile, true, spawnPriority)
+  const route = await gatewayForProfile(profile, true)
 
   try {
     if (!route.gateway) {
@@ -1270,11 +1276,10 @@ export async function requestGatewayForProfile<T>(
  * sources from sharing a socket. Only null/empty ids retain the v1 profile
  * resolver; explicit `local` is a registry source and must use getConnectionFor.
  *
- * `spawnPriority` defaults to 'background' like every other dial in this file.
- * A user gesture that reaches the pool through this RPC path (first send on a
- * fresh chat, "New session", an explicit Bot Chat open) passes 'foreground' so
- * its cold spawn takes the pool's reserved interactive slot instead of queuing
- * behind roster hydration (#102281 primitive; #105104 symptom).
+ * `spawnPriority` marks a user gesture that reaches this RPC path (first send on
+ * a fresh chat, "New session", an explicit Bot Chat open) as 'foreground'
+ * (#102281 primitive; #105104 symptom). The canonical ensure dial has no slot
+ * to reserve, so the tag is carried, not acted on.
  */
 export async function requestGatewayForAgent<T>(
   connectionId: null | string,
@@ -1304,7 +1309,7 @@ export async function requestGatewayForAgent<T>(
     return requestGatewayForProfile<T>(key, method, params, timeoutMs, signal, { spawnPriority })
   }
 
-  if (await ridesPrimaryBackend(connectionId, key, spawnPriority)) {
+  if (await isAttachedSharedRemote(connectionId, key)) {
     return requestOnPrimaryGateway<T>(method, { ...params, profile: key }, timeoutMs, signal)
   }
 
@@ -1327,7 +1332,9 @@ export async function requestGatewayForAgent<T>(
   entry.activeRequests += 1
 
   try {
-    await openSecondaryForRequest(entry, spawnPriority)
+    if (!isOpen(entry.gateway)) {
+      await openSecondary(entry)
+    }
 
     const result = await (timeoutMs === undefined && signal === undefined
       ? entry.gateway.request<T>(method, params)
@@ -1504,13 +1511,12 @@ export function retainGatewayForRelay(connectionId: null | string, profile: stri
  * for the whole sequence. Primary/shared-primary routes return a no-op release.
  *
  * `spawnPriority` follows requestGatewayForAgent: the retain is the FIRST dial
- * of a session-create gesture, so a user click passes 'foreground' here or the
- * cold spawn still queues behind background hydration before the create RPC.
+ * of a session-create gesture, so a user click passes 'foreground' here.
  */
 export async function retainGatewayForAgent(
   connectionId: null | string,
   profile: string,
-  { spawnPriority = 'background' }: { spawnPriority?: SpawnPriority } = {}
+  _options: { spawnPriority?: SpawnPriority } = {}
 ): Promise<() => void> {
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
@@ -1518,12 +1524,12 @@ export async function retainGatewayForAgent(
   if (scope === key) {
     // Plain-profile route: gatewayForProfile's request lease IS the retain —
     // hold it until the caller releases.
-    const route = await gatewayForProfile(key, true, spawnPriority)
+    const route = await gatewayForProfile(key, true)
 
     return route.release
   }
 
-  if (isPrimaryRegistryRoute(connectionId, key) || (await ridesPrimaryBackend(connectionId, key, spawnPriority))) {
+  if (isPrimaryRegistryRoute(connectionId, key) || (await isAttachedSharedRemote(connectionId, key))) {
     // Primary socket stays open for the window lifetime — no secondary to hold.
     return () => undefined
   }
@@ -1579,7 +1585,7 @@ export async function retainGatewayForAgent(
 
   try {
     if (!isOpen(entry.gateway)) {
-      await openSecondary(entry, spawnPriority)
+      await openSecondary(entry)
     }
   } catch (error) {
     release()
@@ -1856,8 +1862,12 @@ export async function ensureGatewayForAgent(
     return !signal?.aborted
   }
 
+  const activationEpoch = beginGatewayActivation()
+
   if (await isAttachedSharedRemote(connectionId, profile)) {
-    return Boolean(isOpen(g.primaryGateway) && !signal?.aborted)
+    // A retained primary can be open while the foreground still points at a
+    // different source. Reusing its socket must also move the active route.
+    return Boolean(isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch))
   }
 
   if (!window.hermesDesktop?.getConnectionFor) {

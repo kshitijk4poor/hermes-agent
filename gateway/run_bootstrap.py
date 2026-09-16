@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import threading
-from typing import Optional
+from typing import Any, Optional
 
 from gateway.config import GatewayConfig
 
@@ -225,6 +225,7 @@ async def _start_gateway_start_control_socket(runner):
         # failure only means consumers fall back to the process-scan/state-file layer, exactly as before
         # this feature. See #92091.
         from gateway.control_socket import GatewayControlServer, build_identify_payload
+        from gateway.run_profile_reconcile import migrate_profile_identity_verb
         descriptor = runner.session_runtime_descriptor
 
         def _identify_runtime():
@@ -284,7 +285,8 @@ async def _start_gateway_start_control_socket(runner):
 
         _control_server = GatewayControlServer(
             verb_handlers={"pause-for-update": _pause_for_update_handler, "identify": _identify_runtime,
-                           "rescan-profiles": _rescan_profiles_handler})
+                           "rescan-profiles": _rescan_profiles_handler,
+                           "migrate-profile-identity": migrate_profile_identity_verb(runner)})
         _control_server.ticket_store = runner.session_ticket_store
         if not await _control_server.start():
             _control_server = None
@@ -302,7 +304,7 @@ async def _start_gateway_start_control_socket(runner):
 def _start_gateway_start_cron_and_housekeeping(runner):
     """Start the cron scheduler thread + gateway housekeeping thread; returns
     ``(cron_stop, cron_provider, cron_thread, housekeeping_thread)``."""
-    from gateway.run import (Any, Dict, Platform, _cron_tick_profile_homes, _start_gateway_housekeeping, asyncio, logger, threading)
+    from gateway.run import (Dict, Platform, _cron_tick_profile_homes, _start_gateway_housekeeping, asyncio, logger, threading)
     # The event loop is passed so cron delivery can use live adapters (E2EE support).
     from cron.scheduler_provider import (
         InProcessCronScheduler, resolve_cron_scheduler, scheduler_for_profile_mode)
@@ -335,9 +337,10 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     if isinstance(cron_provider, InProcessCronScheduler):
         cron_start_kwargs["can_dispatch"] = lambda: not (
             runner._draining or runner._external_drain_active)
-    cron_thread = threading.Thread(
-        target=cron_provider.start, args=(cron_stop,), kwargs=cron_start_kwargs, daemon=True,
-        name="cron-scheduler")
+    # Supervised: a ticker that dies without a stop request is respawned by housekeeping (#111010).
+    from cron.scheduler_thread import SupervisedTickerThread
+    cron_thread = SupervisedTickerThread(
+        cron_provider.start, args=(cron_stop,), kwargs=cron_start_kwargs, stop_event=cron_stop)
     from gateway.runtime_ownership import process_ownership
     process_ownership.start_writer(cron_thread)
 
@@ -363,7 +366,7 @@ def _start_gateway_start_cron_and_housekeeping(runner):
     housekeeping_thread = threading.Thread(
         target=_start_gateway_housekeeping, args=(cron_stop,),
         kwargs={"adapters": runner.adapters, "loop": asyncio.get_running_loop(),
-                "cron_provider": cron_provider, "runner": runner},
+                "cron_provider": cron_provider, "runner": runner, "cron_thread": cron_thread},
         daemon=True, name="gateway-housekeeping")
     process_ownership.start_writer(housekeeping_thread)
     return cron_stop, cron_provider, cron_thread, housekeeping_thread
@@ -371,7 +374,7 @@ def _start_gateway_start_cron_and_housekeeping(runner):
 
 async def _start_gateway_shutdown_tail(
     runner, _control_server, cron_stop: threading.Event, cron_provider,
-    cron_thread: threading.Thread, housekeeping_thread: threading.Thread,
+    cron_thread: Any, housekeeping_thread: threading.Thread,
     _planned_stop_watcher_stop: threading.Event, _planned_stop_watcher_thread: threading.Thread,
     _signal_initiated_shutdown: list) -> bool:
     """Post-``wait_for_shutdown`` teardown; returns the process exit verdict (True = exit 0)."""

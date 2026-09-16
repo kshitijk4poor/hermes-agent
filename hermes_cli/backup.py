@@ -563,6 +563,27 @@ def _restore_epoch_source(src: Path, dst: Path):
 def _restore_db_pages(src: Path, dst: Path) -> bool:
     """Restore snapshot *src* into live *dst* through the backup() API; unlink+move fallback.
 
+    Writing pages into the live file preserves its inode and WAL state, so other holders (gateway,
+    dashboard, another CLI) see the restored data instead of stale pages from a replaced inode.
+    The fallback runs ONLY when no other process or in-process connection holds the file
+    (replacing the inode under a live holder is the #90950 split-brain); otherwise it fails closed
+    (``False``) and the caller reports the file as skipped.
+    """
+    try:
+        with closing(sqlite3.connect(str(dst))) as dst_conn:
+            # Checkpoint first so the backup starts clean rather than writing on top of a deep WAL.
+            with suppress(Exception):
+                dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            with closing(sqlite3.connect(f"file:{src}?mode=ro", uri=True)) as src_conn:
+                src_conn.backup(dst_conn)
+        with suppress(Exception):
+            dst.chmod(src.stat().st_mode)
+        return True
+    except Exception as exc:
+        logger.warning("SQLite safe restore failed for %s -> %s: %s", src, dst, exc)
+        return _unlink_move_restore_db(src, dst)
+
+
     ZipFile.write finalizes its destination member while unwinding a source-read
     failure, so the partial bytes can otherwise become a CRC-valid archive member.
     This runs immediately after that failed write, so the dropped bytes are the tail
@@ -586,53 +607,10 @@ def _write_zip_file(zf: zipfile.ZipFile, path: Path, arcname: str) -> None:
     """Write one member while keeping a failed partial write out of the central directory."""
     filelist_len = len(zf.filelist)
     try:
-        with closing(sqlite3.connect(str(dst))) as dst_conn:
-            # Checkpoint first so the backup starts clean rather than writing on top of a deep WAL.
-            with suppress(Exception):
-                dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            with closing(sqlite3.connect(f"file:{src}?mode=ro", uri=True)) as src_conn:
-                src_conn.backup(dst_conn)
-        with suppress(Exception):
-            dst.chmod(src.stat().st_mode)
-        return True
-    except Exception as exc:
-        logger.warning("SQLite safe restore failed for %s -> %s: %s", src, dst, exc)
-        return _unlink_move_restore_db(src, dst)
-
-
-def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
-    """Fallback restore: unlink+move. Only safe when no process holds the DB open.
-
-    Replacing the inode under a live holder is the #90950 corruption class (the holder keeps
-    writing through a deleted-inode fd and loses its WAL index), so fail closed. The foreign-pid
-    scan excludes THIS process, so ``offline_file_access`` also fails CLOSED on any live
-    in-process connection to *dst* and holds the connection-lifecycle lock across the swap.
-    """
-    from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
-    try:
-        holders = _foreign_db_holder_pids(dst)
-        if holders:
-            logger.error("Refusing unlink+move restore of %s: process(es) %s still "
-                         "hold the database or its WAL open. Stop them and retry.", dst, holders)
-            return False
-        with offline_file_access(dst, what="unlink+move restore of"):
-            tmp = dst.parent / f".{dst.name}.snap_restore"
-            shutil.copy2(src, tmp)
-            dst.unlink(missing_ok=True)
-            # The snapshot owns no WAL, so any -wal/-shm here belongs to the DB just unlinked (a
-            # killed gateway leaves them — exactly when a restore runs); SQLite would replay that
-            # foreign WAL over the restored file: "malformed" or resurrected post-snapshot rows.
-            for _sidecar_suffix in ("-wal", "-shm", "-journal"):
-                dst.with_name(dst.name + _sidecar_suffix).unlink(missing_ok=True)
-            shutil.move(str(tmp), str(dst))
-        return True
-    except LiveConnectionError as exc2:
-        logger.error("Refusing unlink+move restore of %s: %s Close the in-process "
-                     "database handles (or restart Hermes) and retry.", dst, exc2)
-        return False
-    except Exception as exc2:
-        logger.error("Fallback restore also failed for %s -> %s: %s", src, dst, exc2)
-        return False
+        zf.write(path, arcname=arcname)
+    except Exception:
+        _discard_failed_zip_members(zf, filelist_len)
+        raise
 
 
 def _zip_sqlite_snapshot(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, out_path: Path) -> Optional[int]:

@@ -372,7 +372,7 @@ export function ActiveSessionSwitcher({
         // wipe the live-session list: live sessions still render and the
         // resumable history degrades on its own.
         const canonicalList = gw.isCanonical
-          ? gw.request<{ scope?: string; sessions?: (SessionListItem & { running?: boolean })[] }>('session.list', {
+          ? gw.request<{ scope?: string; sessions?: (SessionListRow & { running?: boolean })[] }>('session.list', {
               limit: 200
             })
           : null
@@ -390,7 +390,7 @@ export function ActiveSessionSwitcher({
           canonicalList
             ? Promise.resolve({ sessions: [] })
             : includeHistory
-              ? gw.request<SessionListResponse>('session.list', { limit: 200 })
+              ? gw.request<SessionListResult>('session.list', { limit: 200 })
               : Promise.resolve(null)
         ])
 

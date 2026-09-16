@@ -537,13 +537,16 @@ def test_delivery_pins_the_hermes_entrypoint_beside_this_interpreter(tmp_path, m
 
     calls = _capture_spawn(monkeypatch)
     home = _managed_home(tmp_path, teammates=("researcher",), peers=("spark",))
+    _canonical_target(monkeypatch, home / "profiles" / "researcher")
     agent = _FakeAgent(home, title="Bot Chat")
 
+    # A local teammate is admitted through the profile authority (no inference child), but the
+    # runner argv still names the pinned entrypoint so its basename-matched helpers stay compatible.
     result = json.loads(
         bot_mode_dm.message_agent_tool(target="researcher", message="ping", agent=agent)
     )
     assert result["status"] == "queued"
-    mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
+    mode, _dm_file, transport_argv, _profile_home = _runner_parts(calls[0]["command"])
     assert mode == "query-file"
     assert transport_argv[0] == str(hermes_entry)
     assert transport_argv[1:] == ["-p", "researcher", "chat", "--in", "~", "-c", "Bot Chat",
@@ -552,8 +555,8 @@ def test_delivery_pins_the_hermes_entrypoint_beside_this_interpreter(tmp_path, m
     result2 = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
     )
-    assert result2["status"] == "queued"
-    mode, _dm_file, transport_argv = _runner_parts(calls[1]["command"])
+    assert result2["status"] == "sent"
+    mode, _dm_file, transport_argv, _profile_home = _runner_parts(calls[1]["command"])
     assert mode == "stdin"
     assert transport_argv == [str(hermes_entry), "-p", "default", "peer", "dm", "spark"]
 
@@ -860,7 +863,7 @@ def test_local_runner_sends_only_argv_author_to_authority(tmp_path, monkeypatch,
     monkeypatch.setenv(TURN_AUTHOR_ENV, json.dumps({"id": "bot:previous", "name": "previous", "is_bot": True}))
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("no local inference child"))
     waited = []
-    monkeypatch.setattr(bot_mode_dm, "_wait_live_dm", lambda home, key: waited.append((home, key)) or 0)
+    monkeypatch.setattr(bot_mode_dm, "_wait_live_dm", lambda home, key, **_kw: waited.append((home, key)) or 0)
     command = bot_mode_dm._delivery_command(
         ["hermes", "-p", "researcher"], str(dm_file), stdin_file=False,
         profile_home=target, author=author,

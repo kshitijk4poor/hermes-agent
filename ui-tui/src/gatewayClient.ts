@@ -544,7 +544,10 @@ export class GatewayClient extends EventEmitter {
               void this.requestOverWebSocket<{session_create: CreationContract}>('runtime.describe').then(description => {
                 this.creationContract = description.session_create
 
-                if (this.ws === ws) { this.publish({ type: 'gateway.ready', payload: {} }) }
+                // The canonical gateway has no ready frame (readiness is the discovery
+                // grant + runtime.describe); publish a client-local ready with no skin so
+                // the renderer boots on its default theme.
+                if (this.ws === ws) { this.publish({ type: 'gateway.ready', payload: {} } as unknown as AnyGatewayEvent) }
               }).catch(error => {
                 this.publish({ type: 'gateway.start_timeout', payload: {
                   python: 'runtime.describe', cwd: '', stderr_tail: String(error)
@@ -794,6 +797,7 @@ export class GatewayClient extends EventEmitter {
     this.disposed = true
     this.localGeneration++
     this.clearReconnect()
+    this.reconnectAttempts = 0
     this.channel.stopHeartbeat()
     this.lifecycle(`[lifecycle] GatewayClient.kill reason=${reason} (detach only)`)
     this.closeGatewaySocket()

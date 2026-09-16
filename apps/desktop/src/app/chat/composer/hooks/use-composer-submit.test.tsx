@@ -7,7 +7,6 @@ import { PaneVisibleContext } from '@/components/pane-shell/pane-visibility'
 import { $clarifyRequests } from '@/store/clarify'
 import type { ComposerAttachment } from '@/store/composer'
 import { $queuedPromptsBySession, clearQueuedPrompts, getQueuedPrompts } from '@/store/composer-queue'
-import { $gateway } from '@/store/gateway'
 import {
   clearAllPrompts,
   hasBlockingPromptRequest,
@@ -15,6 +14,7 @@ import {
   setSecretRequest,
   setSudoRequest
 } from '@/store/prompts'
+import { hasOpenServerRequest, rememberServerRequest, resetServerRequestsForTests } from '@/store/server-requests'
 import { $connection } from '@/store/session'
 
 import { type ComposerTarget, requestComposerSubmit } from '../focus'
@@ -628,7 +628,7 @@ describe('useComposerSubmit with a clarify parked on the session', () => {
     })
 
     await waitFor(() => expect(onSteer).toHaveBeenCalledWith('change course', 'interrupt'))
-    expect(gatewayRequest).toHaveBeenCalledWith('clarify.respond', { request_id: 'req-runtime-session', answer: '' })
+    expect(respond).toHaveBeenCalledWith({ answer: '' })
   })
 
   it('leaves the question alone for an empty Enter (Stop, not an answer)', () => {

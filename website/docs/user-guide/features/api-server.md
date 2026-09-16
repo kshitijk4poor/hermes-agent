@@ -651,6 +651,7 @@ and hosted-room approval restrictions still apply.
 Answer a canonical clarification with `request_id`, `execution_generation`, and
 `answer` (a string). This authenticated endpoint and WebSocket `clarify.respond`
 resolve the same waiting tool; answering does not submit another inference turn.
+MCP trust-gate consent — a write-capable tool on a server configured `trust: untrusted` — surfaces the same way: the run emits an `approval.request` event and parks in `waiting_for_approval` until this endpoint resolves it (`once` runs the tool, `deny` blocks it).
 
 ## Jobs API (background scheduled work)
 

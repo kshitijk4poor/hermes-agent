@@ -28,6 +28,37 @@ _OWNER_KEYS = ("profile_home", "session_id", "lease_id", "live_session_id")
 _TERMINAL = frozenset({"settled", "failed", "cancelled", "ambiguous"})
 
 
+def _bot_chat_tip(home: Path) -> str | None:
+    """Current Bot Chat tip id, or None when the profile has no store or no Bot Chat yet."""
+    from hermes_state import SessionDB
+
+    if not (home / 'state.db').is_file():
+        return None
+    db = SessionDB(db_path=home / 'state.db', read_only=True)
+    try:
+        row = db.get_session_by_title('Bot Chat')
+        return db.get_compression_tip(row['id']) if row else None
+    finally:
+        db.close()
+
+
+def find_canonical_owner(profile_home: Path | str) -> dict[str, Any] | None:
+    """Return the exact Bot Chat tip's active-session lease, including unsupported CLI owners.
+
+    A CLI process holding the tip live cannot consume authority deliveries (the door refuses with
+    ``runtime_coordination_required``); cron uses this to retain output until that owner releases."""
+    from hermes_cli.active_sessions import active_session_registry_snapshot
+
+    home = Path(profile_home).resolve()
+    session_id = _bot_chat_tip(home)
+    if not session_id:
+        return None
+    for entry in active_session_registry_snapshot(registry_home=home):
+        if entry["session_id"] == session_id:
+            return {**entry, "profile_home": str(home)}
+    return None
+
+
 def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None:
     """Discover the profile authority and its exact Bot Chat without acquiring a lease.
 
@@ -35,7 +66,6 @@ def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None
     authority's deliver door creates it on first delivery (main's ``--create-if-missing``),
     so a missing chat is not a refusal. None only when the profile has no store at all."""
     from hermes_cli.gateway_runtime import discover_gateway_endpoint
-    from hermes_state import SessionDB
 
     home = Path(profile_home).resolve()
     discovery = discover_gateway_endpoint(home, timeout=5)
@@ -43,12 +73,7 @@ def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None
         raise ValueError('profile authority is not ready')
     if not (home / 'state.db').is_file():
         return None
-    db = SessionDB(db_path=home / 'state.db', read_only=True)
-    try:
-        row = db.get_session_by_title('Bot Chat')
-        tip = db.get_compression_tip(row['id']) if row else None
-    finally:
-        db.close()
+    tip = _bot_chat_tip(home)
     return dict(profile_home=str(home), session_id=tip or '', canonical=True,
                 lease_id=discovery.endpoint.instance_id, live_session_id=tip or '')
 

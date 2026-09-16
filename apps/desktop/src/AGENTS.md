@@ -18,19 +18,18 @@ an unexpired one-use dial bound to the requesting window. No public dashboard to
 scraped or added to the public connection descriptor. SSH/URL intent retains its existing
 remote resolution and exposure lifecycle; a remote failure must never start a local owner.
 
+The gateway `gateway ensure` attaches to is **one multiplexing owner per home**: `HERMES_DESKTOP=1`
+is not how the app finds it, and no per-profile `hermes serve --port 0` child is spawned. One
+gateway process serves sessions from several homes (`tui_gateway/AGENTS.md` § Profile scope); a
+served secondary answers through the multiplexer's control socket (`GatewayEndpoint.multiplex_home`).
+Remote connections (SSH, URL+token, Cloud) likewise reach a backend that may serve several profiles
+from one process. Every lifecycle/status/settings REST call carries `?profile=` (or the `profile`
+param) and every new-session tile records an owner route; a backend-side scope fix is probed twice —
+with the profile as the gateway's own launch home and as a secondary served by one process.
+
 This migration requires the runtime's canonical GUI creation policy and a private HTTP
 API credential path. Do not bypass missing runtime capabilities by relabeling GUI sessions
 as CLI, dropping launch options, or falling back to an independent local serve owner.
-
-The backend the app spawns is a **pooled `hermes serve --port 0` per (connection, profile)**: its
-launch home is that profile, `HERMES_DESKTOP=1` is set, and its in-process cron ticker stands down
-for homes a running gateway already serves. One process may still host sessions from several homes
-(`tui_gateway/AGENTS.md` § Profile scope); the first non-launch home flips `set_multiplex_active`.
-Remote connections (SSH, URL+token, Cloud) reach a backend with no desktop env var that may serve
-several profiles from one process. Every lifecycle/status/settings REST call against a pooled
-backend carries `?profile=` (or the `profile` param) and every new-session tile records an owner
-route; a backend-side scope fix is probed twice — with the profile as the launch home of a pooled
-backend (env-bound) and as a secondary served by one process (override-bound).
 
 ## Slash commands: curated client-side, dispatched to the backend
 

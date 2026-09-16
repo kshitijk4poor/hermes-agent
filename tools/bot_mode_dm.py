@@ -520,7 +520,7 @@ def _run_delivery(argv: list[str], dm_file: str, *, stdin_file: bool,
                 print(_live_outcome_unknown(dm_file, exc))
                 return 1
             if record is not None:
-                return _wait_live_dm(record["profile_home"], record["delivery_id"])
+                return _wait_live_dm(record["profile_home"], record["delivery_id"], dm_file=dm_file)
     if not stdin_file:
         print(json.dumps({"reason": "runtime_unavailable", "error": "No canonical Bot Chat authority; payload retained."}))
         return 1

@@ -1006,20 +1006,17 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
   // and the sender's waiter is finite.
   type RelayEnvelopeFixture = { id: string; message: string; target_connection: string; target_profile: string }
   const toB: RelayEnvelopeFixture = { id: 'env-1', message: 'long job', target_connection: 'b', target_profile: 'ops' }
-
-  const toA: RelayEnvelopeFixture = {
-    id: 'env-2',
-    message: 'quick one',
-    target_connection: 'a',
-    target_profile: 'default'
-  }
+  const toA: RelayEnvelopeFixture = { id: 'env-2', message: 'quick one', target_connection: 'a', target_profile: 'default' }
+  // Canonical `bot_relay.deliver` answers carry the exact delivery identity;
+  // a reply without it is retained for recovery, never ACKed to the sender.
+  const settled = (id: string, reply: string) => ({ status: 'settled', delivery_id: id, admission_id: `adm-${id}`, reply })
 
   it('claims every outbox first and delivers to different targets concurrently', async () => {
     let releaseB!: (value: { reply: string }) => void
 
     const pendingB = new Promise<{ reply: string }>(resolve => {
       releaseB = resolve
-    })
+    }).then(res => settled(toB.id, res.reply))
 
     const calls = respondWith(call => {
       if (call.method === 'bot_relay.outbox.drain') {
@@ -1027,7 +1024,7 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
       }
 
       if (call.method === 'bot_relay.deliver') {
-        return call.connectionId === 'b' ? pendingB : { reply: 'done' }
+        return call.connectionId === 'b' ? pendingB : settled(toA.id, 'done')
       }
 
       return {}
@@ -1069,7 +1066,7 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
 
     const pendingB = new Promise<{ reply: string }>(resolve => {
       releaseB = resolve
-    })
+    }).then(res => settled(toB.id, res.reply))
 
     const outbox: Record<string, RelayEnvelopeFixture[]> = { a: [toB], b: [] }
 
@@ -1079,7 +1076,9 @@ describe('the drain loop does not let one delivery hold every other gateway’s 
       }
 
       if (call.method === 'bot_relay.deliver') {
-        return call.params.message === 'long job' ? pendingB : { reply: `${call.params.message} done` }
+        return call.params.message === 'long job'
+          ? pendingB
+          : settled(String(call.params.id), `${call.params.message} done`)
       }
 
       return {}

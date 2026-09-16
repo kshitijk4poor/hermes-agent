@@ -1056,8 +1056,9 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             result = {}
         # The committed outcome decides: a stop issued over WS by another viewer interrupts
         # this run just as much as one issued through this adapter's own /stop.
-        if result.get("interrupted") is True:
-            _finish("cancelled")
+        status, fields = terminal_run_status(result)
+        if status == "cancelled":
+            _finish("cancelled", fields)
         elif result.get("failed"):
             # Non-retryable client errors (401/400) return failed=True rather than raising.
             _finish("failed", fields, error=_redact_api_error_text(result.get("error") or "agent run failed"))

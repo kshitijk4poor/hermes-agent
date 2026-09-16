@@ -474,6 +474,8 @@ export function useSessionActions({
   const copy = t.desktop
   const resumeRequestRef = useRef(0)
   const createIntentRef = useRef<string | null>(null)
+  const transcriptHydrationByRuntimeRef = useRef(new Map<string, symbol>())
+  const coldDisplayReadsRef = useRef(new Map<string, symbol>())
   const branchCreateFlightsRef = useRef(new Map<string, Promise<SessionCreateResponse>>())
 
   // Follow auto-compression's stored-id rotation only while the exact runtime,
@@ -706,7 +708,7 @@ export function useSessionActions({
         const legacyProfileIntent = isLegacyNewChatProfile(capturedProfile)
 
         const params = {
-          ...(await desktopSessionCreateParams(cwd, capturedRoute)),
+          ...(await desktopSessionCreateParams(cwd, capturedRoute, capturedProfile, legacyProfileIntent)),
           ...sessionCreateOverrideParams(createOverrides, seedMessages),
           request_id: createIntent
         }
@@ -977,7 +979,12 @@ export function useSessionActions({
           options?.cwd === null ? '' : typeof options?.cwd === 'string' ? options.cwd.trim() : resolveNewSessionCwd()
 
         const params = {
-          ...(await desktopSessionCreateParams(cwd, capturedRoute)),
+          ...(await desktopSessionCreateParams(
+            cwd,
+            capturedRoute,
+            requestedProfile,
+            options?.route === null || defaultTarget?.route === null
+          )),
           request_id: crypto.randomUUID(),
           ...(workspaceScope.workspaceMode === 'bots' ? { hidden: true } : {})
         }
@@ -1936,7 +1943,7 @@ export function useSessionActions({
         const resumePromise = singleFlightSessionResume(
           storedSessionId,
           () =>
-            requestForSession<SessionResumeResponse>('session.resume', {
+            requestForSession<SessionResumeResult>('session.resume', {
               session_id: storedSessionId,
               cols: 96,
               source: 'desktop',

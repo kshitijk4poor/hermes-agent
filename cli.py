@@ -664,23 +664,11 @@ def _run_state_db_auto_maintenance(session_db) -> None:
 
 
 def _run_checkpoint_auto_maintenance() -> None:
-    """Call ``maybe_auto_prune_checkpoints`` per the ``checkpoints:`` config. Never raises."""
-    try:
-        from hermes_cli.config import load_config as _load_full_config
-        cfg = (_load_full_config().get("checkpoints") or {})
-        if not cfg.get("auto_prune", False):
-            return
-        from tools.checkpoint_manager import maybe_auto_prune_checkpoints
-        # delete_orphans stays False: a missing workdir at startup is ambiguous (unmounted
-        # volume / VPN down); orphans are only reclaimed by `hermes checkpoints prune`.
-        maybe_auto_prune_checkpoints(
-            retention_days=int(cfg.get("retention_days", 7)),
-            min_interval_hours=int(cfg.get("min_interval_hours", 24)),
-            delete_orphans=False,
-            max_total_size_mb=int(cfg.get("max_total_size_mb", 500)),
-        )
-    except Exception as exc:
-        logger.debug("checkpoint auto-maintenance skipped: %s", exc)
+    """Checkpoint store retention on a daemon thread: its ``git gc`` can block for tens of seconds
+    on a large store, which used to stall the prompt once a day. ``auto_prune_from_config`` owns the
+    config gate and the 24h marker and never raises."""
+    from tools.checkpoint_manager import auto_prune_from_config
+    threading.Thread(target=auto_prune_from_config, name="checkpoint-auto-prune", daemon=True).start()
 
 
 _ACCENT_ANSI_DEFAULT = "\033[1;38;2;255;215;0m"  # #FFD700 bold fallback
@@ -1716,6 +1704,55 @@ def _build_cpr_disabled_output(stdout):
     except Exception:
         return None
 
+
+def _select_classic_cli_pt_output(stdout):
+    """CPR-disabled ``Vt100_Output`` when CPR may leak, else None (Application keeps pt's default)."""
+    return _build_cpr_disabled_output(stdout) if _terminal_may_leak_cpr() else None
+
+
+def _strip_leaked_terminal_responses_with_meta(text: str) -> tuple[str, bool]:
+    """Strip leaked CPR replies and mouse-report fragments -> ``(cleaned, had_mouse_reports)``."""
+    if not text:
+        return text, False
+
+    had_mouse_reports = False
+    for present, cpr_re, mouse_re in (
+        ("\x1b[" in text, _DSR_CPR_ESC_RE, _SGR_MOUSE_ESC_RE),
+        ("^[" in text, _DSR_CPR_VISIBLE_RE, _SGR_MOUSE_VISIBLE_RE),
+        ("<" in text and ";" in text and ("M" in text or "m" in text), None, _SGR_MOUSE_BARE_RE),
+    ):
+        if not present:
+            continue
+        if cpr_re is not None:
+            text = cpr_re.sub("", text)
+        text, count = mouse_re.subn("", text)
+        had_mouse_reports = had_mouse_reports or count > 0
+    return text, had_mouse_reports
+
+
+def _estimate_tui_input_height(
+    lines: list[str] | tuple[str, ...], prompt_text: str, terminal_columns: int, *, max_height: int = 8,
+) -> int:
+    """Input rows from live terminal cells; the BeforeInput prompt consumes cells only on line 0.
+
+    Never substitute a fake wide fallback: a mis-sized TextArea leaves stale cells at the bottom.
+    """
+    try:
+        from prompt_toolkit.utils import get_cwidth
+    except Exception:
+        get_cwidth = lambda value: len(value or "")  # type: ignore[assignment]
+
+    columns = max(1, _int_or(terminal_columns or 0, 0))
+    prompt_width = max(0, get_cwidth(prompt_text or ""))
+
+    visual_lines = 0
+    for index, line in enumerate(lines or [""]):
+        display_width = get_cwidth(line or "") + (prompt_width if index == 0 else 0)
+        visual_lines += max(1, -(-display_width // columns))
+
+    wt_path, branch, repo_root = info["path"], info["branch"], info["repo_root"]
+    if not Path(wt_path).exists():
+        return
 
     if _worktree_has_unpushed_commits(wt_path, timeout=10):
         if _repo_is_shallow(repo_root):

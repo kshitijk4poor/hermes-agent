@@ -28,6 +28,7 @@ import type {
   ConfigSetResponse,
   SessionActiveListResponse,
   SessionCloseResponse,
+  SharedControlRespondResponse,
   TerminalResizeResponse
 } from '../gatewayTypes.js'
 import { useGitBranch } from '../hooks/useGitBranch.js'
@@ -63,6 +64,7 @@ import { $overlayState, capturePromptResponseGuard, patchOverlayState } from './
 import { $goodVibesTick } from './petFlashStore.js'
 import { applyProcessSnapshot, type ProcessEntry } from './processRoster.js'
 import { scrollWithSelectionBy } from './scroll.js'
+import { respondToServerRequest } from './serverRequestStore.js'
 import { mutateCanonicalSession } from './slash/canonicalSessionControls.js'
 import { captureDestination, isCurrentDestination, type SubmissionDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
@@ -753,10 +755,6 @@ export function useMainApp(gw: GatewayClient) {
   const cancelClarify = useCallback(() => {
     const clarify = overlay.clarify
 
-    if (!clarify) {
-      return
-    }
-
       const fresh = capturePromptResponseGuard('clarify', clarify)
 
       if (!fresh()) {
@@ -765,26 +763,51 @@ export function useMainApp(gw: GatewayClient) {
 
       const label = toolTrailLabel('clarify')
 
-    turnController.turnTools = turnController.turnTools.filter(line => !sameToolTrailGroup(label, line))
-    patchTurnState({ turnTrail: turnController.turnTools })
+    const label = toolTrailLabel('clarify')
 
-      rpc<ClarifyRespondResponse>('clarify.respond', { answer, ...(clarify.sharedControl ? sharedControlParams(clarify) : { request_id: clarify.requestId }) }).then(r => {
-        if (!r || !fresh()) {
+      // Canonical shared controls answer through the generation-bound RPC; a
+      // legacy server→client request resolves its response frame locally.
+      const answered = clarify.sharedControl
+        ? rpc<SharedControlRespondResponse>('clarify.respond', { answer, ...sharedControlParams(clarify) }).then(r => Boolean(r) && fresh())
+        : Promise.resolve(respondToServerRequest(clarify.requestId, { answer }))
+
+      void answered.then(ok => {
+        if (!ok) {
+          // The request already expired (request.cancel raced the keystroke): nothing to answer.
+          if (!clarify.sharedControl) {
+            patchOverlayState({ clarify: null })
+          }
+
           return
         }
 
-      return
-    }
+        if (answer) {
+          turnController.persistedToolLabels.add(label)
+          appendMessage({
+            kind: 'trail',
+            role: 'system',
+            text: '',
+            tools: [buildToolTrailLine('clarify', clarify.question)]
+          })
+          appendMessage({ role: 'user', text: answer })
+          patchUiState({ status: 'running…' })
+        } else {
+          // Esc / Ctrl+C cancel: persist the question + options as a system
+          // line (not a transient "prompt cancelled" flash) so the prompt
+          // survives on screen as standard output, matching the timeout path.
+          appendMessage({
+            role: 'system',
+            text: clarify.questions?.length
+              ? formatAbandonedClarifyBatch(clarify.questions, clarify.answers ?? {}, 'cancelled')
+              : formatAbandonedClarify(clarify.question, clarify.choices, 'cancelled')
+          })
+        }
 
-    // Esc / Ctrl+C cancel: persist the question as a system line (not a
-    // transient "prompt cancelled" flash) so the prompt survives on screen as
-    // standard output, matching the timeout path.
-    appendMessage({
-      role: 'system',
-      text: formatAbandonedClarify(clarify.questions, clarify.answers ?? {}, 'cancelled')
-    })
-    patchOverlayState({ clarify: null })
-  }, [appendMessage, overlay.clarify])
+        patchOverlayState({ clarify: null })
+      })
+    },
+    [appendMessage, overlay.clarify, rpc]
+  )
 
   // Lock one answer of a batch clarify (`clarify.lock` RPC). The overlay stays
   // up until the server reports no remaining questions — the final lock
@@ -803,8 +826,8 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
-      rpc<ClarifyRespondResponse & { remaining?: string[] }>('clarify.respond', {
-        answer,
+      rpc<ClarifyLockResponse>('clarify.lock', {
+        answer: answer.trim() ? answer : null,
         question_id: qid,
         request_id: clarify.requestId
       }).then(r => {
@@ -1000,15 +1023,18 @@ export function useMainApp(gw: GatewayClient) {
     const exitHandler = (code: null | number) => {
       turnController.reset()
       const state = getUiState()
-      const storedSid = state.storedSid
+      // session.resume takes the durable stored id, not the process-local
+      // runtime sid (they coincide on canonical gateways).
+      const storedSid = state.storedSid ?? state.sid
 
-      // Attached socket closed: the backend (and any live turn) is still there —
+      // Socket closed: the backend (and any live turn) is still there —
       // GatewayClient owns the backoff reconnect, and the next gateway.ready
       // resumes the durable session id. Calling start() here would race that
-      // reconnect and reset its backoff.
+      // reconnect and reset its backoff. Keep sid: durable offline input stays
+      // fenced to its destination and drains once `gatewayConnected` returns.
       if (gw.attached) {
         recoverSidRef.current = storedSid ?? recoverSidRef.current
-        patchUiState({ busy: false, compacting: false, sid: null, status: t('session.status.reconnecting') })
+        patchUiState({ busy: false, compacting: false, gatewayConnected: false, status: 'reconnecting…' })
 
         if (state.sid) {
           turnController.pushActivity(connectionLostActivity(), 'warn')
@@ -1018,18 +1044,20 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
-      // Keep the old destination for durable offline input; discovery retries
-      // must never silently create a replacement for an ended session.
-      const plan = planGatewayRecovery(getUiState().sid, recoverSidRef.current, recoveryAtRef.current, Date.now())
+      // No socket was ever granted (bootstrap failed): GatewayClient retries
+      // discovery on its backoff without starting a stopped owner; discovery
+      // retries must never silently create a replacement for an ended session.
+      // planGatewayRecovery bounds the resume attempts so a crash-looping
+      // gateway can't storm.
+      const plan = planGatewayRecovery(storedSid, recoverSidRef.current, recoveryAtRef.current, Date.now())
 
       recoveryAtRef.current = plan.attempts
       patchUiState({ busy: false, compacting: false, gatewayConnected: false, status: 'gateway exited' })
 
-      if (plan.sid) {
+      if (plan.recover && plan.sid) {
         recoverSidRef.current = plan.sid
-        turnController.pushActivity('gateway exited · recovering session…', 'warn')
-        sys('gateway exited — recovering your session (any in-flight reply was lost)')
-        // GatewayClient retries discovery without starting a stopped owner.
+        turnController.pushActivity(BACKEND_RESTARTING_ACTIVITY, 'warn')
+        sys(BACKEND_RESTARTING)
 
         return
       }
@@ -1132,23 +1160,31 @@ export function useMainApp(gw: GatewayClient) {
     (choice: string) => {
       const fresh = capturePromptResponseGuard('approval', overlay.approval)
 
-      if (!fresh()) {
+      if (!fresh() || !overlay.approval) {
         return
       }
 
-      return respondWith('approval.respond', { choice, session_id: ui.sid, ...sharedControlParams(overlay.approval) }, () => {
+      const settle = () => {
         if (!fresh()) {
-        return
-      }
+          return
+        }
 
         patchOverlayState({ approval: null })
         patchTurnState({
           outcome: choice === 'deny' ? t('session.approval.denied') : t('session.approval.approved', choice)
         })
         patchUiState({ status: 'running…' })
-      })
+      }
+
+      // Canonical shared controls answer through the generation-bound RPC; a
+      // legacy server→client request resolves its response frame locally.
+      if (overlay.approval.sharedControl) {
+        return rpc<SharedControlRespondResponse>('approval.respond', { choice, ...sharedControlParams(overlay.approval) }).then(r => r && settle())
+      }
+
+      respondWith(overlay.approval.requestId, { choice }, settle)
     },
-    [overlay.approval, respondWith, ui.sid]
+    [overlay.approval, respondWith, rpc]
   )
 
   const answerSudo = useCallback(
@@ -1169,10 +1205,10 @@ export function useMainApp(gw: GatewayClient) {
         patchOverlayState({ sudo: null })
       }
 
-      return respondWith('sudo.respond', { password: pw, request_id: requestId }, () => {
+      respondWith(requestId, { value: pw }, () => {
         if (!fresh()) {
-        return
-      }
+          return
+        }
 
         patchOverlayState({ sudo: null })
         patchUiState({ status: 'running…' })
@@ -1199,10 +1235,10 @@ export function useMainApp(gw: GatewayClient) {
         patchOverlayState({ secret: null })
       }
 
-      return respondWith('secret.respond', { request_id: requestId, value }, () => {
+      respondWith(requestId, { value }, () => {
         if (!fresh()) {
-        return
-      }
+          return
+        }
 
         patchOverlayState({ secret: null })
         patchUiState({ status: 'running…' })

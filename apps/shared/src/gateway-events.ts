@@ -16,11 +16,28 @@ import type { BackendGatewayEventMap } from './gateway-contract.generated.js'
 
 export * from './gateway-contract.generated.js'
 
+/** Owner-stamped pending prompt on a canonical gateway. */
+export interface CanonicalPromptEvent {
+  execution_generation?: number
+  kind?: 'approval' | 'clarify'
+  prompt_id: string
+  /** Set by the Desktop canonical protocol layer for the named listeners. */
+  request_id?: string
+}
+
 /**
  * Client-local synthetic events. Never emitted by `tui_gateway`; the Ink TUI's `gatewayClient`
  * publishes them into the same handler stream to report transport state.
  */
 export interface ClientLocalGatewayEventMap {
+  /** Canonical gateways (`gateway/session_pending_controls.py`) fan pending prompts out as
+   *  events stamped with the owner's `execution_generation`; Desktop's canonical protocol
+   *  layer projects them onto the named prompt listeners and answers over `approval.respond`
+   *  / `clarify.respond`. Not part of the generated `tui_gateway` contract. */
+  'approval.request': CanonicalPromptEvent & { command?: string; description?: string; choices?: string[]; edit?: unknown }
+  'approval.settled': CanonicalPromptEvent
+  'clarify.request': CanonicalPromptEvent & { question?: string; choices?: string[]; multi_select?: boolean }
+  'clarify.settled': CanonicalPromptEvent
   'dashboard.new_session_requested': { reason?: string }
   'gateway.protocol_error': { preview?: string }
   'gateway.reconnecting': { attempt?: number; delay_ms?: number }
@@ -63,153 +80,6 @@ export interface GatewayEvent<K extends GatewayEventName = GatewayEventName> {
   type: K
 }
 
-// ── RPC responses shared across surfaces ─────────────────────────────
-
-/** `hermes_cli/inventory.py` one `model.options` provider row (union of every field the
- *  backend sets; `pricing_pending` / `free_tier_pending` mark the cached-only fail-closed path). */
-export interface ModelOptionProvider {
-  /** User-defined providers only: every accepted identity for this endpoint
-   *  (bare config key, `custom:<key>`, normalized display name, …). A session's
-   *  `model.options` reports the canonical `custom:<key>` form, so "is this row
-   *  the current provider?" must check membership here, not slug equality. */
-  aliases?: string[]
-  /** OpenAI-compatible endpoint for a user-defined provider. The backend
-   *  exposes this as `api_url`; model assignments send it back as `base_url`. */
-  api_url?: string
-  /** Auth flow for an unconfigured provider: "api_key" can be activated inline
-   *  by pasting `key_env`; anything else (oauth_*, external, aws_sdk, …) needs
-   *  the `hermes model` CLI / onboarding OAuth flow. */
-  auth_type?: string
-  /** True when the provider has usable credentials. False for canonical
-   *  providers surfaced by `include_unconfigured` that the user hasn't set up
-   *  yet — render these with a setup affordance instead of hiding them. */
-  authenticated?: boolean
-  /** Per-model option support, keyed by model id (present when the picker
-   *  requested capabilities). Lets the UI gate fast/reasoning controls. */
-  capabilities?: Record<string, ModelCapabilities>
-  /** Curated shortlist (one flagship per lab) the picker shows by default for
-   *  aggregator providers that serve dozens of models across many labs. */
-  featured_models?: string[]
-  /** Nous only: whether the current account is on the free plan. */
-  free_tier?: boolean
-  /** Nous only, cached-only inventory: entitlement unknown, every model rendered locked. */
-  free_tier_pending?: boolean
-  /** True for the free-tier route's own provider row (no account behind it).
-   *  Never match this row by `name` — the label is copy and can change. */
-  free_tier_row?: boolean
-  is_current?: boolean
-  /** True for providers defined via the user's `providers:` config block. */
-  is_user_defined?: boolean
-  /** Env var to paste an API key into, for unconfigured `api_key` providers. */
-  key_env?: string
-  models?: string[]
-  name: string
-  /** Per-model pricing keyed by model id (present when the picker requested
-   *  pricing and the provider supports live pricing). */
-  pricing?: Record<string, ModelPricing>
-  /** Cached-only inventory: pricing not fetched yet. */
-  pricing_pending?: boolean
-  slug: string
-  source?: string
-  total_models?: number
-  /** Nous only: paid models a free-tier user cannot select (shown disabled). */
-  unavailable_models?: string[]
-  warning?: string
-}
-
-export interface ModelPricing {
-  /** Formatted $/Mtok cached-input price, or null when the model has none. */
-  cache: null | string
-  /** Sale: rounded percent off list when gateway sends pricing.original. */
-  discount_percent?: number
-  /** True when the model costs nothing (free tier eligible). */
-  free: boolean
-  /** Formatted $/Mtok input price, e.g. "$3.00", or "free", or "" if unknown. */
-  input: string
-  /** Formatted $/Mtok output price. */
-  output: string
-  /** Sale: formatted pre-discount input $/Mtok ("was"). */
-  was_input?: string
-  /** Sale: formatted pre-discount output $/Mtok ("was"). */
-  was_output?: string
-}
-
-export interface ModelCapabilities {
-  /** False when the route rejects a reasoning disable ("mandatory" in the
-   *  provider catalog), so the Thinking toggle must not be offered. */
-  can_disable_reasoning?: boolean
-  fast: boolean
-  reasoning: boolean
-}
-
-export interface ModelOptionsResponse {
-  model?: string
-  provider?: string
-  providers?: ModelOptionProvider[]
-}
-
-/** `tui_gateway/methods_session.py::_session_row_summary` — one `session.list` row. */
-export interface SessionListItem {
-  id: string
-  message_count: number
-  preview: string
-  /** The runtime id this stored session is currently attached to, when live. */
-  resolved_id?: string
-  source?: string
-  started_at: number
-  title: string
-}
-
-export interface SessionListResponse {
-  sessions?: SessionListItem[]
-}
-
-/** Transcript row as projected by the gateway (`session.resume` / `session.activate`). */
-export interface GatewayTranscriptMessage {
-  args?: unknown
-  context?: string
-  display_kind?: string
-  display_metadata?: unknown
-  name?: string
-  role: 'assistant' | 'system' | 'tool' | 'user'
-  text?: string
-}
-
-export interface SessionInflightTurn {
-  assistant?: string
-  correction_offsets?: number[]
-  corrections?: string[]
-  error?: string
-  error_surface?: ErrorSurface
-  recoverable?: boolean
-  status?: string
-  streaming?: boolean
-  user?: string
-}
-
-/** `tui_gateway/methods_session.py::_resume_response`. `info` is surface-specific
- *  (`SessionInfo` in the TUI, `SessionRuntimeInfo` on Desktop); narrow at the call site. */
-export interface SessionResumeResponse<Info = Record<string, unknown>, Message = GatewayTranscriptMessage> {
-  /** Present when the backend found a fresh crash-interrupted turn and scheduled its
-   *  automatic continuation; the turn arrives as a normal message.start stream. */
-  auto_continue?: { attempt: number; interrupted_at: number }
-  /** Deferred hydration: history arrives via `session.resume_progress`. */
-  hydrating?: boolean
-  inflight?: null | SessionInflightTurn
-  info?: Info
-  message_count?: number
-  messages: Message[]
-  /** `omit_messages` resume: the client still learns the stored size. */
-  messages_omitted?: boolean
-  resumed?: string
-  running?: boolean
-  session_id: string
-  session_key?: string
-  started_at?: number
-  status?: string
-  /** Canonical gateways: the durable id of the row this live session projects. */
-  stored_session_id?: string
-  /** Canonical gateways: the actor's subscription token for `session.detach`. */
-  subscription_id?: string
-  todo_state?: TodoStatePayload
-}
+/** Backend-emitted notification names (generated `GATEWAY_EVENT_TYPES`), re-exported under the
+ *  name the consumers already use. */
+export { GATEWAY_EVENT_TYPES as BACKEND_EVENT_NAMES } from './gateway-contract.generated.js'

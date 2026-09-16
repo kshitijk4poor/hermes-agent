@@ -795,10 +795,12 @@ MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
         message=(
             "  ✓ curator.archive_after_days 90→30 — skills unused for a month are archived to "
             "skills/.archive/ (recoverable with `hermes curator restore`). Set it back to 90 to keep the old window."))),
-    # 44 → 45: cron.bot_chat_delivery_timeout_seconds is gone with the local `hermes chat`
+    # 44 → 45: saved platform_toolsets lists predate the connections toolset (see _migrate_to_45).
+    (45, _migrate_to_45),
+    # 45 → 46: cron.bot_chat_delivery_timeout_seconds is gone with the local `hermes chat`
     # fallback lane it bounded. Bot Chat deliveries are admitted to the running gateway and
     # settle on its durable receipt; there is no cron-side turn left to time out.
-    (45, functools.partial(
+    (46, functools.partial(
         _rewrite_key, section="cron", key="bot_chat_delivery_timeout_seconds", new=None,
         match=lambda _cur: True,
         added="removed cron.bot_chat_delivery_timeout_seconds",
