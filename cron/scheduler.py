@@ -4287,10 +4287,13 @@ def _sweep_mcp_orphans_when_all_done(futures: list) -> None:
 
 
 def tick(
-    verbose: bool = True, adapters=None, loop=None, sync: bool = True, *, can_dispatch=None):
+    verbose: bool = True, adapters=None, loop=None, sync: bool = True, *, can_dispatch=None,
+    headless: bool = False):
     """Check and run all due jobs. File-locked so only one tick runs at a time (gateway ticker vs
     standalone daemon / manual tick). ``can_dispatch``: optional gate; false leaves due jobs for the
-    next allowed tick. Returns the number of jobs executed (0 if another tick holds the lock)."""
+    next allowed tick. ``headless``: the tick runs outside any gateway (system crontab, ``hermes
+    cron tick``) and must refuse agent jobs rather than spawn one. Returns the number of jobs
+    executed (0 if another tick holds the lock)."""
     # Stale-code yield gate — BEFORE the lock race. A process whose checkout was updated under it
     # serves mixed sys.modules (jobs die on ImportErrors); if a fresher gateway holds the runtime
     # lock, ITS ticker dispatches. With no fresh holder (desktop-standalone) the tick proceeds.
@@ -4327,6 +4330,9 @@ def tick(
 
         due_jobs = get_due_jobs()
         _sweep_stale_inflight_for_tick(due_jobs)
+        if headless:
+            from cron.scheduler_gateway_gate import refuse_agent_jobs_without_gateway
+            due_jobs = refuse_agent_jobs_without_gateway(due_jobs)
 
         if not due_jobs:
             # Idle tick: skip config load + pool setup, but still reap crashed jobs' MCP orphans.
@@ -4430,4 +4436,32 @@ if __name__ == "__main__":
         raise SystemExit(
             0 if _run_external_worker_payload(args.external_worker_file, args.ack_file) else 1
         )
-    tick(verbose=True)
+    tick(verbose=True, headless=True)
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+import asyncio  # noqa: F401,E402
+import shutil  # noqa: F401,E402
+import signal  # noqa: F401,E402
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'BOT_CHAT_PLATFORM': ('cron.scheduler_delivery', 'BOT_CHAT_PLATFORM'),
+    'SharedRouteAdapters': ('cron.scheduler_preflight', 'SharedRouteAdapters'),
+    'cron_delivery_targets': ('cron.scheduler_delivery', 'cron_delivery_targets'),
+    'parse_bot_chat_deliver_token': ('cron.scheduler_delivery', 'parse_bot_chat_deliver_token'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    from hermes_cli.plugin_compat import warn_once
+    warn_once(__name__, name, *target)
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

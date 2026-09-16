@@ -386,8 +386,15 @@ class TestExternalCronProviderStatus:
         assert "Scheduler is not ready" not in out
 
 
+def test_cron_tick_invokes_scheduler_tick_verbose_and_headless(monkeypatch):
+    """The CLI tick runs outside any gateway: it must declare itself headless so agent jobs are
+    refused, never spawned for."""
+    calls = []
+    monkeypatch.setattr("cron.scheduler.tick",
+                        lambda verbose=False, headless=False: calls.append((verbose, headless)))
 
 
+    assert calls == [(True, True)]
 
 
 def test_cron_create_failure_returns_nonzero(monkeypatch, capsys):

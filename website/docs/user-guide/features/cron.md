@@ -280,6 +280,11 @@ What they do:
 - `run` — trigger the job on the next scheduler tick
 - `remove` — delete it entirely
 - `edit` — modify schedule, prompt, delivery, etc.
+- `tick` — run one scheduler pass and exit (for a system crontab or other external
+  scheduler). **The gateway must be running:** agent jobs execute inside the gateway, and a
+  tick never starts one. With no gateway up, agent jobs are skipped with a logged reason
+  (`hermes cron list` shows it) and fire on the next tick after `hermes gateway start`; their
+  schedule is not advanced or penalised. `no_agent` script jobs still run from a bare tick.
 
 **Name-based lookup.** All four mutating verbs (`pause`, `resume`, `run`, `remove`, `edit`) plus the agent's `cronjob_manage` tool now accept a job **name** (case-insensitive) in place of the hex ID. The agent and CLI both prefer an exact ID match if one exists; ambiguous name matches (multiple jobs sharing the same name) are refused with the full list of candidate IDs so you can pick one explicitly. Names are not unique, so this guard is load-bearing — it prevents silently mutating the wrong job when two share a name.
 
