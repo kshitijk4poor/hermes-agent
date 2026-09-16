@@ -31,6 +31,10 @@ class LiveSession:
     subscribers: dict = field(default_factory=dict)
     event_stream: SessionEvents = field(default_factory=SessionEvents)
     controls: PendingControls = field(init=False)
+    # Why the FIFO is not advancing (unknown head, preflight refusal) or None. The
+    # messaging ingress tells the platform user once per pause episode, not per message.
+    paused: str | None = None
+    pause_notified: bool = False
 
     def __post_init__(self):
         self.controls = PendingControls(self.event_stream)
@@ -207,6 +211,22 @@ class SessionAuthority:
         if live.task is None or live.task.done():
             live.task = asyncio.create_task(self._drain(ref))
             live.task.add_done_callback(_log_drain_failure)
+
+    def _pause(self, ref, reason):
+        """The FIFO stopped without claiming its head. Committed rows stay queued for a later
+        drain; only the process-local messaging delivery waiters on this session are released,
+        with the reason instead of a reply, so an adapter loop is never parked on a turn that
+        will not run. The ingress turns that refusal into one user-facing notice per episode."""
+        live = self.sessions[ref.session_id]
+        live.paused = reason
+        for row in list_session_admissions(self.db, session_id=ref.session_id):
+            admission_id = row['admission_id']
+            if admission_id not in self.native_waiters:
+                continue
+            self.native_waiters.discard(admission_id)
+            waiter = self.waiters.pop(admission_id, None)
+            if waiter is not None and not waiter.done():
+                waiter.set_exception(RuntimeStoreError(reason))
 
     async def admit_automation(self, adapter, event, identity):
         from gateway.session_automation import admit_automation
@@ -420,6 +440,7 @@ class SessionAuthority:
             try:
                 pending = list_session_admissions(self.db, session_id=ref.session_id)
                 if any(row['status'] == 'unknown' for row in pending):
+                    self._pause(ref, 'unknown_execution')
                     return
                 first = next((row for row in pending if row['status'] == 'queued'), None)
                 from gateway.config import Platform
@@ -461,7 +482,11 @@ class SessionAuthority:
             except RuntimeStoreError as exc:
                 import logging
                 logging.getLogger(__name__).warning('Session %s paused: %s', ref.session_id, exc.reason)
+                self._pause(ref, exc.reason)
                 return
+            # The FIFO is moving again (or empty): the next pause is a new episode.
+            live.paused = None
+            live.pause_notified = False
             if row is None:
                 return
             admission_id = row['admission_id']

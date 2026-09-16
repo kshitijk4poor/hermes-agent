@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from gateway.platforms.event import MessageEvent
 from gateway.session_envelope import restore_native
+from hermes_state_runtime import RuntimeStoreError
 
 admission_author = ContextVar('admission_author', default=None)
 executing_admission = ContextVar('executing_admission', default=False)
@@ -18,7 +19,26 @@ async def admit_message(authority, event):
     # Only the delivery waiter is process-local; execution reads the committed snapshot.
     authority.native_waiters.add(receipt.admission_id)
     waiter = authority.waiters.setdefault(receipt.admission_id, asyncio.get_running_loop().create_future())
-    return await asyncio.shield(waiter)
+    try:
+        return await asyncio.shield(waiter)
+    except RuntimeStoreError as exc:
+        return pause_notice(authority, receipt.ref, exc.reason)
+
+
+def pause_notice(authority, ref, reason):
+    """The committed input stays queued behind a paused FIFO (a turn lost across an owner
+    restart, or a head the preflight refused). Tell the platform user once per pause episode
+    through the ordinary reply path; later messages onto the same pause are admitted silently."""
+    live = authority.sessions[ref.session_id]
+    if live.pause_notified:
+        return None
+    live.pause_notified = True
+    if reason == 'unknown_execution':
+        cause = 'a previous turn did not finish when Hermes restarted, so nothing queued after it will run'
+    else:
+        cause = f'a queued message could not be re-authorized ({reason})'
+    return (f'⏸️ This conversation is paused: {cause}. Your message is saved but will not be answered here. '
+            'Send /reset to start a fresh conversation, or ask the operator to resume this one.')
 
 
 def row_turn_author(policy, row):
