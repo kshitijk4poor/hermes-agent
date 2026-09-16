@@ -5,14 +5,15 @@ door must keep that semantics, or a fresh profile's very first ``deliver: bot-ch
 recorded as failed with nowhere to land.
 """
 from contextlib import closing
+from http.server import ThreadingHTTPServer
 import json
 from pathlib import Path
 import sqlite3
+import threading
 
 import pytest
 
-from tests.gateway.fixtures.local_recovery_probe import child_env, daemon
-from tests.gateway.test_normal_runtime_boot import model_peer
+from tests.gateway.fixtures.local_recovery_probe import Model, child_env, daemon
 
 
 @pytest.mark.linux_only
@@ -21,11 +22,17 @@ def test_cron_bot_chat_delivery_creates_the_missing_bot_chat_and_admits(tmp_path
     home, user = tmp_path / 'state', tmp_path / 'user'
     home.mkdir(mode=0o700)
     user.mkdir()
-    with model_peer() as (url, peer):
+    model = ThreadingHTTPServer(('127.0.0.1', 0), Model)
+    model.requests = []
+    model.blocked, model.release = threading.Event(), threading.Event()
+    threading.Thread(target=model.serve_forever, daemon=True).start()
+    url = f'http://127.0.0.1:{model.server_port}/v1'
+    try:
         (home / 'config.yaml').write_text(json.dumps({
             'gateway': {'multiplex_profiles': False},
             'model': {'provider': 'custom', 'default': 'local-wire-stub', 'base_url': url},
-            'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)}}))
+            'auxiliary': {'title_generation': {'enabled': False}}, 'terminal': {'cwd': str(home)}}),
+            encoding='utf-8')
         env = child_env()
         env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                    OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url, PYTHONUNBUFFERED='1')
@@ -48,3 +55,6 @@ def test_cron_bot_chat_delivery_creates_the_missing_bot_chat_and_admits(tmp_path
                 assert db.execute("SELECT count(*) FROM sessions WHERE title='Bot Chat'").fetchone()[0] == 1
                 targets = {row[0] for row in db.execute('SELECT target_session_id FROM session_admissions')}
             assert len(targets) == 1, (first, second, targets)
+    finally:
+        model.shutdown()
+        model.server_close()

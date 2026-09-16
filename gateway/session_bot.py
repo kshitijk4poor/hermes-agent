@@ -29,19 +29,36 @@ def _home(authority, actor, profile):
 def _target(authority, actor):
     row = authority.db.get_session_by_title('Bot Chat')
     if row is None:
-        raise RuntimeStoreError('not_found')
-    tip = authority.db.get_compression_tip(row['id'])
-    target = authority.db.get_session(tip)
-    if target is None:
-        raise RuntimeStoreError('not_found')
-    from gateway.session_local_migration import resolve_local_target
-    ref = resolve_local_target(authority, actor, target['id'])
+        ref = _create_bot_chat(authority, actor)
+    else:
+        tip = authority.db.get_compression_tip(row['id'])
+        target = authority.db.get_session(tip)
+        if target is None:
+            raise RuntimeStoreError('not_found')
+        from gateway.session_local_migration import resolve_local_target
+        ref = resolve_local_target(authority, actor, target['id'])
     authority.authorize(actor, ref, 'session:submit')
     live = authority.sessions[ref.session_id]
     entry = authority.runner.session_store.lookup_by_session_key(live.route)
     if live.source.platform != Platform.LOCAL or entry is None:
         raise RuntimeStoreError('admission_conflict')
     return ref, live, entry
+
+
+def _create_bot_chat(authority, actor):
+    """No Bot Chat yet: mint it the way ``hermes chat --in ~ -c "Bot Chat" --create-if-missing``
+    did on the CLI lane this door replaced, so a fresh profile's first delivery has somewhere
+    to land instead of being recorded as failed. Same owner step as ``session.create`` with a
+    title: no await between the lookup and the titled creation. Creation is the actor's own
+    capability; a submit-only principal (owner recovery) still gets ``not_found``."""
+    if 'session:create' not in actor.capabilities:
+        raise RuntimeStoreError('not_found')
+    from gateway.session_local import create_local_session
+    from gateway.session_local_title import title_new_session
+    ref = create_local_session(authority, actor, {
+        'request_id': 'bot-chat:' + authority.profile_id, 'source': 'cli', 'cwd': str(Path.home())})
+    title_new_session(authority, ref, 'Bot Chat')
+    return ref
 
 
 def _result(authority, record):

@@ -29,7 +29,11 @@ _TERMINAL = frozenset({"settled", "failed", "cancelled", "ambiguous"})
 
 
 def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None:
-    """Discover the profile authority and exact Bot Chat without acquiring a lease."""
+    """Discover the profile authority and its exact Bot Chat without acquiring a lease.
+
+    ``session_id`` is the current Bot Chat tip, or ``''`` when the profile has none yet: the
+    authority's deliver door creates it on first delivery (main's ``--create-if-missing``),
+    so a missing chat is not a refusal. None only when the profile has no store at all."""
     from hermes_cli.gateway_runtime import discover_gateway_endpoint
     from hermes_state import SessionDB
 
@@ -45,10 +49,8 @@ def find_canonical_live_owner(profile_home: Path | str) -> dict[str, Any] | None
         tip = db.get_compression_tip(row['id']) if row else None
     finally:
         db.close()
-    if not tip:
-        return None
-    return dict(profile_home=str(home), session_id=tip, canonical=True,
-                lease_id=discovery.endpoint.instance_id, live_session_id=tip)
+    return dict(profile_home=str(home), session_id=tip or '', canonical=True,
+                lease_id=discovery.endpoint.instance_id, live_session_id=tip or '')
 
 
 def authority_delivery(home, params):
@@ -79,7 +81,9 @@ def authority_delivery(home, params):
 
 def _owner(home: Path | str, owner: dict[str, Any]) -> dict[str, str]:
     pinned = {key: owner.get(key) for key in _OWNER_KEYS}
-    if not all(isinstance(value, str) and value for value in pinned.values()):
+    # An empty session_id is the discovered "no Bot Chat yet" state; the door creates it.
+    if not all(isinstance(value, str) and (value or key in ("session_id", "live_session_id"))
+               for key, value in pinned.items()):
         raise ValueError("owner requires profile_home, session_id, lease_id and live_session_id")
     if pinned["profile_home"] != str(Path(home).resolve()):
         raise ValueError("owner belongs to a different profile home")
@@ -226,7 +230,7 @@ def deliver_to_live_owner(
     home = Path(profile_home).resolve()
     return authority_delivery(home, dict(id=_delivery_id(delivery_id if delivery_id is not None else uuid.uuid4().hex),
         profile=home.name if home.parent.name == "profiles" else "default",
-        message=message, session_id=pinned["session_id"],
+        message=message, **({"session_id": pinned["session_id"]} if pinned["session_id"] else {}),
         **({"author": dict(author)} if author else {})))
 
 
