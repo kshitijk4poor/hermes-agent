@@ -81,7 +81,7 @@ def test_crash_mid_turn_then_platform_message_gets_one_pause_notice_and_reset_un
                'base_url': f'http://127.0.0.1:{bot.server_port}/bot', 'dm_policy': 'allowlist'}}},
            'auxiliary': {'title_generation': {'enabled': False}},
            'platform_toolsets': {'telegram': []}, 'terminal': {'cwd': str(home)}}
-    (home / 'config.yaml').write_text(json.dumps(cfg))
+    (home / 'config.yaml').write_text(json.dumps(cfg), encoding='utf-8')
     env = child_env()
     env.update(HOME=str(user), USERPROFILE=str(user), HERMES_HOME=str(home), PYTHONPATH=str(root),
                OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=base, PYTHONUNBUFFERED='1',
@@ -102,7 +102,7 @@ def test_crash_mid_turn_then_platform_message_gets_one_pause_notice_and_reset_un
 
     def diagnostic():
         return repr(rows()) + '\n' + repr(sent_texts()) + '\n' + '\n'.join(
-            p.read_text() for p in (home / 'logs').glob('*.log'))
+            p.read_text(encoding='utf-8') for p in (home / 'logs').glob('*.log'))
 
     update_id = 0
 

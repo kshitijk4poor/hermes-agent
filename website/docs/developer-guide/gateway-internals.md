@@ -78,6 +78,13 @@ row is refused with `stale_generation`. Desktop shows such a row in the queue pa
 "Turn lost during restart" with a **Discard** button; the gateway CLI exposes it as
 `/discard <admission_id>`. The lost input stays in the transcript for the user to resend.
 
+A messaging user (Telegram, Discord, ...) whose session is paused this way is told once per
+pause episode, through the adapter's ordinary reply path, that the conversation is paused and
+that `/reset` starts a fresh one; later messages onto the same pause are admitted silently and
+stay queued. Their delivery waiters are released with the pause reason instead of parking the
+adapter loop. `/reset` rotates the route to a new session (the lost turn and its followers stay
+on the old one); the operator can alternatively resolve the unknown row from Desktop or the CLI.
+
 ## Shared authority prompt attachments
 
 `prompt.submit` accepts an optional `attachments: [{path, mime}]` list beside `text`.
