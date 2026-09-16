@@ -1209,8 +1209,6 @@ def cmd_sessions(args, sessions_parser=None):
     observational = action in _OBSERVATIONAL_DB_ACTIONS or (action == "export" and not deleting_export)
     # A served-profile process has no single default home: pass the store path explicitly.
     path = get_hermes_home() / "state.db"
-    if observational and not path.exists():
-        return _print_empty_store(action, args)
     try:
         db = SessionDB(db_path=path, read_only=observational)
     except Exception as e:
