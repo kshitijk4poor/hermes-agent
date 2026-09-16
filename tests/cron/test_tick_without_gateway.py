@@ -6,6 +6,7 @@ unmanaged daemon when nothing owns the profile. Headless surfaces refuse rather 
 the agent job is skipped (not failed), keeps its due instant, and one warning names the fix.
 """
 from datetime import timedelta
+import os
 
 import pytest
 
@@ -67,6 +68,69 @@ def test_tick_without_gateway_skips_agent_jobs_without_spawning_or_drift(cron_ho
     refusals = [r for r in caplog.records if "not running" in r.getMessage()]
     assert len(refusals) == 1, "one log line per tick, not one per job"
     assert agent["id"] in refusals[0].getMessage() and "hermes gateway start" in refusals[0].getMessage()
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("stand_in", ["starting_lock", "silent_socket"])
+def test_tick_holds_agent_jobs_while_gateway_is_starting_or_silent(cron_home, monkeypatch, caplog, stand_in):
+    """A gateway mid-restart (lock held, no socket) or one whose control socket accepts but never
+    answers is 'not ready', not 'failed': the tick must hold the slot exactly like ``absent`` —
+    no run row, next_run_at kept — and decide well inside the crontab minute."""
+    import fcntl
+    import socket
+    import threading
+    import time
+
+    from hermes_cli import gateway_runtime_start
+
+    os.chmod(cron_home, 0o700)
+    spawned = []
+    monkeypatch.setattr(gateway_runtime_start, "spawn_unmanaged_gateway", lambda *a, **k: spawned.append(a))
+    keep = []
+    if stand_in == "starting_lock":
+        lock = open(cron_home / "gateway.lock", "w")
+        os.chmod(cron_home / "gateway.lock", 0o600)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        keep.append(lock)
+    else:
+        from gateway.control_socket import resolve_server_socket_path
+        bind_path, pointer = resolve_server_socket_path(cron_home)  # same sun_path fallback as the daemon
+        bind_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(bind_path))
+        os.chmod(bind_path, 0o600)
+        if pointer is not None:
+            pointer.write_text(str(bind_path), encoding="utf-8")
+            os.chmod(pointer, 0o600)
+        server.listen(4)
+        keep.append(server)
+
+        def hold():  # accept and hold every peer open: an owner that never answers identify
+            while True:
+                try:
+                    keep.append(server.accept()[0])
+                except OSError:
+                    return
+        threading.Thread(target=hold, daemon=True).start()
+
+    agent = J.create_job(prompt="summarise inbox", schedule="every 1h", name="agent", deliver="local")
+    _make_due(agent["id"])
+    due_before = J.load_jobs()[0]["next_run_at"]
+    started = time.monotonic()
+    with caplog.at_level("WARNING", logger="cron.scheduler_gateway_gate"):
+        ran = S.tick(verbose=False, headless=True)
+    elapsed = time.monotonic() - started
+    for handle in keep:
+        handle.close()
+
+    assert ran == 0 and spawned == []
+    assert elapsed < 20, f"headless probe must decide inside the crontab minute, took {elapsed:.1f}s"
+    stored = J.load_jobs()[0]
+    assert stored["last_run_at"] is None and stored["last_status"] is None
+    assert stored["next_run_at"] == due_before, "the slot is held, not consumed"
+    assert "pending_slot" not in stored
+    assert "hermes gateway status" in stored["last_fire_error"]["detail"]
+    assert len([r for r in caplog.records if "skipped" in r.getMessage()]) == 1
 
 
 def test_no_agent_jobs_still_fire_without_a_gateway(cron_home, monkeypatch):
