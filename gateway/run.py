@@ -1639,7 +1639,9 @@ class HygieneTurnHoldExceeded(Exception):
 
 
 def _multiplex_profile_homes(config: object) -> list[tuple[str, "Path"]]:
-    """Return the authoritative profile set for one multiplex gateway config."""
+    """The profile set this multiplexer SERVES: the process reservation once boot took it (grown
+    and shrunk by the hot-serve reconcile, which diffs it against what exists under ``profiles/``
+    via ``profiles_to_serve``), else the live directory read for pre-reservation callers."""
     reserved = getattr(config, "_runtime_profile_homes", None)
     if reserved is not None:
         return list(reserved)

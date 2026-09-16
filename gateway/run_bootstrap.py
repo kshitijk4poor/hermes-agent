@@ -216,6 +216,7 @@ async def _start_gateway_start_control_socket(runner):
     """Start the gateway control socket (identify/status/pause-for-update); None when unavailable."""
     from gateway.run import (asyncio, logger, os, threading)
     import atexit
+    import concurrent.futures
     _control_server = None
     try:
         # Started immediately after the PID-file claim: winning that O_EXCL race is the moment this process
@@ -266,8 +267,24 @@ async def _start_gateway_start_control_socket(runner):
                 "pausing": accepted, "already_stopping": not accepted,
                 "pid": os.getpid(), "drain_timeout": _drain}
 
+        def _rescan_profiles_handler() -> dict:
+            """``hermes profile create/delete`` asks the multiplexer to reconcile ``profiles/`` now
+            (the watcher also rescans periodically). Runs on the socket executor: marshal onto the loop
+            and wait briefly so the caller learns whether the profile is served."""
+            if not getattr(runner.config, "multiplex_profiles", False):
+                return {"multiplex": False, "served_profiles": runner.served_profile_names()}
+            future = asyncio.run_coroutine_threadsafe(
+                runner.reconcile_served_profiles(reason="control-socket"), _main_loop)
+            try:
+                # Bounded: a token-less create reconciles in milliseconds; a credential-add whose adapter
+                # connect outlasts this keeps running and the caller sees ``pending`` (not an error).
+                return {"multiplex": True, **future.result(timeout=5.0)}
+            except concurrent.futures.TimeoutError:
+                return {"multiplex": True, "pending": True, "served_profiles": runner.served_profile_names()}
+
         _control_server = GatewayControlServer(
-            verb_handlers={"pause-for-update": _pause_for_update_handler, "identify": _identify_runtime})
+            verb_handlers={"pause-for-update": _pause_for_update_handler, "identify": _identify_runtime,
+                           "rescan-profiles": _rescan_profiles_handler})
         _control_server.ticket_store = runner.session_ticket_store
         if not await _control_server.start():
             _control_server = None
@@ -300,7 +317,8 @@ def _start_gateway_start_cron_and_housekeeping(runner):
         try:
             profile_homes = _cron_tick_profile_homes(runner.config)
             if profile_homes:
-                cron_start_kwargs["profile_homes"] = profile_homes
+                # Live enumerator: re-read per cycle so a hot-served profile's jobs fire without a restart.
+                cron_start_kwargs["profile_homes"] = lambda: _cron_tick_profile_homes(runner.config)
                 # Per-profile adapters so each profile's cron output goes via its own bot, not the default's.
                 cron_start_kwargs["profile_adapters"] = getattr(runner, "_profile_adapters", None)
                 # runner.adapters belongs to the LAUNCH profile (default, or the --profile name); naming
