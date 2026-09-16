@@ -549,8 +549,8 @@ def test_delivery_pins_the_hermes_entrypoint_beside_this_interpreter(tmp_path, m
     mode, _dm_file, transport_argv, _profile_home = _runner_parts(calls[0]["command"])
     assert mode == "query-file"
     assert transport_argv[0] == str(hermes_entry)
-    assert transport_argv[1:] == ["-p", "researcher", "chat", "--in", "~", "-c", "Bot Chat",
-                                  "--create-if-missing", "-Q"]
+    # Local delivery is admitted through the authority; the argv only names the profile.
+    assert transport_argv[1:] == ["-p", "researcher"]
 
     result2 = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)

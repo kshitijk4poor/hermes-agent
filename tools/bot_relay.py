@@ -82,22 +82,6 @@ class EnvelopeRefusedError(RuntimeError):
 # ``message_agent`` target grammar in ``tools/bot_mode_dm.py``).
 _HANDLE_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 
-# One turn in a profile's canonical Bot Chat: ``hermes -p <profile> *BOT_CHAT_TURN_ARGS``.
-# ``-c "Bot Chat"`` must match ``bot_mode_probe.BOT_CHAT_TITLE``.
-BOT_CHAT_TURN_ARGS = ("chat", "--in", "~", "-c", "Bot Chat", "--create-if-missing", "-Q")
-
-# Set by a dispatcher on the ONE policy-gated re-run of a failed delivery turn (``tools.bot_mode_dm``,
-# ``tui_gateway.methods_bot_relay``). The failed attempt's turn-start persist already left the DM as the
-# Bot Chat's unanswered tail row, and a fresh process cannot tell that from a new message on its own — so
-# the re-run is told to adopt that row instead of appending a second copy
-# (``hermes_cli.quiet_single_query.adopt_unanswered_turn``, which consumes the variable before the turn).
-RESUME_UNANSWERED_TURN_ENV = "HERMES_RESUME_UNANSWERED_TURN"
-
-
-def retry_turn_env(env: Optional[Mapping[str, str]]) -> dict[str, str]:
-    """The re-run's child env: the first attempt's env plus the resume marker."""
-    return {**(os.environ if env is None else env), RESUME_UNANSWERED_TURN_ENV: "1"}
-
 
 def relay_root(root: Path | str) -> Path:
     return Path(root) / RELAY_DIR_NAME
@@ -479,11 +463,6 @@ def _hermes_cli() -> str:
         return str(published)
     sibling = Path(sys.executable or "").parent / name
     return str(sibling) if sibling.is_file() else shutil.which("hermes") or "hermes"
-
-
-def local_delivery_command(profile: str, query_file: str) -> list[str]:
-    """argv that delivers a DM into ``profile``'s Bot Chat on THIS gateway."""
-    return [_hermes_cli(), "-p", profile, *BOT_CHAT_TURN_ARGS, "--query-file", query_file]
 
 
 class DeliveryAuthor:
