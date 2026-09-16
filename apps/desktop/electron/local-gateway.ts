@@ -30,6 +30,8 @@ export interface GatewayEndpoint {
   api_origin: string
   capabilities: string[]
   supervisor: string
+  /** Multiplexer home whose control socket answers for a served secondary; null when the profile owns its own. */
+  control_home?: string | null
 }
 
 export async function ensureLocalGateway(run: () => Promise<{ code: number; stdout: string }>, beforeEnsure?: () => Promise<void>) {
@@ -169,12 +171,19 @@ export async function mintLocalGatewayTicket(endpoint: GatewayEndpoint, purpose:
   }
 
   const home = endpoint.profile_id
+  // A served secondary has no socket of its own: the default multiplexer's control socket
+  // mints its tickets (bound to the secondary's profile_id). Same rule as
+  // hermes_cli.gateway_runtime.control_home_for.
+  const controlHome = endpoint.control_home || home
 
-  if (await fs.realpath(home) !== home) {throw new Error('Noncanonical gateway profile')}
-  await privateNode(home, 'directory')
+  for (const dir of new Set([home, controlHome])) {
+    if (await fs.realpath(dir) !== dir) {throw new Error('Noncanonical gateway profile')}
+    await privateNode(dir, 'directory')
+  }
+
   let socketPath: string
 
-  try { socketPath = await resolveControlSocket(home) } catch (error) {
+  try { socketPath = await resolveControlSocket(controlHome) } catch (error) {
     // `gateway stop` unlinks both the socket and its pointer: the owner is gone,
     // which the redial must treat as stale rather than as a raw filesystem error.
     if (isMissingNodeError(error)) {throw new Error('Gateway ticket control socket missing')}

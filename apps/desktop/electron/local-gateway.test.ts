@@ -48,6 +48,39 @@ test.skipIf(process.platform === 'win32')('native HTTP mints fresh purpose-bound
   }
 })
 
+test.skipIf(process.platform === 'win32')('a served secondary mints its ticket through the multiplexer control socket, bound to its own profile', async () => {
+  const fs = await import('node:fs/promises')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const net = await import('node:net')
+  const { mintLocalGatewayTicket } = await import('./local-gateway')
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-mux-')))
+  const secondary = path.join(root, 'profiles', 'cold')
+  await fs.mkdir(secondary, { recursive: true, mode: 0o700 })
+  await fs.chmod(root, 0o700)
+  // Only the multiplexer root has a control socket; profiles/cold has none (it is served).
+  const requests: any[] = []
+
+  const server = net.createServer(socket => socket.once('data', chunk => {
+    requests.push(JSON.parse(chunk.toString()).params)
+    socket.end(JSON.stringify({ protocol: 1, id: 1, ok: true, result: { profile_id: secondary, instance_id: 'mux', ticket: 'served-grant' } }) + '\n')
+  }))
+
+  await new Promise<void>(resolve => server.listen(path.join(root, 'gateway.sock'), resolve))
+  await fs.chmod(path.join(root, 'gateway.sock'), 0o600)
+  const endpoint = { profile_id: secondary, instance_id: 'mux', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
+
+  try {
+    // Without control_home the secondary's own (absent) socket is probed: stale owner, not a grant.
+    await expect(mintLocalGatewayTicket(endpoint, 'native-http')).rejects.toThrow('Gateway ticket control socket missing')
+    expect(await mintLocalGatewayTicket({ ...endpoint, control_home: root }, 'native-http')).toBe('served-grant')
+    expect(requests).toEqual([{ profile_id: secondary, instance_id: 'mux', purpose: 'native-http' }])
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()))
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('ensure consumes structured readiness without acquiring a child owner', async () => {
   const endpoint = { profile_id: '/private/profile', instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
   const connection = await ensureLocalGateway(async () => ({ code: 0, stdout: JSON.stringify({ state: 'ready', endpoint }) }))
