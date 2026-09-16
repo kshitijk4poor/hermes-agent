@@ -93,18 +93,10 @@ def control_home_for(home: Path, endpoint: GatewayEndpoint | None) -> Path:
     return home
 
 
-def _multiplexer_home_for(home: Path) -> Path | None:
-    """Default root that may multiplex *home*, when *home* is a named profile under it."""
-    from hermes_constants import named_profile_home
-    if named_profile_home(home) is None:
-        return None
-    root = home.parent.parent
-    return root if root != home else None
-
-
 def _multiplexer_starting(home: Path) -> bool:
     from hermes_cli.gateway_runtime_discovery import missing_owner_state
-    root = _multiplexer_home_for(home)
+    from hermes_cli.gateway_runtime_multiplex import multiplexer_root_for
+    root = multiplexer_root_for(home)
     return root is not None and missing_owner_state(root) == "starting"
 
 
@@ -113,7 +105,8 @@ def _served_by_multiplexer(home: Path, *, timeout: float) -> GatewayDiscovery | 
     answers for it, and its ``identify`` lists the home under ``served_profiles``. Only the
     multiplexer's live descriptor proves service; a held ``gateway.lock`` alone does not."""
     from hermes_cli.gateway_runtime_discovery import DiscoveryError, query_identify
-    root = _multiplexer_home_for(home)
+    from hermes_cli.gateway_runtime_multiplex import multiplexer_root_for
+    root = multiplexer_root_for(home)
     if root is None:
         return None
     try:
@@ -198,7 +191,12 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = 30.0) -
             if observed.state == "absent" and not requested and _multiplexer_starting(home):
                 requested = True
             if observed.state == "absent" and not requested:
-                service = discover_existing_gateway_service(home, deadline=deadline)
+                # A named profile the default multiplexer serves has no daemon of its own: start
+                # (or await) the MULTIPLEXER. A per-profile spawn here would become a second owner
+                # that blocks the multiplexer's next all-or-nothing reserve.
+                from hermes_cli.gateway_runtime_multiplex import multiplexer_serves_home
+                target = multiplexer_serves_home(home) or home
+                service = discover_existing_gateway_service(target, deadline=deadline)
                 # Runtime locks settle races remaining after this second probe.
                 observed = discover_gateway_endpoint(home, timeout=remaining(deadline))
                 if observed.state != "absent":
@@ -207,7 +205,7 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = 30.0) -
                     start_existing_gateway_service(service, deadline=deadline)
                 else:
                     from hermes_cli.gateway_runtime_start import spawn_unmanaged_gateway
-                    spawn_unmanaged_gateway(home, deadline=deadline)
+                    spawn_unmanaged_gateway(target, deadline=deadline)
                 requested = True
             time.sleep(min(delay, remaining(deadline)))
             delay = min(delay * 1.5, 0.25)

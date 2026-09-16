@@ -7,6 +7,7 @@ owner instead of spawning a stray per-profile daemon that would later collide wi
 multiplexer's all-or-nothing reserve. A secondary whose ``state.db`` is unusable parks only itself.
 """
 import asyncio
+import contextlib
 import json
 import os
 from pathlib import Path
@@ -181,6 +182,53 @@ def test_profile_created_under_live_multiplexer_is_served_and_owned(mux):
         proc, desc = start_daemon(mux)
         assert served_homes(desc) == {root.resolve(), mux['boot'].resolve(), fresh.resolve()}
         assert 'Cannot reserve gateway profiles' not in tail(mux)
+    finally:
+        stop(proc, expect=None)
+
+
+def kill_recorded_gateway(root, timeout=45):
+    """SIGINT the gateway whose PID ``gateway_state.json`` records (a detached spawn is not our child)."""
+    pid = json.loads((root / 'gateway_state.json').read_text(encoding='utf-8')).get('pid')
+    if pid:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGINT)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(.2)
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.live_system_guard_bypass
+def test_named_profile_ensure_during_multiplexer_downtime_starts_the_multiplexer(mux):
+    """The multiplexer is down (restart/update) and ``hermes -p boot gateway ensure`` runs: the client
+    must start the MULTIPLEXER, never a per-profile daemon (which would answer this client and then
+    block the multiplexer's next all-or-nothing reserve with ``Cannot reserve gateway profiles``)."""
+    root, env, boot = mux['root'], mux['env'], mux['boot']
+    proc, desc = start_daemon(mux)
+    stop(proc)
+    assert recorded_served(root) == ['default', 'boot']
+    try:
+        ensured = subprocess.run([sys.executable, '-m', 'hermes_cli.main', '-p', 'boot', 'gateway', 'ensure',
+                                  '--json', '--timeout', '90'], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+        payload = json.loads(ensured.stdout.strip().splitlines()[-1])
+        assert payload['state'] == 'ready', (payload, ensured.stderr)
+        # The answering owner is the multiplexer at the root, serving boot as a secondary.
+        assert Path(payload['endpoint']['control_home']).resolve() == root.resolve(), payload
+        assert served_homes(control(root, 'identify')) == {root.resolve(), boot.resolve()}
+        assert not (boot / 'gateway.pid').exists() and not (boot / 'gateway.sock').exists()
+    finally:
+        kill_recorded_gateway(root)
+    # A fresh multiplexer boot reserves every profile: nothing stray owns boot's home.
+    proc, desc = start_daemon(mux)
+    try:
+        assert served_homes(desc) == {root.resolve(), boot.resolve()}
+        assert 'Cannot reserve gateway profiles' not in tail(mux)
+        stop(proc)
     finally:
         stop(proc, expect=None)
 
