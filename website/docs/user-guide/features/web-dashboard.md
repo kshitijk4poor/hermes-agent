@@ -558,7 +558,9 @@ profile's exclusive `gateway.lock`. While that profile's gateway is running they
 `409` with `Exclusive maintenance refused: Gateway runtime already owns profile <home>.
 Drain and stop the gateway, then retry.` and change nothing. Stop the gateway
 (`hermes gateway stop`), run the maintenance call, then start it again. `dry_run` prune
-and every read endpoint keep working against a live gateway.
+and every read endpoint keep working against a live gateway. The Desktop's one-shot legacy
+owner backfill treats this `409` as the steady state of an attached gateway (like a backend
+without the route) and does not retry it on every sidebar refresh.
 
 ### GET /api/logs
 
