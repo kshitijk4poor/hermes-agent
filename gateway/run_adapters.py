@@ -1713,7 +1713,9 @@ class GatewayAdapterLifecycleMixin:
     def _primary_message_handler(self):
         """Return the correctly scoped handler for a primary adapter."""
         shared = getattr(self, 'session_authority', None) is not None
-        return self._make_default_profile_message_handler() if self._multiplex_on() or shared else self._handle_message
+        if self._multiplex_on() or shared:
+            return self._make_default_profile_message_handler()
+        return self._standalone_scoped(self._handle_message)
 
     def _primary_busy_session_handler(self):
         """Return the correctly scoped busy-session handler for a primary adapter."""

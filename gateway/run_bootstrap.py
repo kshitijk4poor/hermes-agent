@@ -225,7 +225,7 @@ async def _start_gateway_start_control_socket(runner):
         # failure only means consumers fall back to the process-scan/state-file layer, exactly as before
         # this feature. See #92091.
         from gateway.control_socket import GatewayControlServer, build_identify_payload
-        from gateway.run_profile_reconcile import migrate_profile_identity_verb
+        from gateway.run_profile_reconcile import migrate_profile_identity_verb, purge_profile_identity_verb
         descriptor = runner.session_runtime_descriptor
 
         def _identify_runtime():
@@ -286,7 +286,8 @@ async def _start_gateway_start_control_socket(runner):
         _control_server = GatewayControlServer(
             verb_handlers={"pause-for-update": _pause_for_update_handler, "identify": _identify_runtime,
                            "rescan-profiles": _rescan_profiles_handler,
-                           "migrate-profile-identity": migrate_profile_identity_verb(runner)})
+                           "migrate-profile-identity": migrate_profile_identity_verb(runner),
+                           "purge-profile-identity": purge_profile_identity_verb(runner)})
         _control_server.ticket_store = runner.session_ticket_store
         if not await _control_server.start():
             _control_server = None
