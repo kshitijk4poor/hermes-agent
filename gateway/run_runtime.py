@@ -6,7 +6,8 @@ profile's runtime scope against that profile's ``state.db``. ``runner.session_au
 stays the launch profile's authority so single-profile behaviour is byte-identical.
 
 The served set is not frozen at boot: ``serve_profile_runtime`` / ``unserve_profile_runtime``
-grow and shrink it for the hot-serve reconcile.
+grow and shrink it for the hot-serve reconcile, and a secondary whose store cannot be opened
+is parked (logged, left out of ``served_profiles``) instead of aborting every other profile.
 """
 from __future__ import annotations
 
@@ -55,6 +56,16 @@ async def _build_profile_authority(runner, name, home, *, register):
     return authority
 
 
+def _park_reserved_profile(runner, name, home, exc):
+    """A secondary whose store is unusable is parked: logged, unreserved, left out of
+    ``served_profiles`` and named under ``parked_profiles`` in the runtime descriptor. Boot
+    continues for every other profile (a runtime hot-add parks the same way)."""
+    logger.error("[MULTIPLEX] Profile '%s' not served: its session store is unusable (%s): %s",
+                 name, home, exc)
+    release_profile_home(runner, home)
+    runner.session_runtime_descriptor.setdefault('parked_profiles', []).append(name)
+
+
 async def initialize_gateway_runtime(runner):
     from gateway.runtime_bootstrap import TicketStore
     from gateway.runtime_ownership import process_ownership
@@ -74,7 +85,12 @@ async def initialize_gateway_runtime(runner):
     registry = SessionAuthorities(homes[0][1])
     runner.session_authorities = registry
     for index, (name, home) in enumerate(homes):
-        await _build_profile_authority(runner, name, home, register=index == 0)
+        try:
+            await _build_profile_authority(runner, name, home, register=index == 0)
+        except Exception as exc:
+            if index == 0:
+                raise  # the launch profile's store is the process's own; nothing to park it behind
+            _park_reserved_profile(runner, name, home, exc)
     descriptor['authority_epoch'] = registry.launch.epoch
     descriptor['served_profiles'] = registry.served_profiles()
     runner.session_ticket_store = TicketStore(instance_id, registry.profile_ids())
