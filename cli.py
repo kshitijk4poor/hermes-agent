@@ -2690,6 +2690,379 @@ class HermesCLI(CLIInitMixin, CLITuiRuntimeMixin, CLIProcessNotificationsMixin, 
             from hermes_cli.relaunch import relaunch
             relaunch(self._pending_relaunch, preserve_inherited=False)
 
+    def _tui_shutdown(self):
+        """Teardown after the app exits: interrupt agent, stop voice/pet, persist + close session, cleanup, exit summary."""
+        self._should_exit = True
+        self._pet_stop_anim()
+        # Without this line the terminal sits silent through the whole cleanup window.
+        with suppress(Exception):
+            print(f"{_DIM}Shutting down… (finalizing session){_RST}", flush=True)
+        if self.agent and self._agent_running:
+            with suppress(Exception):
+                request_hard_interrupt(self.agent)
+        if self._voice_recorder:
+            with suppress(Exception):
+                self._voice_recorder.shutdown()
+            self._voice_recorder = None
+        with suppress(Exception):
+            from tools.voice_mode import cleanup_temp_recordings
+            cleanup_temp_recordings()
+        from agent.vault_backends.unlock import (lock as _vault_lock, set_code_prompt_callback,
+                                                 set_save_login_prompt_callback, set_unlock_prompt_callback)
+        for _unset in (set_sudo_password_callback, set_approval_callback, set_secret_capture_callback,
+                       set_unlock_prompt_callback, set_save_login_prompt_callback, set_code_prompt_callback):
+            _unset(None)
+        _vault_lock()  # session tokens for external password managers die with the session
+        # On SIGHUP/SIGTERM the agent thread may be reaped before its own persistence runs.
+        self._persist_active_session_before_close()
+
+        if self._session_db and self.agent:
+            try:
+                self._session_db.end_session(self.agent.session_id, "cli_close")
+            except (Exception, KeyboardInterrupt) as e:
+                logger.debug("Could not close session in DB: %s", e)
+            if not self._delete_session_on_exit:
+                # Drop the empty row of a start-and-quit session so /resume stays clean.
+                try:
+                    self._discard_session_if_empty(self.agent.session_id)
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.debug("Could not prune empty session: %s", e)
+            else:
+                # /exit --delete: remove transcripts + SQLite history.
+                try:
+                    _sid = self.agent.session_id
+                    if self._session_db.delete_session(_sid, sessions_dir=get_hermes_home() / "sessions"):
+                        _cprint(f"  {_DIM}✓ Session {_escape(_sid)} deleted{_RST}")
+                    else:
+                        _cprint(f"  {_DIM}✗ Session {_escape(_sid)} not found for deletion{_RST}")
+                except (Exception, KeyboardInterrupt) as e:
+                    logger.debug("Could not delete session on exit: %s", e)
+        # run_conversation() fires on_session_end on normal completion; only fire here mid-turn.
+        if self.agent and self._agent_running:
+            _invoke_interrupted_session_end(self.agent, self.agent.session_id, "shutdown")
+        _run_cleanup()
+        self._print_exit_summary()
+        self._release_active_session()
+
+
+def _int_or(value, default: int) -> int:
+    """``int(value)``, or ``default`` when it does not parse."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _interrupt_agent_for_signal(agent, signum) -> None:
+    """Hard-interrupt ``agent`` for a shutdown signal, then sleep ``HERMES_SIGTERM_GRACE`` (1.5 s).
+
+    The grace lets the agent thread kill the tool's setsid subprocess group before the
+    main thread unwinds (else an orphan child). Never raises.
+    """
+    try:
+        if agent is not None:
+            request_hard_interrupt(agent, f"received signal {signum}")
+            _grace = _float_env("HERMES_SIGTERM_GRACE", 1.5)
+            if _grace > 0:
+                time.sleep(_grace)
+    except Exception:
+        pass  # never block signal handling
+
+
+def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str) -> None:
+    """Drive a kanban goal_mode worker through ``goals.run_kanban_goal_loop`` after its first turn.
+
+    The caller swallows all errors: a broken loop must never wedge a worker.
+    """
+    task_id = (os.environ.get("HERMES_KANBAN_TASK") or "").strip()
+    if not task_id:
+        return
+    raw_run_id = (os.environ.get("HERMES_KANBAN_RUN_ID") or "").strip()
+    worker_run_id = _int_or(raw_run_id, None) if raw_run_id else None
+    if raw_run_id and worker_run_id is None:
+        logger.warning("invalid HERMES_KANBAN_RUN_ID=%r", raw_run_id)
+
+    from hermes_cli import kanban_db as _kb
+    from hermes_cli import kanban_db_connect as _kbc
+    from hermes_cli.goals import run_kanban_goal_loop as _run_loop, DEFAULT_MAX_TURNS as _DEF_TURNS
+
+    # Goal text = title + body (the acceptance criteria the judge evaluates against).
+    with _kbc.connect_closing() as conn:
+        task = _kb.get_task(conn, task_id)
+    if task is None:
+        return
+
+    goal_text = "\n\n".join(p for p in (task.title or "", task.body) if p).strip()
+    if not goal_text:
+        return
+
+    def _run_turn(prompt: str) -> str:
+        result = cli.agent.run_conversation(user_message=prompt, conversation_history=cli.conversation_history)
+        _sync_cli_session_id_from_agent(cli)
+        resp = result.get("final_response", "") if isinstance(result, dict) else str(result)
+        if resp:
+            print(resp)
+        return resp or ""
+
+    def _task_status() -> "str | None":
+        with _kbc.connect_closing() as c:
+            return _kb.goal_run_status(c, task_id, worker_run_id)
+
+    def _block(reason: str) -> None:
+        with _kbc.connect_closing() as c:
+            _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
+
+    _run_loop(
+        task_id=task_id, goal_text=goal_text, run_turn=_run_turn, task_status_fn=_task_status, block_fn=_block,
+        max_turns=task.goal_max_turns or _DEF_TURNS, first_response=first_response or "",
+        log=lambda m: logger.info("%s", m),
+    )
+
+
+def _sync_cli_session_id_from_agent(cli) -> None:
+    """Keep ``cli.session_id`` in sync when mid-run compression rotated the agent's session."""
+    if getattr(cli.agent, "session_id", None) and cli.agent.session_id != cli.session_id:
+        cli.session_id = cli.agent.session_id
+
+
+# ``failure_reason`` values that say nothing about the task itself: the provider is walled,
+# down or unreachable, or the account is out of credit, so a Kanban worker signals "try
+# later" instead of "I failed" and the dispatcher does not spend the task's retry budget on it.
+_TRANSIENT_PROVIDER_REASONS = frozenset({
+    "rate_limit", "upstream_rate_limit", "billing", "overloaded", "server_error", "timeout",
+})
+
+
+def _single_query_exit_code(result) -> int:
+    """Map a one-shot turn result onto a process exit code, for both `-q` and `-Q`.
+
+    0 only when the turn completed; 130 when it was interrupted; 1 when it failed, stopped
+    partway (`partial`, `completed: False`) or never ran at all (credentials / agent init
+    failed, so ``result`` is not a dict). A Kanban worker (``HERMES_KANBAN_TASK`` set) that
+    failed purely on a provider rate-limit / billing wall exits ``KANBAN_RATE_LIMIT_EXIT_CODE``
+    (EX_TEMPFAIL): the dispatcher books that run ``rate_limited`` and requeues the task
+    WITHOUT counting a failure, so a quota window or a provider outage cannot trip the breaker.
+    """
+    if not isinstance(result, dict):
+        return 1
+    if result.get("interrupted"):
+        return 130
+    if not (result.get("failed") or result.get("partial") or result.get("completed") is False):
+        return 0
+    if os.environ.get("HERMES_KANBAN_TASK") and result.get("failure_reason") in _TRANSIENT_PROVIDER_REASONS:
+        from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+        return KANBAN_RATE_LIMIT_EXIT_CODE
+    return 1
+
+
+def _run_quiet_single_query(cli, effective_query, emitter=None):
+    """Quiet (-Q) one-shot turn: run, print the response (stderr for errors/session_id), then sys.exit with the automation exit code.
+    With a ``StreamJsonEmitter`` the final answer and the exit line become the terminal ``result`` JSONL record instead.
+    HERMES_TURN_AUTHOR (set only by a bot-to-bot dispatcher) is consumed here so tool subprocesses do not inherit it.
+    Nested Bot Mode notifies bind this session's key (not the dispatcher's) and resume in-process
+    before stdout is printed, so a teammate reply is the quiet run's final answer rather than a
+    stranded receipt."""
+    from agent.interrupt_compat import _accepts_keyword
+    from agent.turn_author import take_turn_author_from_env
+    from hermes_cli.quiet_single_query import (
+        bind_quiet_session_key, continue_quiet_notify_completions, quiet_notify_linger_seconds,
+    )
+
+    author = take_turn_author_from_env()
+    author_kwargs = {"turn_author": author} if author is not None and _accepts_keyword(cli.agent.run_conversation, "turn_author") else {}
+    with bind_quiet_session_key(getattr(cli, "session_id", "") or "default"):
+        try:
+            result = cli.agent.run_conversation(
+                user_message=effective_query, conversation_history=cli.conversation_history, **author_kwargs,
+            )
+        except KeyboardInterrupt:
+            _emit_interrupted_session_end(cli, reason="keyboard_interrupt")
+            if emitter is not None:
+                sys.exit(emitter.emit_result({"failed": True, "error": "Interrupted"}, session_id=cli.session_id or "", exit_code=130))
+            print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
+            sys.exit(130)
+        # The exit line below reports session_id to stderr for automation wrappers;
+        # without this sync it would point at the ended parent after compression.
+        _sync_cli_session_id_from_agent(cli)
+        if isinstance(result, dict) and not result.get("failed"):
+            history = result.get("messages") or cli.conversation_history
+
+            def _follow_up(text):
+                nonlocal history
+                follow = cli.agent.run_conversation(
+                    user_message=text, conversation_history=history, **author_kwargs,
+                )
+                if isinstance(follow, dict) and follow.get("messages"):
+                    history = follow["messages"]
+                # Same sync contract as the main turn: a compression rotation during a
+                # follow-up must not leave a stale id on the exit line / drain key.
+                _sync_cli_session_id_from_agent(cli)
+                return follow
+
+            # One shared linger budget for the whole run: the loop below and the later
+            # _wait_for_oneshot_background_completions pass must not each wait the full
+            # oneshot_completion_wait_seconds on the same stuck notify_on_complete child.
+            # Flagged after the loop (finally-equivalent): the wait is the loop's first
+            # statement, so anything raising past that point has consumed budget the
+            # finalize pass must not re-wait.
+            try:
+                continued = continue_quiet_notify_completions(
+                    getattr(cli, "session_id", "") or "",
+                    _follow_up,
+                    owns_event=getattr(cli, "_owns_process_notification", None),
+                    linger_budget=quiet_notify_linger_seconds(),
+                )
+            finally:
+                cli._quiet_notify_linger_done = True
+            if isinstance(continued, dict):
+                result = continued
+        response = result.get("final_response", "") if isinstance(result, dict) else str(result)
+    # Surface backend errors that produced no visible output (e.g. invalid model slug
+    # -> provider 4xx) on stderr so piped stdout stays clean.
+    if emitter is not None:
+        pass  # the result record below carries text/error; nothing else may touch stdout
+    elif (
+        not response and isinstance(result, dict) and result.get("error")
+        and (result.get("failed") or result.get("partial"))
+    ):
+        print(f"Error: {result['error']}", file=sys.stderr)
+    elif response:
+        print(response)
+
+    # Kanban goal_mode: keep working in THIS session until a judge agrees the card is
+    # done, the worker terminates it, or the turn budget runs out (sticky block).
+    if os.environ.get("HERMES_KANBAN_GOAL_MODE") == "1":
+        try:
+            _run_kanban_goal_loop_q(cli, response)
+        except Exception as _goal_exc:
+            logger.debug("kanban goal loop failed: %s", _goal_exc)
+
+    if emitter is None:
+        print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
+
+    _exit_code = _single_query_exit_code(result)
+    if emitter is not None:
+        _exit_code = emitter.emit_result(result, session_id=cli.session_id or "", exit_code=_exit_code)
+    sys.exit(_exit_code)
+
+
+def _route_single_query_images(cli, query, effective_query, single_query_images, single_query_image_urls):
+    """Attach one-shot images natively when the model supports vision, else pre-describe them as text."""
+    if not (single_query_images or single_query_image_urls):
+        return effective_query
+    # Same image-routing decision as the interactive path: a vision-capable model
+    # (incl. custom-provider models declaring `model.supports_vision: true`) gets
+    # native image_url parts; otherwise the text pipeline (vision_analyze
+    # pre-description).
+    _img_mode = "text"
+    _build_parts = None
+    try:
+        from agent.image_routing import build_native_content_parts as _build_parts  # noqa: F811
+        from agent.image_routing import decide_image_input_mode
+        from hermes_cli.config import load_config
+
+        _img_mode = decide_image_input_mode(
+            (cli.provider or "").strip(), (cli.model or "").strip(), load_config(),
+            requested_provider=(cli.requested_provider or "").strip(),
+        )
+    except Exception:
+        _img_mode = "text"
+
+    def _text_fallback():
+        # ``_preprocess_images_with_vision`` only knows local files; when only URLs
+        # were supplied keep the original query text intact.
+        if single_query_images:
+            return cli._preprocess_images_with_vision(query, single_query_images, announce=False)
+        return effective_query
+
+    if _img_mode != "native" or _build_parts is None:
+        return _text_fallback()
+    try:
+        _parts, _skipped = _build_parts(
+            query if isinstance(query, str) else "",
+            [str(p) for p in single_query_images],
+            image_urls=list(single_query_image_urls) or None,
+        )
+        if any(p.get("type") == "image_url" for p in _parts):
+            return _parts
+        return _text_fallback()  # all images unreadable
+    except Exception:
+        return _text_fallback()
+
+
+def _collect_kanban_task_images(single_query_images):
+    """Kanban workers: image paths/URLs in the task body join the first turn's attachments."""
+    single_query_image_urls: list[str] = []
+    _kanban_task_id = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+    if not _kanban_task_id:
+        return single_query_image_urls
+    try:
+        from hermes_cli import kanban_db as _kb
+        from hermes_cli import kanban_db_connect as _kbc
+        from agent.image_routing import extract_image_refs as _extract_refs
+
+        with _kbc.connect_closing() as _conn:
+            _task = _kb.get_task(_conn, _kanban_task_id)
+        _body = getattr(_task, "body", "") if _task is not None else ""
+        if _body:
+            _kb_paths, _kb_urls = _extract_refs(_body)
+            # Dedupe against any --image the user already passed.
+            _seen = {str(p) for p in single_query_images}
+            for _p in _kb_paths:
+                if _p not in _seen:
+                    _seen.add(_p)
+                    single_query_images.append(Path(_p))
+            single_query_image_urls.extend(_kb_urls)
+    except Exception as _exc:
+        # Best-effort enrichment; never block worker startup on it.
+        logger.debug("kanban image-ref extraction failed: %s", _exc)
+    return single_query_image_urls
+
+
+def _install_single_query_signal_handlers(cli):
+    """Route SIGINT/SIGTERM/SIGHUP through agent.interrupt() before unwinding; kanban workers hard-exit.
+
+    A plain KeyboardInterrupt only unwinds the main thread, so tool worker threads
+    would orphan the setsid child; the interrupt + grace window lets them kill it.
+    """
+    import signal as _signal
+
+    def _signal_handler_q(signum, frame):
+        logger.debug("Received signal %s in single-query mode", signum)
+        _arm_exit_watchdog_on_shutdown_signal()  # covers wedges in the unwind below
+        _interrupt_agent_for_signal(getattr(cli, "agent", None), signum)
+        # Kanban: a non-daemon worker blocked in _wait_for_process survives KeyboardInterrupt
+        # and the dispatcher sees 'running' forever, so os._exit(0) (SIGALRM deadman guards
+        # a blocking flush). That skips atexit + the token-drain hook, hence the explicit flush.
+        # Kanban worker exit path (#28181): SIGTERM hits a dispatcher-spawned worker that's likely in a
+        # non-daemon thread waiting on a child subprocess in _wait_for_process. Raising KeyboardInterrupt
+        # only unwinds the main thread; the worker thread keeps running, the process gets reparented to
+        # init, and the dispatcher's _pid_alive check returns True forever — task stuck in 'running'
+        # indefinitely. Skip the controlled-unwind dance and call os._exit(0) so the kernel reclaims the PID
+        # immediately and detect_crashed_workers can reclaim the stale claim on the next tick. Flush logging
+        # + stdout/stderr first so the final debug trace isn't lost; SIGALRM deadman guards the flush
+        # against any rare blocking-I/O case (the reporter measured flush in <1ms; the alarm is a failsafe,
+        # not the common path).
+        if os.environ.get("HERMES_KANBAN_TASK"):
+            with suppress(Exception):
+                if hasattr(_signal, "SIGALRM"):
+                    _signal.signal(_signal.SIGALRM, lambda *_: os._exit(0))
+                    _signal.alarm(5)
+            with suppress(Exception):
+                # Durable flush FIRST: memory-provider shutdown inside _run_cleanup can issue aux-LLM calls,
+                # and nothing after it may fail in a way that loses the turn (#88583).
+                # os._exit(0) skips atexit AND SessionDB's token-drain hook, so flush + finalize the session
+                # store here or the worker's turn (and its usage deltas) never become durable (#88583 /
+                # #50881 class). Best-effort under the SIGALRM deadman above.
+                _flush_one_shot_session_store(cli)
+            _flush_logging_and_stdio()
+            os._exit(0)
+        raise KeyboardInterrupt()
+    with suppress(Exception):  # restricted environments
+        for _name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            if hasattr(_signal, _name):
+                _signal.signal(getattr(_signal, _name), _signal_handler_q)
+
 
 def _build_cli_from_args(model, toolsets, provider, reasoning, api_key, base_url, max_turns, run_budget, verbose, compact, resume, checkpoints, pass_session_id, ignore_rules, skills):
     """Resolve the toolset list (explicit / coding posture / platform default), construct HermesCLI, and start the background skills preload."""

@@ -11362,11 +11362,11 @@ function resetHermesConnectionState({ soft = false }: { soft?: boolean } = {}): 
   }
 }
 
-// Every deliberate emptying of the primary slot goes through here so the
-// dying child's stale exit reads as intentional (see primaryRecoverySuppressed).
+// Every deliberate emptying of the primary slot goes through here. Main's
+// #112344 exit supervisor (respawn when a Desktop-owned child dies) has no
+// counterpart on the canonical path: the gateway owns its own lifetime and
+// this slot only caches its descriptor, so forgetting it just forces a re-dial.
 function invalidatePrimaryConnection() {
-  primaryRecoverySuppressed = true
-
   return backendConnectionState.invalidate()
 }
 
