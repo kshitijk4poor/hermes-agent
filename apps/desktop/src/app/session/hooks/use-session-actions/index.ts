@@ -978,12 +978,23 @@ export function useSessionActions({
         const cwd =
           options?.cwd === null ? '' : typeof options?.cwd === 'string' ? options.cwd.trim() : resolveNewSessionCwd()
 
+        // #52589 provenance for the tile path: an explicitly-passed cwd is a
+        // deliberate workspace pick; a resolved default is inherited.
+        setCurrentCwdExplicit(typeof options?.cwd === 'string')
+
+        // Bot-workspace tabs target an agent profile without switching the
+        // window's ambient composer. Do not leak that unrelated session's
+        // composer selection (manual model/provider, reasoning effort, fast
+        // flag) into the bot's chat; omitting them lets the selected profile
+        // supply its configured defaults. Ordinary Sessions tiles keep the
+        // sticky composer override.
         const params = {
           ...(await desktopSessionCreateParams(
             cwd,
             capturedRoute,
             requestedProfile,
-            options?.route === null || defaultTarget?.route === null
+            options?.route === null || defaultTarget?.route === null,
+            workspaceScope.workspaceMode !== 'bots'
           )),
           request_id: crypto.randomUUID(),
           ...(workspaceScope.workspaceMode === 'bots' ? { hidden: true } : {})

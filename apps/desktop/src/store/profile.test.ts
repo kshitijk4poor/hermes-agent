@@ -9,6 +9,8 @@ import type { ProfileInfo } from '@/types/hermes'
 const ensureGatewayForProfile = vi.fn(async (_profile: string) => undefined)
 const ensureGatewayForAgent = vi.fn(async () => undefined)
 const openGatewayForProfile = vi.fn(async (_profile: string) => undefined)
+const openGatewayForAgent = vi.fn(async (_connectionId: null | string, _profile: string) => undefined)
+const openSecondaryCount = vi.fn(() => 0)
 const $gateway = atom<unknown>({ id: 'live-socket', connectionState: 'open' })
 const resetStarmapGraph = vi.fn()
 
@@ -20,7 +22,9 @@ vi.mock('@/store/gateway', () => ({
   activeGatewayProfileKey: () => ensureGatewayForProfile.mock.lastCall?.[0] ?? $activeGatewayProfile.get(),
   ensureGatewayForAgent,
   ensureGatewayForProfile,
-  openGatewayForProfile
+  openGatewayForAgent,
+  openGatewayForProfile,
+  openSecondaryCount
 }))
 vi.mock('@/hermes', () => ({
   getProfiles: vi.fn(async () => ({ profiles: [] })),
@@ -39,6 +43,12 @@ const {
   refreshProfiles,
   selectProfile
 } = await import('./profile')
+
+const { $projectScope, ALL_PROJECTS } = await import('./project-scope')
+const { $projectTree, resolveNewSessionCwd } = await import('./projects')
+
+const { $poolLimits } = await import('@/store/pool-limits')
+const { $connectionsRegistry } = await import('@/store/connection-registry-state')
 
 const { $connection } = await import('./session')
 const { invalidateProfileScopedQueries } = await import('@/lib/query-client')

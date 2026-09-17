@@ -8339,24 +8339,6 @@ function renewPortalAccessSilently() {
           // window already torn down
         }
 
-        rememberLog(`[cloud] silent portal access renewal ${ok ? 'succeeded' : 'did not complete'}`)
-        resolve(ok)
-      }
-
-      const checkCookie = async () => {
-        if (settled) {
-          return
-        }
-
-  const { connection, connectionId, profile } = await resolveGatewayFileBackend<GatewayFileConnection>(payload, {
-    ensureLegacy: ensureBackend,
-    ensureRegistry: ensureRegistryBackend
-  })
-
-  const suggested = String(payload.suggestedName || '').trim()
-  const fallbackName = path.basename(filePath) || suggested || 'download'
-  const ctx: GatewayFileSaveContext = { suggested, fallbackName }
-
   const requestPaths = gatewayFileRequestPaths(
     filePath,
     requestPath => gatewayFileRequestPath(connection, connectionId, profile, requestPath),

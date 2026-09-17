@@ -248,8 +248,9 @@ class FanoutTransport:
         (called with its transport, under the membership lock) may return one final frame that
         replaces the dropped backlog, so a socket that is still healthy learns it must resume
         rather than silently continuing with partial history."""
-        # Freeze the queued frame so a caller cannot mutate it after admission.
-        encoded = json.dumps(obj, ensure_ascii=False)
+        # Freeze the queued frame so a caller cannot mutate it after admission. Same serialization
+        # guard as the single-peer transports: an unserializable frame reaches every peer as -32603.
+        encoded = serialize_frame(obj, "fanout", logger)
         size = len(encoded.encode("utf-8", errors="surrogatepass"))
         frame = json.loads(encoded)
         overflowed: list[Transport] = []

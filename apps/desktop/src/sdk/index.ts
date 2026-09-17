@@ -369,7 +369,10 @@ export const DEFAULT_SESSION_HYDRATION_TIMEOUT_MS = 20_000
  *  and paint durable history. Bot Mode opts into one retry, so its effective
  *  ceiling is two bounded attempts rather than an unbounded wait. */
 export const BOT_CHAT_SESSION_HYDRATION_TIMEOUT_MS = 60_000
-
+/** Ceiling on the paint-first "Syncing…" badge. The profile gate it waits on is
+ *  not guaranteed to ever fire (see beginHydrationBackgroundSync), so the badge
+ *  needs a bound of its own or it outlives the wake it describes. */
+export const HYDRATION_SYNC_BADGE_TIMEOUT_MS = 30_000
 let openSessionGeneration = 0
 /** Which generation's wake most recently set $gatewaySwapTarget. Clearing it
  *  keys off this, not off `generation === openSessionGeneration`, so a
