@@ -73,7 +73,6 @@ import {
   type BackendOutputTail,
   claimDecision,
   execText,
-  formatBackendExitLine,
   isPidOnlyStartMarker,
   pidOnlyStartMarker,
   probeStartMarker,
@@ -84,9 +83,7 @@ import { dashboardFallbackArgs, serveBackendArgs } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { assertDescriptorStillOwned, forgetFailedDescriptor } from './backend-descriptor-cache'
 import { BackendDialClaims } from './backend-dial-claim'
-import type { HostBackendRecord } from './backend-discovery'
-import { buildDesktopBackendEnv, profileBackendParentEnv } from './backend-env'
-import { createBackendExitRecoveryLatch } from './backend-exit-recovery'
+import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import {
   backendCommandMatches,

@@ -88,7 +88,7 @@ def test_run_one_job_agent_declared_failure_uses_failure_bookkeeping(monkeypatch
     ok = s.run_one_job({"id": "declared-failure", "name": "delegate", "deliver": "telegram"})
 
     assert ok is True
-    assert [call[0] for call in calls] == ["run_job", "save", "deliver", "mark"]
+    assert [call[0] for call in calls] == ["run_job", "save", "enqueue", "mark"]
     assert calls[-1] == ("mark", "declared-failure", False)
 
 
@@ -98,8 +98,10 @@ def test_run_one_job_agent_declared_failure_is_delivered_verbatim(monkeypatch):
     delivered = []
     evidence = "The export subagent timed out after 30 minutes waiting on the database."
     _patch_pipeline(monkeypatch, final=f"[CRON_FAILURE]\n{evidence}")
+    # Delivery rides the durable queue on the canonical path; the composed content is what lands.
     monkeypatch.setattr(
-        s, "_deliver_result", lambda job, content, **kw: delivered.append(content))
+        "cron.delivery_queue.enqueue",
+        lambda execution_id, job, content, **kw: delivered.append(content) or {"status": "pending"})
 
     s.run_one_job({"id": "verbatim", "name": "nightly export", "deliver": "telegram"})
 
