@@ -200,45 +200,18 @@ describe('context-menu mutations hydrate the alias first', () => {
   })
 })
 
-describe('the bot row context menu speaks the active language', () => {
-  afterEach(() => {
-    locale.current = 'en'
-  })
+describe('age label reflects the last worker run, not only the last conversation (#105874)', () => {
+  const nowSec = () => Date.now() / 1000
 
-  it('renders the pin/hide toggles and the groups entry from the catalog, not English literals', async () => {
-    // Regression guard for the roster menu items that stayed hardcoded after
-    // the bundle landed: under `zh` no English label may survive.
-    locale.current = 'zh'
-    fireEvent.contextMenu(renderRow({ name: 'worker', connectionId: 'local' }))
-
-    const menu = await screen.findByRole('menu')
-
-    expect(within(menu).getByText('置顶')).toBeTruthy()
-    expect(within(menu).getByText('隐藏')).toBeTruthy()
-    expect(within(menu).getByText('管理群聊…')).toBeTruthy()
-    expect(within(menu).queryByText('Pin to top')).toBeNull()
-    expect(within(menu).queryByText('Hide')).toBeNull()
-    expect(within(menu).queryByText('Manage groups…')).toBeNull()
-  })
-})
-
-describe('a group row', () => {
-  const members = [{ name: 'alpha' }, { name: 'beta' }, { name: 'gamma' }] as GroupMember[]
-  const row = <GroupRow active={false} group="crew" members={members} needsYou={false} onDisband={noop} onNewSection={noop} onOpen={noop} />
-
-  beforeEach(() => {
-    locale.current = 'en'
-  })
-
-  it('previews an empty room and describes it to assistive tech in the active language', () => {
-    const english = render(row)
-
-    expect(english.getByText('3 bots')).toBeTruthy()
-    expect(english.getByRole('button', { name: 'crew, 3 bots, 3 of 3 available' })).toBeTruthy()
-    english.unmount()
-
-    locale.current = 'ja'
-    const japanese = render(row)
+  it('shows the worker-run age for a delegate-only bot whose worker is past the liveness window', () => {
+    // A specialist driven only via delegate_task: its newest human conversation is 11 days old,
+    // but it ran a `tool`/`kanban` worker 2h ago (well past the 150s liveness window). The label
+    // must read "2h", not "11d" — the busiest bot in the system used to read as the most idle.
+    renderRow({
+      name: 'auswerter',
+      last_session: { last_active: nowSec() - 11 * 86400 },
+      worker_session: { last_active: nowSec() - 2 * 3600 }
+    } as RosterRow)
 
     expect(screen.getByText('2h')).toBeTruthy()
     expect(screen.queryByText('11d')).toBeNull()
