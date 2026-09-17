@@ -523,8 +523,10 @@ export function prewarmProfileBackend(name: string, connectionId: null | string 
     return
   }
 
-  prewarmedAt.set(key, now)
-  openGatewayForProfile(key).catch(() => undefined)
+  prewarmedAt.set(scope, now)
+  // A registry connection prewarms its own gateway; only a local profile dials the primary.
+  const dial = connection ? openGatewayForAgent(connection, key) : openGatewayForProfile(key)
+  dial.catch(() => undefined)
 }
 
 let gatewaySwitch: Promise<void> | null = null
