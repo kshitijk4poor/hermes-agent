@@ -125,7 +125,7 @@ class GatewayProfileReconcileMixin:
                     del live[name]
             self._profile_own_gateway_warned = blocked
             sigs = self._served_profile_signatures or {}
-            from gateway.run_runtime import park_profile, unpark_profile
+            from gateway.run_runtime import unpark_profile
             for name in [n for n in self._parked_profile_names() if n not in live]:
                 unpark_profile(self, name)
             parked = self._parked_profile_names()
@@ -135,71 +135,88 @@ class GatewayProfileReconcileMixin:
             removed = [n for n in known if n not in live and n != active]
             changed = [n for n in live if n in known and n != active and n not in added
                        and profile_serve_signature(live[n]) != sigs.get(n)]
-            if not (added or removed or changed):
-                return {**result, "served_profiles": self.served_profile_names()}
-            for name in removed:
-                await self._unserve_profile(name, known[name])
-                result["removed"].append(name)
             current = {n: h for n, h in live.items() if n in known or n == active}
-            for name in list(added):
-                reason = await self._serve_profile_runtime(name, live[name])
-                if reason is not None:
-                    added.remove(name)
-                    park_profile(self, name, reason)
-                    result["parked"].append(name)
-                    continue
-                unpark_profile(self, name)
-                current[name] = live[name]
-            claimed = self._live_resource_claims(active)
-            transient_failed = set()
-            for name in added + changed:
-                # Only acknowledge the configuration observed before connecting;
-                # a setup save during an awaited handshake needs another scan.
-                scan_signature = profile_serve_signature(current[name])
-                try:
-                    connected = await self._start_one_profile_adapters(name, current[name], claimed)
-                except MultiplexConfigError as exc:
-                    # Boot refuses to run with such a profile; at runtime we park just this profile.
-                    logger.error("[MULTIPLEX] Profile '%s' not served: %s", name, exc)
-                    connected = 0
-                    sigs[name] = scan_signature
-                except Exception:
-                    logger.error("[MULTIPLEX] Failed to start adapters for profile '%s'", name, exc_info=True)
-                    connected = 0
-                    # A transient failure is not the deliberate park above: leave the signature
-                    # unacknowledged so the next reconcile retries the connect.
-                    transient_failed.add(name)
-                else:
-                    sigs[name] = scan_signature
-                if name in added:
-                    logger.info("[MULTIPLEX] Now serving profile '%s' (%s adapter(s) connected; %s)", name, connected, reason)
-                    result["added"].append(name)
-                else:
-                    logger.info("[MULTIPLEX] Re-scanned profile '%s' after config/.env change (%s adapter(s) connected)", name, connected)
-                    result["rescanned"].append(name)
-            self._served_profile_signatures = sigs
-            # A profile deleted while an adapter above was still connecting must not be recorded back
-            # (the deleter's signal timed out against this lock and rmtree already ran).
-            live_now = {str(name) for name, _home in profiles_to_serve(multiplex=True)}
-            for name in [n for n in current if n not in live_now and n != active]:
-                await self._unserve_profile(name, current.pop(name))
-                result["removed"].append(name)
-                added = [n for n in added if n != name]
-            self._record_served_profiles(active, list(current.items()))
-            # ``_note_served_profiles`` fills a missing signature with the current one; that refill
-            # would park a transiently-failed profile exactly like the config-error case above.
-            for name in transient_failed:
-                if isinstance(self._served_profile_signatures, dict):
-                    self._served_profile_signatures.pop(name, None)
-                # A cached config with no live adapters is owed a home-channel notice nothing can
-                # deliver, and the planned-restart marker then never clears.
-                configs = getattr(self, "_profile_configs", None)
-                if isinstance(configs, dict):
-                    configs.pop(name, None)
-            if added:
-                await self._after_profiles_added([(n, current[n]) for n in added])
-            result["served_profiles"] = self.served_profile_names()
-            return result
+            return await self._apply_profile_changes(
+                current, added, removed, changed, reason=reason, live=live, result=result)
+
+    async def _apply_profile_changes(self, current, added, removed, changed, *, reason,
+                                     live=None, result=None):
+        """Apply a selected diff under the reconcile lock, shared by the watcher and the
+        serve/unserve control verbs. New profiles first get a runtime (reservation + store); one
+        whose home another gateway owns or whose store is unusable is parked, not served."""
+        from gateway.run import MultiplexConfigError
+        from gateway.run_runtime import park_profile, unpark_profile
+        from hermes_cli.profiles import profiles_to_serve
+        active = getattr(self, "_primary_profile_name", None) or "default"
+        result = dict(result or {"added": [], "removed": [], "rescanned": [], "parked": [], "reason": reason})
+        result.setdefault("parked", [])
+        live = live if live is not None else dict(current)
+        known = dict(self._served_profile_homes or {})
+        sigs = self._served_profile_signatures or {}
+        if not (added or removed or changed):
+            return {**result, "served_profiles": self.served_profile_names()}
+        for name in removed:
+            await self._unserve_profile(name, known[name])
+            result["removed"].append(name)
+        for name in list(added):
+            reason_ = await self._serve_profile_runtime(name, live[name])
+            if reason_ is not None:
+                added.remove(name)
+                park_profile(self, name, reason_)
+                result["parked"].append(name)
+                continue
+            unpark_profile(self, name)
+            current[name] = live[name]
+        claimed = self._live_resource_claims(active)
+        transient_failed = set()
+        for name in added + changed:
+            # Only acknowledge the configuration observed before connecting;
+            # a setup save during an awaited handshake needs another scan.
+            scan_signature = profile_serve_signature(current[name])
+            try:
+                connected = await self._start_one_profile_adapters(name, current[name], claimed)
+            except MultiplexConfigError as exc:
+                # Boot refuses to run with such a profile; at runtime we park just this profile.
+                logger.error("[MULTIPLEX] Profile '%s' not served: %s", name, exc)
+                connected = 0
+                sigs[name] = scan_signature
+            except Exception:
+                logger.error("[MULTIPLEX] Failed to start adapters for profile '%s'", name, exc_info=True)
+                connected = 0
+                # A transient failure is not the deliberate park above: leave the signature
+                # unacknowledged so the next reconcile retries the connect.
+                transient_failed.add(name)
+            else:
+                sigs[name] = scan_signature
+            if name in added:
+                logger.info("[MULTIPLEX] Now serving profile '%s' (%s adapter(s) connected; %s)", name, connected, reason)
+                result["added"].append(name)
+            else:
+                logger.info("[MULTIPLEX] Re-scanned profile '%s' after config/.env change (%s adapter(s) connected)", name, connected)
+                result["rescanned"].append(name)
+        self._served_profile_signatures = sigs
+        # A profile deleted while an adapter above was still connecting must not be recorded back
+        # (the deleter's signal timed out against this lock and rmtree already ran).
+        live_now = {str(name) for name, _home in profiles_to_serve(multiplex=True)}
+        for name in [n for n in current if n not in live_now and n != active]:
+            await self._unserve_profile(name, current.pop(name))
+            result["removed"].append(name)
+            added = [n for n in added if n != name]
+        self._record_served_profiles(active, list(current.items()))
+        # ``_note_served_profiles`` fills a missing signature with the current one; that refill
+        # would park a transiently-failed profile exactly like the config-error case above.
+        for name in transient_failed:
+            if isinstance(self._served_profile_signatures, dict):
+                self._served_profile_signatures.pop(name, None)
+            # A cached config with no live adapters is owed a home-channel notice nothing can
+            # deliver, and the planned-restart marker then never clears.
+            configs = getattr(self, "_profile_configs", None)
+            if isinstance(configs, dict):
+                configs.pop(name, None)
+        if added:
+            await self._after_profiles_added([(n, current[n]) for n in added])
+        result["served_profiles"] = self.served_profile_names()
+        return result
 
     def _parked_profile_names(self) -> list:
         """Profiles that exist but could not be served (unusable store, home owned elsewhere); boot's
