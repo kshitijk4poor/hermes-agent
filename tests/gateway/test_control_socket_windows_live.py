@@ -2,12 +2,12 @@
 
 Runs ONLY on a real Windows host (the on-demand ``windows-venv-e2e.yml``
 lane). Spawns a REAL child process that binds the REAL named pipe via the
-dedicated native pipe worker with the DEFAULT verb handlers, then drives the real
+proactor event loop with the DEFAULT verb handlers, then drives the real
 sync client and the real fleet consumers against it — no mocks anywhere.
 
 Proves, on windows-latest:
   1. `GatewayControlServer` binds ``\\\\.\\pipe\\hermes-gateway-<hash>`` via
-     same-user local-only native pipe worker and answers ``identify``/``status``.
+     ``loop.start_serving_pipe`` and answers ``identify``/``status``.
   2. The sync client's pipe transport (open/write/read/busy-retry) works
      against a live server and returns the child's true pid + code identity.
   3. ``collect_fleet_versions()`` prefers the socket (``source: socket``).
@@ -30,7 +30,9 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.windows_only
+from tests.live_process_fixtures import sleeper_script_path
+
+pytestmark = pytest.mark.platforms("windows")  # live Windows named-pipe E2E
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -162,9 +164,11 @@ def test_pipe_gone_after_kill_falls_back(live_server, monkeypatch):
     # the kernel tears the server's handles down.
     assert _wait_until(lambda: identify_gateway(home, timeout=0.5) is None)
 
-    # Consumer falls back to the state file. Its live pid is THIS test process, whose command
-    # line is not a gateway's, so the record's self-reported SHA must not classify it (#109680):
-    # a fail-open visibility row with state ``unknown``, never ``stale``/``current``.
+    # Consumer falls back to the state file. That file is a claim, not an
+    # identity: its sha classifies a row only when live_gateway_pid_for_home
+    # verifies the PID as this home's gateway via its live command line
+    # (#110420). A real process wearing a `gateway run` argv stands in for
+    # a gateway that lost its pipe.
     import hermes_cli.update_receipt as ur
 
     monkeypatch.setattr(
@@ -215,5 +219,5 @@ def test_pipe_gone_after_kill_falls_back(live_server, monkeypatch):
     assert len(fleet) == 1, fleet
     assert "source" not in fleet[0]
     assert fleet[0]["pid"] == os.getpid()
-    assert fleet[0]["state"] == "unknown"
     assert fleet[0]["code_sha"] is None
+    assert fleet[0]["state"] == "unknown"

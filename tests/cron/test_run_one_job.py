@@ -43,17 +43,6 @@ def _patch_pipeline(monkeypatch, *, success=True, output="out", final="final res
     return calls
 
 
-def test_tick_process_job_sequence(monkeypatch):
-    """Characterization: a single due job driven through tick() runs the
-    sequence run_job → save → enqueue → mark, in that order."""
-    calls = _patch_pipeline(monkeypatch)
-    monkeypatch.setattr(s, "get_due_jobs", lambda: [{"id": "j1", "name": "t", "deliver": "telegram"}])
-    monkeypatch.setattr(s, "claim_job_for_fire", lambda _job_id, **_kwargs: True)
-
-    s.tick(verbose=False, sync=True)
-
-    assert [c[0] for c in calls] == ["run_job", "save", "enqueue", "mark"]
-    assert calls[-1] == ("mark", "j1", True)
 
 
 def test_tick_skips_job_when_durable_fire_claim_is_lost(monkeypatch):

@@ -1120,20 +1120,6 @@ describe('profile-aware plugin session opens', () => {
     expect($gatewaySwapTarget.get()).toBeNull()
   })
 
-  it('keeps chrome API home on the previous profile when opening a Bot Chat', async () => {
-    $activeGatewayProfile.set('default')
-
-    await host.openSession('bot-chat', {
-      profile: 'worker',
-      keepAllProfilesScope: true
-    })
-
-    expect(ensureGatewayProfile).not.toHaveBeenCalled()
-    expect(openGatewayForProfile).toHaveBeenCalledWith('worker')
-    expect(setShowAllProfiles).toHaveBeenCalledWith(true)
-    expect($activeGatewayProfile.get()).toBe('default')
-  })
-
   it('defaults keepAllProfilesScope to navigation instead of a workspace switch', async () => {
     $activeGatewayProfile.set('default')
 

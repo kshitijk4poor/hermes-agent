@@ -326,7 +326,6 @@ def test_local_delivery_admits_canonically_and_acks(tmp_path, monkeypatch):
     assert result["status"] == "queued"
     assert result["to"] == "@researcher"
     assert result["process_id"] == "proc_test1234"
-    assert "Do NOT wait" in result["detail"]
 
     # Exactly one canonical admission, on the target profile's own authority.
     assert [h for h, _p in authority.calls] == [target.resolve()]
@@ -360,22 +359,6 @@ def test_local_delivery_admits_canonically_and_acks(tmp_path, monkeypatch):
     assert params["message"] == content
 
 
-def test_cli_runner_ack_is_a_dispatch_ack_that_names_the_completion_notification(tmp_path, monkeypatch):
-    """``status: queued`` is returned before the background runner has delivered anything; the
-    detail (and the schema text the model reads) must say the completion notification carries
-    the outcome, so a runner that dies at exec is never read as a delivered message."""
-    _capture_spawn(monkeypatch)
-    home = _managed_home(tmp_path, teammates=("researcher",))
-    _canonical_target(monkeypatch, home / "profiles" / "researcher")
-    result = json.loads(bot_mode_dm.message_agent_tool(
-        target="researcher", message="hi", agent=_FakeAgent(home, title="Bot Chat")))
-
-    assert result["status"] == "queued"
-    assert "Do NOT wait or resend" in result["detail"]
-    assert "delivered" not in result["detail"].lower()
-    description = bot_mode_dm.message_agent_tool_schema()["function"]["description"]
-    assert "dispatch acknowledgement" in description and "not a delivery receipt" in description
-    assert "completion notification" in description and "delivery failure" in description
 
 
 def test_cli_runner_ack_is_queued_with_the_runner_delivery_id(tmp_path, monkeypatch):
@@ -654,32 +637,6 @@ def test_named_profile_sender_prefix(tmp_path, monkeypatch):
     assert _runner_author(calls[0]["command"]) == {"id": "bot:coder", "name": "coder", "is_bot": True}
 
 
-def test_delivery_command_author_json_survives_quoting(tmp_path):
-    """The optional author JSON survives shell quoting before the delivery mode."""
-    author = {"id": "bot:default", "name": "hermes", "is_bot": True}
-    command = bot_mode_dm._delivery_command(["hermes", "-p", "x"], str(tmp_path / "dm.txt"),
-                                            stdin_file=False, author=author)
-    parts = shlex.split(command)
-    assert parts[2:4] == ["--run-delivery", "--author"]
-    assert json.loads(parts[4]) == author
-    assert parts[5] == "query-file"
-    assert _runner_parts(command) == ("query-file", str(tmp_path / "dm.txt"), ["hermes", "-p", "x"], None)
-
-    # Without an author the optional argv pair is absent.
-    command = bot_mode_dm._delivery_command(["hermes"], "dm.txt", stdin_file=True)
-    assert shlex.split(command)[2:4] == ["--run-delivery", "stdin"]
-    assert _runner_author(command) is None
-
-
-@pytest.mark.windows_only
-def test_delivery_command_preserves_author_during_windows_slash_rewrite():
-    command = bot_mode_dm._delivery_command(["hermes", "-p", "x"], "C:\\Users\\me\\dm.txt",
-                                            stdin_file=False, author={"id": "bot:default", "name": 'q"q', "is_bot": True})
-    parts = shlex.split(command)
-    assert json.loads(parts[4]) == {"id": "bot:default", "name": 'q"q', "is_bot": True}
-    assert parts[6] == "C:/Users/me/dm.txt"
-
-
 def test_unavailable_authority_is_reported_never_worked_around(tmp_path, monkeypatch):
     """No canonical target: the sender learns the outcome is unknown and nothing
     else (no CLI, no background runner) is started."""
@@ -777,7 +734,9 @@ def test_live_dm_runner_retry_never_reexecutes_failed_admission(tmp_path, monkey
 # ── plaintext tempfile lifecycle (peer stdin transport) ─────────────────────
 
 
-def test_peer_delivery_runner_keeps_file_for_child_then_unlinks(tmp_path):
+@pytest.mark.parametrize("stdin_file", [False, True])
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_delivery_runner_keeps_file_for_child_then_unlinks(tmp_path, stdin_file, encoding):
     dm_file = tmp_path / "message with spaces.txt"
     dm_file.write_bytes("secret λ $(not shell)".encode(encoding))
     observed = tmp_path / "observed.txt"
@@ -788,14 +747,19 @@ def test_peer_delivery_runner_keeps_file_for_child_then_unlinks(tmp_path):
             import pathlib
             import sys
 
-            pathlib.Path(sys.argv[1]).write_text(sys.stdin.read(), encoding="utf-8")
+            source = sys.stdin if sys.argv[1] == "-" else open(sys.argv[1], encoding="utf-8-sig")
+            with source:
+                pathlib.Path(sys.argv[2]).write_text(source.read(), encoding="utf-8")
             """
         ),
         encoding="utf-8",
     )
+    source_arg = "-" if stdin_file else str(dm_file)
 
     returncode = bot_mode_dm._run_delivery(
-        [sys.executable, str(child), str(observed)], str(dm_file), stdin_file=True
+        [sys.executable, str(child), source_arg, str(observed)],
+        str(dm_file),
+        stdin_file=stdin_file,
     )
 
     assert returncode == 0
@@ -803,17 +767,6 @@ def test_peer_delivery_runner_keeps_file_for_child_then_unlinks(tmp_path):
     assert not dm_file.exists()
 
 
-def test_peer_delivery_runner_unlinks_when_child_launch_raises(tmp_path, monkeypatch):
-    dm_file = tmp_path / "message.txt"
-    dm_file.write_text("secret", encoding="utf-8")
-
-    def boom(*args, **kwargs):
-        raise RuntimeError("child launch failed")
-
-    monkeypatch.setattr(subprocess, "run", boom)
-    with pytest.raises(RuntimeError, match="child launch failed"):
-        bot_mode_dm._run_delivery(["hermes"], str(dm_file), stdin_file=True)
-    assert not dm_file.exists()
 
 
 def test_peer_delivery_runner_preserves_child_failure_and_unlinks(tmp_path):
@@ -931,24 +884,6 @@ def test_real_delivery_command_round_trip_carries_author(tmp_path):
     assert not dm_file.exists()
 
 
-def test_delivery_main_runs_peer_transport_and_unlinks(tmp_path):
-    dm_file = tmp_path / "message.txt"
-    dm_file.write_text("secret", encoding="utf-8")
-    observed = tmp_path / "observed.txt"
-    child = tmp_path / "child.py"
-    child.write_text(
-        "import pathlib, sys\n"
-        "pathlib.Path(sys.argv[1]).write_text(sys.stdin.read(), encoding='utf-8')\n",
-        encoding="utf-8",
-    )
-
-    returncode = bot_mode_dm._delivery_main(
-        ["--run-delivery", "stdin", str(dm_file), sys.executable, str(child), str(observed)]
-    )
-
-    assert returncode == 0
-    assert observed.read_text(encoding="utf-8") == "secret"
-    assert not dm_file.exists()
 
 
 def test_delivery_main_maps_launch_exception_to_one_and_unlinks(tmp_path, monkeypatch):

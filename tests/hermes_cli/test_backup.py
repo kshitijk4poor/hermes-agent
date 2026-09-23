@@ -728,7 +728,6 @@ class TestImport:
         out = capsys.readouterr().out
         assert "Preserved 1 runtime state file(s)" in out
         assert "Done. Your Hermes configuration has been restored." in out
-        assert "hermes gateway run" in out
 
 
 

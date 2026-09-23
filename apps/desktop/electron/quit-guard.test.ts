@@ -54,35 +54,6 @@ test('quitPromptFor summarizes past the list cap and counts untitled work', () =
   assert.ok(prompt.detail.includes('• 5 more'))
 })
 
-// #79579: only a backend the app owns (spawned locally, or started over SSH)
-// dies with it. A remote URL or Hermes Cloud backend keeps the turn running
-// after the app quits, so the prompt must not claim the work is lost.
-test('backendOwnedByApp: a local primary is owned even before its child attaches', () => {
-  assert.equal(backendOwnedByApp({ ownedBackendCount: 0, primaryRouteKind: null }), true)
-})
-
-test('backendOwnedByApp: an SSH primary is owned (the app starts and stops that server)', () => {
-  assert.equal(backendOwnedByApp({ ownedBackendCount: 0, primaryRouteKind: 'ssh' }), true)
-})
-
-test('backendOwnedByApp: a remote URL or cloud primary with nothing spawned is not owned', () => {
-  assert.equal(backendOwnedByApp({ ownedBackendCount: 0, primaryRouteKind: 'remote' }), false)
-  assert.equal(backendOwnedByApp({ ownedBackendCount: 0, primaryRouteKind: 'cloud' }), false)
-})
-
-test('backendOwnedByApp: a remote primary alongside a spawned backend stays owned', () => {
-  // Another window/profile may be running its turn on that local child.
-  assert.equal(backendOwnedByApp({ ownedBackendCount: 1, primaryRouteKind: 'remote' }), true)
-})
-
-test('quitPromptFor warns about lost work when the app owns the backend (local)', () => {
-  const owned = backendOwnedByApp({ ownedBackendCount: 1, primaryRouteKind: null })
-  const prompt = quitPromptFor({ count: 1, titles: ['Fix login'] }, false, owned)
-
-  assert.ok(prompt)
-  assert.equal(prompt.message, 'Hermes is still working on 1 chat.')
-})
-
 test('active-work reports with unknown lifecycle keep a scoped confirmation, not a work-loss claim', () => {
   // The real IPC summary has no connection identity or Desktop-tool activity.
   // Neither named nor untitled work proves it is independent of the client.

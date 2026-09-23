@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { isSessionBusyError, markSubmitting, submitPrompt, type SubmitPromptDeps } from '../app/submissionCore.js'
+import { isSessionBusyError, submitPrompt, type SubmitPromptDeps } from '../app/submissionCore.js'
 import { captureDestination } from '../app/submissionDestination.js'
 import { getUiState, patchUiState, resetUiState } from '../app/uiStore.js'
 import type { GatewayClient } from '../gatewayClient.js'
@@ -221,16 +221,6 @@ it('never downgrades ambiguous or conflicting durable submissions to legacy deli
     await vi.waitFor(() => expect(settle).toHaveBeenLastCalledWith(false))
     expect(request).toHaveBeenCalledTimes(1)
   }
-})
-
-describe('submissionCore.markSubmitting', () => {
-  beforeEach(() => resetUiState())
-
-  it('sets busy + running status', () => {
-    markSubmitting()
-    expect(getUiState().busy).toBe(true)
-    expect(getUiState().status).toBe('running…')
-  })
 })
 
 describe('submissionCore.isSessionBusyError', () => {

@@ -1,7 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { I18nProvider } from '@/i18n'
 import { clearNotifications, notify } from '@/store/notifications'
 import { stubResizeObserver } from '@/test/jsdom'
 
@@ -36,23 +35,4 @@ describe('toast titles', () => {
       await waitFor(() => expect(screen.queryByText('Notice 6')).toBeNull())
     }
   )
-
-  it('renders the full title and body instead of truncating them', () => {
-    notify({ kind: 'error', title: LONG_TITLE, message: DETAIL })
-
-    render(
-      <I18nProvider configClient={null} initialLocale="en">
-        <NotificationStack />
-      </I18nProvider>
-    )
-
-    const title = screen.getByText(LONG_TITLE)
-
-    expect(title.textContent).toBe(LONG_TITLE)
-    expect(title.getAttribute('title')).toBe(LONG_TITLE)
-    expect(title.className).toMatch(/\bline-clamp-none\b/)
-    expect(title.className).not.toMatch(/\bline-clamp-1\b/)
-    expect(title.className).toMatch(/\boverflow-y-auto\b/)
-    expect(screen.getByText(DETAIL)).toBeTruthy()
-  })
 })

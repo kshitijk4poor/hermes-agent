@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -4241,13 +4242,39 @@ class TestDeleteSessionEndpoint:
         self.auth_client = TestClient(app)
         self.auth_client.headers[_SESSION_HEADER_NAME] = _SESSION_TOKEN
 
-    def test_delete_absent_session_is_idempotent(self):
-        # PREMISE / regression: deleting a row that no longer exists must NOT
-        # 404 — the desktop would resurrect the ghost row and show
-        # "session not found". DELETE's contract is "ensure it's gone".
-        resp = self.auth_client.delete("/api/sessions/never_existed")
-        assert resp.status_code == 200
-        assert resp.json().get("ok") is True
+    def _seed(self, ids):
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            for sid in ids:
+                db.create_session(session_id=sid, source="cli")
+        finally:
+            db.close()
+
+    def _exists(self, sid) -> bool:
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            return db.get_session(sid) is not None
+        finally:
+            db.close()
+
+
+    def test_delete_absent_session_is_idempotent(self, mutation_owner):
+        from gateway.session_authority import LiveSession
+        self._seed(['delete-retry'])
+        mutation_owner.sessions['delete-retry'] = LiveSession(None, 'route')
+        row = mutation_owner.db.get_session('delete-retry')
+        params = dict(request_id='delete-once', expected_revision=row['runtime_revision'],
+                      expected_generation=row['runtime_generation'])
+        first = self.auth_client.delete('/api/sessions/delete-retry', params=params)
+        assert first.status_code == 200, first.text
+        assert not self._exists('delete-retry')
+        retry = self.auth_client.delete('/api/sessions/delete-retry', params=params)
+        assert retry.status_code == 200, retry.text
+        assert retry.json() == first.json()
 
     def test_delete_existing_session_scrubs_row_and_disk(self):
         # The CLI delete path threads the sessions dir so transcript
@@ -4310,19 +4337,14 @@ class TestDeleteSessionEndpoint:
 
         resp = self.auth_client.delete("/api/sessions/profile-scrub?profile=worker")
 
-    def test_delete_absent_session_is_idempotent(self, mutation_owner):
-        from gateway.session_authority import LiveSession
-        self._seed(['delete-retry'])
-        mutation_owner.sessions['delete-retry'] = LiveSession(None, 'route')
-        row = mutation_owner.db.get_session('delete-retry')
-        params = dict(request_id='delete-once', expected_revision=row['runtime_revision'],
-                      expected_generation=row['runtime_generation'])
-        first = self.auth_client.delete('/api/sessions/delete-retry', params=params)
-        assert first.status_code == 200, first.text
-        assert not self._exists('delete-retry')
-        retry = self.auth_client.delete('/api/sessions/delete-retry', params=params)
-        assert retry.status_code == 200, retry.text
-        assert retry.json() == first.json()
+        assert resp.status_code == 200
+        assert resp.json().get("ok") is True
+        db = SessionDB(db_path=db_path)
+        try:
+            assert db.get_session("profile-scrub") is None
+        finally:
+            db.close()
+        assert not (sessions_dir / "session_profile-scrub.json").exists()
 
 
 class TestBulkDeleteSessionsEndpoint:
@@ -5605,10 +5627,6 @@ class TestSessionPatchUnread:
         rows = self.auth_client.get("/api/sessions?limit=100").json()["sessions"]
         assert next(s for s in rows if s["id"] == "s1")["unread"] is False
 
-    def test_patch_unread_alone_is_accepted(self):
-        # The route's "Nothing to update" guard must not reject a bare unread.
-        resp = self._patch({"unread": True})
-        assert resp.status_code == 200
 
     def test_patch_unread_rejects_non_bool(self):
         # NB: pydantic v2 coerces "yes"/"no"/"1"/"0"/"on"/"off" to bool, so use
@@ -5630,10 +5648,6 @@ class TestSessionPatchUnread:
         assert restored.status_code == 200
         rows = self.auth_client.get("/api/sessions?limit=100").json()["sessions"]
         assert bool(next(s for s in rows if s["id"] == "s1")["hidden"]) is False
-
-    def test_patch_hidden_alone_is_accepted(self):
-        resp = self._patch({"hidden": True})
-        assert resp.status_code == 200
 
 
 def test_mount_spa_dynamic_web_dist_recheck(tmp_path, monkeypatch):

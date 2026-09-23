@@ -1583,8 +1583,9 @@ def get_runtime_status_running_pid(
     # lose the "PID file race" to its own process and skip the stale gateway.pid cleanup.
     if pid == os.getpid():
         return None
-    # Active-profile context: the record's hermes_home must match this process so a stale record
-    # cannot lend another profile's identity.
+    # The record's hermes_home must match the home asked about (this process unscoped) so a stale
+    # or copied record cannot lend another home's gateway identity; legacy records without the
+    # stamp prove nothing either way and fall through to the live command-line check.
     if expected_home is None and not _pid_record_belongs_to_current_profile(payload):
         return None
     if expected_home is not None and recorded_gateway_home_conflicts(payload, expected_home=expected_home):

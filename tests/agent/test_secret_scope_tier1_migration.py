@@ -275,30 +275,19 @@ class TestScopedEnvironGet:
     after the call would silently borrow the launch profile's env on a bound-scope
     failure."""
 
-class TestAzureIdentityPresence:
-    def _describe(self):
-        azure = pytest.importorskip("agent.azure_identity_adapter")
-        if not azure.has_azure_identity_installed():
-            pytest.skip("azure-identity not installed")
-        return azure.describe_active_credential
+    def test_scope_failure_never_borrows_env(self, monkeypatch):
+        from hermes_cli.config import _scoped_environ_get
 
-    def test_scoped_client_secret_detected(self, monkeypatch):
-        describe = self._describe()
-        # Every AZURE_* read is scoped: a served profile's env-borrowed client/tenant id is the
-        # launch profile's identity, so the whole service-principal triplet comes from the scope.
-        for name in ("AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET", "AZURE_FEDERATED_TOKEN_FILE"):
-            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("SOME_PROFILE_KEY", "other-profile")
         ss.set_multiplex_active(True)
-        with _Scope({"AZURE_CLIENT_ID": "cid", "AZURE_TENANT_ID": "tid", "AZURE_CLIENT_SECRET": "scoped-secret"}):
-            info = describe(timeout_seconds=0.01, allow_install=False)
-        assert any("EnvironmentCredential" in s for s in info.get("env_sources", []))
+        with _Scope(_ExplodingScope()):
+            with pytest.raises(RuntimeError, match="resolver boom"):
+                _scoped_environ_get("SOME_PROFILE_KEY")
 
-    def test_scoped_miss_hides_env_secret(self, monkeypatch):
-        describe = self._describe()
-        monkeypatch.setenv("AZURE_CLIENT_ID", "cid")
-        monkeypatch.setenv("AZURE_TENANT_ID", "tid")
-        monkeypatch.setenv("AZURE_CLIENT_SECRET", "other-profile-secret")
-        monkeypatch.delenv("AZURE_FEDERATED_TOKEN_FILE", raising=False)
+    def test_unscoped_multiplex_propagates(self, monkeypatch):
+        from hermes_cli.config import _scoped_environ_get
+
+        monkeypatch.setenv("SOME_PROFILE_KEY", "launch-env")
         ss.set_multiplex_active(True)
         with pytest.raises(ss.UnscopedSecretError):
             _scoped_environ_get("SOME_PROFILE_KEY")

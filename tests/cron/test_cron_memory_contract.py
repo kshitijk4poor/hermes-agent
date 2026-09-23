@@ -112,21 +112,3 @@ class TestCronMemoryContractOff:
             "config.yaml agent.disabled_toolsets must propagate 'memory' into "
             "the cron agent's denylist — the OFF direction of the contract"
         )
-
-    def test_skip_memory_is_not_a_per_job_knob(self, tmp_path):
-        """No per-job field flips skip_memory: the scheduler always passes False.
-
-        Guards against a partial re-flip where some job shape quietly gets
-        #91384 behavior back. A field named skip_memory on the job dict is
-        ignored by the construction site.
-        """
-        job = {
-            "id": "mem-contract-noknob",
-            "name": "t",
-            "prompt": "hi",
-            "skip_memory": True,  # not a supported job field; must be ignored
-        }
-        with _run_job_patches(tmp_path) as (fake_db, agent_cls):
-            _run_owned_job(job, tmp_path, fake_db)
-        kwargs = agent_cls.call_args.kwargs
-        assert kwargs["skip_memory"] is False

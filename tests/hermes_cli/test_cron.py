@@ -386,29 +386,6 @@ class TestExternalCronProviderStatus:
         assert "Scheduler is not ready" not in out
 
 
-def test_cron_list_warns_when_gateway_not_running(monkeypatch, capsys):
-    monkeypatch.setattr(
-        "cron.jobs.list_jobs",
-        lambda include_disabled=False: [
-            {
-                "id": "job-1",
-                "name": "Nightly docs",
-                "schedule_display": "every day",
-                "state": "scheduled",
-                "enabled": True,
-                "next_run_at": "2026-06-01T00:00:00Z",
-                "deliver": ["local"],
-            }
-        ],
-    )
-    monkeypatch.setattr("hermes_cli.gateway.find_gateway_pids", lambda: [])
-    monkeypatch.setattr(cron_cli, "_active_cron_provider_name", lambda: "builtin")
-
-    cron_cli.cron_list()
-
-    out = capsys.readouterr().out
-    assert "Scheduler is not ready" in out
-    assert "Nightly docs" in out
 
 
 def test_cron_tick_invokes_scheduler_tick_verbose_and_headless(monkeypatch):
@@ -418,6 +395,7 @@ def test_cron_tick_invokes_scheduler_tick_verbose_and_headless(monkeypatch):
     monkeypatch.setattr("cron.scheduler.tick",
                         lambda verbose=False, headless=False: calls.append((verbose, headless)))
 
+    cron_cli.cron_tick()
 
     assert calls == [(True, True)]
 

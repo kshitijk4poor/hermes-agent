@@ -1,14 +1,4 @@
-/**
- * Wiring coverage for the main.ts gateway download transports. These functions
- * pull in main-process singletons (electronNet, the OAuth session, the save
- * dialog), so we assert on their source shape — the same approach as
- * oauth-session-request.test.ts — while gateway-file-download.test.ts unit-tests
- * the extracted streaming/decoding logic behaviorally. The token transport
- * lives in gateway-download-transport.ts and is covered behaviorally by
- * gateway-download-transport.test.ts.
- */
-
-import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import fs from 'node:fs'
 import http from 'node:http'
 import type { AddressInfo } from 'node:net'
@@ -189,8 +179,156 @@ class CookieRequest extends EventEmitter implements GatewayOauthDownloadRequest 
   }
 }
 
-test('oauth transport streams to disk instead of buffering the whole body', () => {
-  const fn = extract('function downloadViaOauthSessionToFile', '\nasync function finalizeGatewayDownload')
+test('cookie transport preserves the session, waits for the dialog without a deadline, and cancels without writing', async (): Promise<void> => {
+  vi.useFakeTimers()
+  const session: FixtureSession = { partition: 'persist:gateway-test' }
+  const request: CookieRequest = new CookieRequest()
+  const decision: Deferred<GatewaySaveDialogResult> = deferred<GatewaySaveDialogResult>()
+  const response = Object.assign(new PassThrough(), { statusCode: 200, headers: {} })
+
+  const deps: GatewayOauthDownloadDeps<FixtureSession> = {
+    getSession: (url: string): FixtureSession => {
+      expect(url).toBe('https://gateway.example/file')
+
+      return session
+    },
+    request: (options: GatewayOauthRequestOptions<FixtureSession>): GatewayOauthDownloadRequest => {
+      expect(options).toEqual({
+        method: 'GET',
+        url: 'https://gateway.example/file',
+        session,
+        useSessionCookies: true,
+        redirect: 'follow'
+      })
+      expect(options.session).toBe(session)
+
+      return request
+    },
+    showSaveDialog: (): Promise<GatewaySaveDialogResult> => decision.promise
+  }
+
+  const pending: Promise<GatewayFileSaveResult> = downloadViaOauthSessionToFile(
+    'https://gateway.example/file',
+    context,
+    deps,
+    { timeoutMs: 2000 }
+  )
+
+  expect(request.ended).toBe(true)
+  request.emit('response', response)
+  await vi.advanceTimersByTimeAsync(10000)
+  expect(request.aborted).toBe(false)
+  expect(response.listenerCount('data')).toBe(0)
+  decision.resolve({ canceled: true })
+  expect(await pending).toEqual({ canceled: true, saved: false })
+  expect(request.aborted).toBe(true)
+  expect(await fs.promises.readdir(directory)).toEqual([])
+  response.destroy()
+})
+
+test('cookie connection timeout aborts before headers and never opens a dialog', async (): Promise<void> => {
+  vi.useFakeTimers()
+  const request: CookieRequest = new CookieRequest()
+
+  const pending: Promise<GatewayFileSaveResult> = downloadViaOauthSessionToFile(
+    'https://gateway.example/file',
+    context,
+    {
+      getSession: (): FixtureSession => ({ partition: 'persist:gateway-test' }),
+      request: (): GatewayOauthDownloadRequest => request,
+      showSaveDialog: async (): Promise<GatewaySaveDialogResult> => {
+        throw new Error('unexpected dialog')
+      }
+    },
+    { timeoutMs: 2000 }
+  )
+
+  const rejected: Promise<void> = expect(pending).rejects.toThrow('Timed out connecting to Hermes backend after 2000ms')
+  await vi.advanceTimersByTimeAsync(2000)
+  await rejected
+  expect(request.aborted).toBe(true)
+  expect(await fs.promises.readdir(directory)).toEqual([])
+})
+
+test('cookie transport streams bytes after approval and preserves HTTP status on errors', async (): Promise<void> => {
+  for (const statusCode of [200, 404, 503]) {
+    const request: CookieRequest = new CookieRequest()
+    const destination: string = path.join(directory, 'cookie.bin')
+    const response = Object.assign(new PassThrough(), { statusCode, headers: {} })
+
+    const pending: Promise<GatewayFileSaveResult> = downloadViaOauthSessionToFile(
+      'https://gateway.example/file',
+      context,
+      {
+        ...saveDialog(destination),
+        getSession: (): FixtureSession => ({ partition: 'persist:gateway-test' }),
+        request: (): GatewayOauthDownloadRequest => request
+      }
+    )
+
+    const rejection: Promise<void> | null =
+      statusCode >= 400
+        ? expect(pending).rejects.toMatchObject({ statusCode, message: `${statusCode}: cookie error` })
+        : null
+
+    request.emit('response', response)
+    response.end(statusCode === 200 ? 'cookie payload' : 'cookie error')
+
+    if (rejection) {
+      await rejection
+    } else {
+      expect(await pending).toEqual({ saved: true, path: destination })
+    }
+
+    expect(await fs.promises.readFile(destination, 'utf8')).toBe('cookie payload')
+    expect(await fs.promises.readdir(directory)).toEqual(['cookie.bin'])
+  }
+})
+
+test.each([404, 401, 403, 500])(
+  'HTTP %i preserves status and permits only the scoped 404 fallback',
+  async (statusCode: number): Promise<void> => {
+    const baseUrl: string = await serve((_request: http.IncomingMessage, response: http.ServerResponse): void => {
+      response.writeHead(statusCode)
+      response.end('backend error')
+    })
+
+    const destination: string = path.join(directory, 'saved.bin')
+
+    const paths = gatewayFileRequestPaths(
+      '/remote/report.bin',
+      (requestPath: string): string => pathForRegistryBackendRequest(requestPath, 'acme', { sharedRemote: true }),
+      'session-42'
+    )
+
+    const reads: string[] = []
+
+    const pending: Promise<GatewayFileSaveResult> = saveGatewayDownload(paths, context, {
+      ...saveDialog(destination),
+      download: (requestPath: string, ctx: GatewayFileSaveContext): Promise<GatewayFileSaveResult> =>
+        downloadViaTokenToFile(`${baseUrl}${requestPath}`, 'session-token', ctx, {
+          showSaveDialog: async (): Promise<GatewaySaveDialogResult> => {
+            throw new Error('HTTP errors must not open a dialog')
+          }
+        }),
+      readDataUrl: async (requestPath: string): Promise<string> => {
+        reads.push(requestPath)
+
+        return 'data:application/octet-stream;base64,aGVsbG8='
+      }
+    })
+
+    if (statusCode === 404) {
+      expect(await pending).toEqual({ saved: true, path: destination })
+      expect(reads).toEqual(['/api/fs/read-data-url?path=%2Fremote%2Freport.bin&session_id=session-42&profile=acme'])
+      expect(await fs.promises.readFile(destination, 'utf8')).toBe('hello')
+    } else {
+      await expect(pending).rejects.toMatchObject({ statusCode, message: `${statusCode}: backend error` })
+      expect(reads).toEqual([])
+      expect(await fs.promises.readdir(directory)).toEqual([])
+    }
+  }
+)
 
 test('dialog-time and mid-stream failures abort without clobbering an existing destination', async (): Promise<void> => {
   const destination: string = path.join(directory, 'existing.bin')

@@ -7,7 +7,8 @@ import type { InflightTurn, SessionResumeResult, Usage } from '@hermes/shared/ga
 import { type RefObject, useCallback, useEffect, useMemo, useRef } from 'react'
 
 import { localCreationOptions } from '../canonicalGateway.js'
-import { buildSetupRequiredSections, SETUP_REQUIRED_TITLE } from '../content/setup.js'
+import { STARTUP_WORKSPACE_CWD } from '../config/env.js'
+import { buildSetupRequiredSections, setupRequiredTitle } from '../content/setup.js'
 import { introMsg, toTranscriptMessages } from '../domain/messages.js'
 import { ZERO } from '../domain/usage.js'
 import { type GatewayClient } from '../gatewayClient.js'
@@ -19,6 +20,7 @@ import type {
   SessionTitleResponse,
   SetupStatusResponse
 } from '../gatewayTypes.js'
+import { t } from '../i18n/runtime.js'
 import { migratePendingInputs } from '../lib/pendingInputs.js'
 import { asRpcResult } from '../lib/rpc.js'
 import type { Msg, PanelSection, SessionInfo } from '../types.js'
@@ -289,8 +291,8 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         if (flight !== attachmentFlight.current) {return null}
 
         if (setup?.provider_configured === false) {
-          panel(SETUP_REQUIRED_TITLE, buildSetupRequiredSections())
-          patchUiState({ status: 'setup required' })
+          panel(setupRequiredTitle(), buildSetupRequiredSections())
+          patchUiState({ status: t('session.status.setupRequired') })
 
           return null
         }
@@ -301,8 +303,13 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
           if (flight !== attachmentFlight.current) {return null}
         }
 
+        // HERMES_TUI_CWD is the dashboard-picked workspace: an explicit cwd on
+        // session.create on both transports, so /new stays in that workspace.
+        const workspaceCwd = STARTUP_WORKSPACE_CWD ? { cwd: STARTUP_WORKSPACE_CWD } : {}
+
         const r = await rpc<SessionCreateResponse>('session.create', gw.isCanonical
-          ? { request_id: randomUUID(), ...localCreationOptions() } : { cols: colsRef.current })
+          ? { request_id: randomUUID(), ...localCreationOptions(), ...workspaceCwd }
+          : { cols: colsRef.current, ...workspaceCwd })
 
         if (flight !== attachmentFlight.current) {
           discardStaleAttachment(r)
@@ -329,7 +336,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
         patchUiState({
           info,
           sid: r.session_id,
-          status: gw.isCanonical || info?.version ? 'ready' : 'starting agent…',
+          status: gw.isCanonical || info?.version ? 'ready' : t('session.status.startingAgent'),
           storedSid,
           usage: usageFrom(info)
         })
@@ -361,9 +368,9 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               }
 
               const nextTitle = (result.title ?? requestedTitle).trim()
-              const suffix = result.pending ? ' (queued while session initializes)' : ''
+              const suffix = result.pending ? t('session.lifecycle.titleQueuedSuffix') : ''
               patchUiState({ sessionTitle: nextTitle })
-              sys(`session title set: ${nextTitle}${suffix}`)
+              sys(`${t('session.lifecycle.sessionTitleSet', nextTitle)}${suffix}`)
             })
             .catch((err: unknown) => {
               if (getUiState().sid !== r.session_id) {
@@ -371,7 +378,7 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
               }
 
               const message = err instanceof Error ? err.message : String(err)
-              sys(`warning: failed to set session title: ${message}`)
+              sys(`warning: ${t('session.lifecycle.failedToSetTitle', message)}`)
             })
         }
 
