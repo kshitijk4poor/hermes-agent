@@ -440,6 +440,15 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         session_key = ctx.session_key or ""
         clarify_id = uuid.uuid4().hex[:10]
         choices = list(choices) if choices else None
+        send_kwargs = dict(
+            chat_id=ctx._status_chat_id, question=question, choices=choices, clarify_id=clarify_id,
+            session_key=session_key, metadata=ctx._status_thread_metadata,
+        )
+
+        def _text_fallback():
+            """Schedule the plain-text prompt when the native card cannot render; None = no such path."""
+            coro = text_fallback_coro(ctx._status_adapter, **send_kwargs)
+            return None if coro is None else self._schedule(coro, "Clarify text fallback failed to schedule")
         entry = clarify_mod.register(
             clarify_id=clarify_id, session_key=session_key, question=question, choices=choices,
             multi_select=bool(multi_select),
@@ -461,10 +470,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         except Exception:
             logger.debug("Stream-consumer flush before clarify prompt failed", exc_info=True)
         fut = self._schedule(
-            self._send_shared_clarify(entry,
-                chat_id=ctx._status_chat_id, question=question, choices=choices, clarify_id=clarify_id,
-                session_key=session_key, metadata=ctx._status_thread_metadata,
-            ),
+            self._send_shared_clarify(entry, **send_kwargs),
             "Clarify send failed to schedule",
         )
         # Boundary rule (see _approval_send_outcome): a send timeout is AMBIGUOUS — the card may
@@ -472,7 +478,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # ambiguous falls through to the bounded wait so a late reply resolves. A definitive
         # failure — immediate or late — retries once as plain text before giving up.
         response, answered = _clarify_send_then_wait(
-            fut, clarify_id=clarify_id, session_key=session_key, clarify_mod=clarify_mod)
+            fut, clarify_id=clarify_id, session_key=session_key, clarify_mod=clarify_mod,
+            fallback=_text_fallback)
         if self._approval_owner is not None:
             authority, session_id, generation = self._approval_owner
             authority.sessions[session_id].controls.snapshot(session_id, generation)
@@ -790,11 +797,13 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             # turn so a restart-interrupted turn is recorded WITH its id for drain-window dedup.
             if ctx.inbound_message_id is not None:
                 kwargs["persist_user_platform_id"] = str(ctx.inbound_message_id)
+            from agent.notification_presentation import notification_turn
             from gateway.session_results import execution_result
             captured = execution_result.get()
             before = (getattr(agent, 'session_prompt_tokens', 0) or 0,
                       getattr(agent, 'session_completion_tokens', 0) or 0)
-            result = agent.run_conversation(api_message, **kwargs)
+            with notification_turn(agent, muted=ctx.mute_notification_reply, session_id=ctx.session_id or ""):
+                result = agent.run_conversation(api_message, **kwargs)
             if captured is not None:
                 incoming = max(0, (getattr(agent, 'session_prompt_tokens', 0) or 0) - before[0])
                 outgoing = max(0, (getattr(agent, 'session_completion_tokens', 0) or 0) - before[1])
@@ -1012,6 +1021,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             model, runtime_kwargs = runner._resolve_session_agent_runtime(
                 source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
             )
+            # Stashed by _resolve_session_agent_runtime when the primary's credentials failed and a
+            # fallback was resolved before any agent exists (#74349); one-shot per turn.
+            pending_fallback_notice = getattr(runner, "_pre_agent_fallback_notice", None)
+            runner._pre_agent_fallback_notice = None
             from gateway.session_api_turn import prepare_api_runtime
             model, runtime_kwargs = prepare_api_runtime(model, runtime_kwargs)
             if policy and policy.model:
@@ -1032,11 +1045,17 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 text = (f"⚠️ This session's launch credentials are no longer available "
                         f"({exc.reason}), so this message wasn't processed. Start a new "
                         "session from the CLI to bind them again.")
-            else:
-                text = ("⚠️ I couldn't connect to the AI model service, so this message wasn't processed. "
-                        "Use /login to sign in again, or /model to pick a different model. If it keeps "
-                        "failing, run `hermes doctor` on the host.")
-            return {"final_response": text, "messages": [], "api_calls": 0, "tools": []}
+                return {"final_response": text, "messages": [], "api_calls": 0, "tools": []}
+            from hermes_cli.auth import is_rate_limited_auth_error
+            if is_rate_limited_auth_error(exc.__cause__):
+                # Quota cap with valid credentials: /login cannot help; name the reset window (#89401).
+                from gateway.run import _gateway_provider_error_reply
+                return {"final_response": _gateway_provider_error_reply(str(exc)),
+                        "messages": [], "api_calls": 0, "tools": []}
+            return {
+                "final_response": t("gateway.errors.no_credentials"),
+                "messages": [], "api_calls": 0, "tools": [],
+            }
         pr = runner._provider_routing
         reasoning_config = (policy.reasoning_config if policy else
             runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))

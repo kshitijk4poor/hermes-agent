@@ -129,6 +129,7 @@ def build_profile_terminal_scope(
     """
     home = Path(hermes_home)
     scope = default_terminal_scope()
+    default_image = scope.get("TERMINAL_DOCKER_IMAGE")
     env_path = home / ".env"
     if env_path.exists():
         # load_env_file swallows OSError by design (secret scope fails soft); an unreadable
@@ -172,6 +173,8 @@ def build_profile_terminal_scope(
         raw_terminal = raw.get("terminal") if isinstance(raw, dict) else None
         if isinstance(raw_terminal, dict):
             _apply_terminal_mapping(scope, raw_terminal)
+            image_pinned = image_pinned or "docker_image" in raw_terminal
+    scope["TERMINAL_DOCKER_IMAGE_PINNED"] = "1" if image_pinned else "0"
     _resolve_scope_cwd_placeholder(scope)
     return scope
 

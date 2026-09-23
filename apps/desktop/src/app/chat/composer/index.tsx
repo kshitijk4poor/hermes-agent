@@ -15,7 +15,7 @@ import { useTourMarker } from '@/app/chat/tour-marker'
 import type { GatewayRequester } from '@/app/contrib/types'
 import { useHudComposerDrag } from '@/app/hud/composer-drag'
 import { useBusyInputMode } from '@/app/session/hooks/use-busy-input-mode'
-import { composerFill, composerFloatingStrip, composerSurfaceGlass } from '@/components/chat/composer-dock'
+import { composerFloatingStrip, composerInputBacking } from '@/components/chat/composer-dock'
 import { $chatOnboardingSolo, $chatOnboardingThreadIds } from '@/components/onboarding-chat/assembly'
 import { OnboardingSkip } from '@/components/onboarding-chat/skip'
 import { Button } from '@/components/ui/button'
@@ -34,6 +34,7 @@ import { browseBackward, browseForward, deriveUserHistory, isBrowsingHistory } f
 import { POPOUT_WIDTH_REM } from '@/store/composer-popout'
 import { parkQueuedPrompts, removeQueuedPrompt, unparkQueuedPrompts } from '@/store/composer-queue'
 import { $hudMode } from '@/store/hud'
+import { $showsAdvancedChrome } from '@/store/interface-mode'
 import { notifyError } from '@/store/notifications'
 import { sessionBlockingPrompt } from '@/store/prompts'
 import { toggleReview } from '@/store/review'
@@ -1360,45 +1361,47 @@ export function ChatBar({
               queue). An in-flow dock child: the dock is bottom-anchored, so it
               grows upward over the thread and the dock's own measurement covers
               it. Collapses to nothing when every status is empty. */}
-          <ComposerStatusStack
-            onSubmit={onSubmit}
-            queue={
-              activeQueueSessionKey && queuedPrompts.length > 0 ? (
-                <QueuePanel
-                  busy={busy}
-                  editingId={queueEdit?.entryId ?? null}
-                  entries={queuedPrompts}
-                  onDelete={id => {
-                    if (removeQueuedPrompt(activeQueueSessionKey, id) && queueEdit?.entryId === id) {
-                      exitQueuedEdit('cancel')
-                    }
-                  }}
-                  onDiscardLost={gateway ? id => {
-                    // Server-owned row: the authority's pending fanout retires it
-                    // from the queue once the acknowledgement commits. Canonical
-                    // local sessions key the queue by their own session id, so the
-                    // stored key stands in when the runtime id is not bound yet.
-                    discardLostPrompt(sessionId, activeQueueSessionKey, id, gateway.request.bind(gateway))
-                      .catch((error: unknown) => notifyError(error, t.composer.queueLostDiscard))
-                  } : undefined}
-                  onEdit={beginQueuedEdit}
-                  onResume={() => {
-                    unparkQueuedPrompts(activeQueueSessionKey)
+          <StatusDrawerContent collapsed={statusDrawerCollapsed} id={statusDrawerId}>
+            <ComposerStatusStack
+              onSubmit={onSubmit}
+              queue={
+                activeQueueSessionKey && queuedPrompts.length > 0 ? (
+                  <QueuePanel
+                    busy={busy}
+                    editingId={queueEdit?.entryId ?? null}
+                    entries={queuedPrompts}
+                    onDelete={id => {
+                      if (removeQueuedPrompt(activeQueueSessionKey, id) && queueEdit?.entryId === id) {
+                        exitQueuedEdit('cancel')
+                      }
+                    }}
+                    onDiscardLost={gateway ? id => {
+                      // Server-owned row: the authority's pending fanout retires it
+                      // from the queue once the acknowledgement commits. Canonical
+                      // local sessions key the queue by their own session id, so the
+                      // stored key stands in when the runtime id is not bound yet.
+                      discardLostPrompt(sessionId, activeQueueSessionKey, id, gateway.request.bind(gateway))
+                        .catch((error: unknown) => notifyError(error, t.composer.queueLostDiscard))
+                    } : undefined}
+                    onEdit={beginQueuedEdit}
+                    onResume={() => {
+                      unparkQueuedPrompts(activeQueueSessionKey)
 
-                    // Idle → kick the head immediately; busy → the settle drain
-                    // takes over now that the park is lifted.
-                    if (!busy) {
-                      void drainNextQueued()
-                    }
-                  }}
-                  onSendNow={id => void sendQueuedNow(id)}
-                  onSteerNow={id => void steerQueuedNow(id)}
-                  parked={queueParked}
-                />
-              ) : null
-            }
-            sessionId={statusSessionId}
-          />
+                      // Idle → kick the head immediately; busy → the settle drain
+                      // takes over now that the park is lifted.
+                      if (!busy) {
+                        void drainNextQueued()
+                      }
+                    }}
+                    onSendNow={id => void sendQueuedNow(id)}
+                    onSteerNow={id => void steerQueuedNow(id)}
+                    parked={queueParked}
+                  />
+                ) : null
+              }
+              sessionId={statusSessionId}
+            />
+          </StatusDrawerContent>
           <ComposerPrimitive.Root
             className={cn(
               'group/composer relative w-full overflow-visible rounded-2xl',

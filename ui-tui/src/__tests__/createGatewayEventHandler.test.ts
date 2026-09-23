@@ -181,6 +181,63 @@ describe('createGatewayEventHandler', () => {
     } as any)
     expect(getUiState().busy).toBe(false)
     expect(getUiState().info?.model).toBe('test')
+
+    const target: ConnectionOperationTarget = { action: 'install', kind: 'mcp', name: 'asana', state: 'pending' }
+    onEvent({
+      session_id: 'focused',
+      payload: {
+        deadline_at: 10,
+        op_id: 'op-1',
+        seq: 2,
+        targets: [target],
+        timeout_seconds: 30
+      },
+      type: 'connection.request'
+    })
+    expect($connectionOperation.get()).toMatchObject({ opId: 'op-1', seq: 2, targets: [target] })
+    expect(getOverlayState().connection).toEqual({ opId: 'op-1' })
+
+    onEvent({
+      session_id: 'focused',
+      payload: {
+        deadline_at: 11,
+        op_id: 'op-1',
+        seq: 1,
+        settled: false,
+        targets: [{ ...target, state: 'failed' }]
+      },
+      type: 'connection.update'
+    })
+    expect($connectionOperation.get()).toMatchObject({ seq: 2, targets: [target] })
+
+    // Esc on the "Finishing…" card drops it and it must not come back on a replay, but the settling
+    // frame that follows still records how each app ended.
+    const request = {
+      deadline_at: 10,
+      op_id: 'op-1',
+      seq: 2,
+      targets: [target],
+      timeout_seconds: 30
+    }
+
+    dismissConnectionOperation('op-1')
+    expect($connectionOperation.get()).toBeNull()
+    onEvent({ session_id: 'focused', payload: request, type: 'connection.request' })
+    expect($connectionOperation.get()).toBeNull()
+    expect(getOverlayState().connection).toBeNull()
+
+    onEvent({
+      session_id: 'focused',
+      payload: {
+        deadline_at: 12,
+        op_id: 'op-1',
+        seq: 3,
+        settled: true,
+        targets: [{ ...target, state: 'connected' }]
+      },
+      type: 'connection.update'
+    })
+    expect(ctx.system.sys.mock.calls.map((call: unknown[]) => call[0])).toEqual(['asana: connected'])
   })
 
   it('keeps the durable session id when a session.info payload omits it', () => {

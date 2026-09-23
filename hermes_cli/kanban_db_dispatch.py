@@ -1063,7 +1063,7 @@ def _classify_dead_worker(
     in the event payload, appended to the error text) so the board and the retry
     worker see WHY instead of a bare label; a rate-limited requeue does not need it.
     """
-    dead = _classify_dead_worker_exit(pid, claimer, exit_code)
+    dead = _classify_dead_worker_exit(pid, claimer, exit_code, task_id=task_id, board=board)
     if task_id and not dead.rate_limited:
         worker_output = _worker_final_output(task_id, board=board)
         if worker_output:
@@ -1072,12 +1072,30 @@ def _classify_dead_worker(
     return dead
 
 
-def _classify_dead_worker_exit(pid: int, claimer: Optional[str], exit_code=None) -> _DeadWorker:
-    """Exit status -> reclaim bookkeeping, before the worker's own words are folded in."""
+def _classify_dead_worker_exit(
+    pid: int,
+    claimer: Optional[str],
+    exit_code=None,
+    *,
+    task_id: Optional[str] = None,
+    board: Optional[str] = None,
+) -> _DeadWorker:
+    """Exit status -> reclaim bookkeeping, before the worker's own words are folded in.
+
+    ``exit_code`` is the authority's exact-run result for a managed worker (a child of the
+    profile owner, never of this dispatcher, so it cannot be reaped here). Otherwise the reap
+    registry only knows children of THIS process; a per-tick dispatcher reads the exit trailer
+    the worker left in its log instead, so the same death gets the same booking (protocol
+    violation / rate-limit requeue / crash) as under the gateway-embedded dispatcher. A worker
+    that never reached its exit epilogue (killed, OOM) leaves no trailer and stays a plain crash.
+    """
     kind, code = _classify_worker_exit(pid)
     if exit_code is not None:
-        code = exit_code
-        kind = "rate_limited" if code == _kb.KANBAN_RATE_LIMIT_EXIT_CODE else ("clean_exit" if code == 0 else "nonzero_exit")
+        kind, code = _exit_code_kind(int(exit_code))
+    elif kind == "unknown" and task_id:
+        logged = _worker_log_exit_code(task_id, board=board)
+        if logged is not None:
+            kind, code = _exit_code_kind(logged)
     if kind == "clean_exit":
         # rc=0 while still ``running``: usually the work succeeded and only the
         # paperwork was skipped; the corrective sentence reaches the retry
@@ -2648,6 +2666,80 @@ def _worker_terminal_timeout_env(
     if existing >= desired:
         return None
     return str(desired)
+
+
+@contextlib.contextmanager
+def _worker_profile_scope(hermes_home: str, *, bind_home: bool = True):
+    """Bind an assigned profile's runtime scope (secrets + terminal policy, optionally home) for
+    one dispatch-side read or spawn-env build.
+
+    The dispatcher runs detached from any turn, so nothing binds a profile for it: ``load_config``,
+    the toolset probes' ``get_secret`` reads and ``build_subprocess_env``'s passthrough resolution
+    all fall back to the LAUNCH profile's ambient ``os.environ`` / ``TERMINAL_*``. Binding was
+    previously conditional on ``is_multiplex_active()``, so on a single-profile host a worker for
+    profile B was built entirely from the dispatcher's own environment.
+
+    ``bind_home=False`` for the spawn-env build: which variables may cross into a child is the
+    DISPATCHER's ``terminal.env_passthrough`` policy (#109494, read through the home override) —
+    only their VALUES come from the assignee's scope, so that branch binds the secret scope alone.
+    Toolset resolution binds the home and the terminal policy, as it always has.
+
+    The secret mapping is never widened: a profile that is not this process's own home gets its own
+    ``.env`` + external sources ONLY, while the launch home keeps its established
+    env-over-``.env`` precedence (``launch_secret_scope``) so systemd / ``op run`` injection still
+    resolves for a standalone dispatcher.
+    """
+    from agent.secret_scope import build_profile_secret_scope, reset_secret_scope, set_secret_scope
+    from hermes_constants import get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    from tools.terminal_scope import install_profile_terminal_scope, reset_terminal_scope
+    from tui_gateway.launch_profile_policy import launch_secret_scope, launch_terminal_env
+
+    home = Path(hermes_home)
+    is_launch_home = str(home.resolve()) == str(Path(get_process_hermes_home()).resolve())
+    home_token = secret_token = terminal_token = None
+    try:
+        home_token = set_hermes_home_override(str(home)) if bind_home else None
+        secret_token = set_secret_scope(
+            launch_secret_scope(home) if is_launch_home else build_profile_secret_scope(home),
+            profile_home=None if is_launch_home else str(home))
+        terminal_token = install_profile_terminal_scope(
+            home, env_overlay=launch_terminal_env() if is_launch_home else None) if bind_home else None
+        yield
+    finally:
+        if terminal_token is not None:
+            reset_terminal_scope(terminal_token)
+        if secret_token is not None:
+            reset_secret_scope(secret_token)
+        if home_token is not None:
+            reset_hermes_home_override(home_token)
+
+
+def _resolve_worker_cli_toolsets(hermes_home: Optional[str]) -> Optional[list[str]]:
+    """Return the assigned profile's effective CLI toolsets for a worker.
+
+    Resolved at dispatch time and passed as an explicit ``--toolsets`` pin so
+    worker startup cannot fall back to a stale root/active-profile config or a
+    profile whose top-level ``toolsets`` is only the kanban orchestrator
+    surface. ``model_tools`` still appends the task-scoped kanban lifecycle
+    tools when ``HERMES_KANBAN_TASK`` is set.
+    """
+    if not hermes_home:
+        return None
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.tools_config import _get_platform_tools
+
+        with _worker_profile_scope(hermes_home):
+            cfg = load_config()
+            toolsets = sorted(_get_platform_tools(cfg, "cli"))
+        return toolsets or None
+    except Exception as exc:
+        _kb._log.debug(
+            "kanban worker: could not resolve CLI toolsets for HERMES_HOME=%r (%s)",
+            hermes_home,
+            exc,
+        )
+        return None
 
 
 _retagged_workspace_roots: set[str] = set()

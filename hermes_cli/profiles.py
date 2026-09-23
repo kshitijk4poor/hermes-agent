@@ -1256,8 +1256,7 @@ def _strip_multiplex_flag(config_path: Path) -> None:
     if not config_path.is_file():
         return
     with contextlib.suppress(Exception):  # creation must not fail over an unreadable copy
-        import yaml
-        from hermes_cli.config import read_user_config_raw
+        from hermes_cli.config import atomic_config_write, read_user_config_raw
         cfg = read_user_config_raw(config_path)
         gateway = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
         if "multiplex_profiles" not in cfg and "multiplex_profiles" not in gateway:
@@ -1266,7 +1265,8 @@ def _strip_multiplex_flag(config_path: Path) -> None:
         gateway.pop("multiplex_profiles", None)
         if not gateway and "gateway" in cfg:
             cfg.pop("gateway")
-        config_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+        # Absent keys are deleted by the round-trip writer; the clone's comments survive.
+        atomic_config_write(config_path, cfg)
 
 
 def _bootstrap_profile_dir(profile_dir: Path, source_dir: Optional[Path],

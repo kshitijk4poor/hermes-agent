@@ -797,10 +797,12 @@ MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
             "skills/.archive/ (recoverable with `hermes curator restore`). Set it back to 90 to keep the old window."))),
     # 44 → 45: saved platform_toolsets lists predate the connections toolset (see _migrate_to_45).
     (45, _migrate_to_45),
-    # 45 → 46: cron.bot_chat_delivery_timeout_seconds is gone with the local `hermes chat`
+    # 45 → 46: legacy editor `disabled: true` on MCP servers becomes `enabled: false` (see _migrate_to_46).
+    (46, _migrate_to_46),
+    # 46 → 47: cron.bot_chat_delivery_timeout_seconds is gone with the local `hermes chat`
     # fallback lane it bounded. Bot Chat deliveries are admitted to the running gateway and
     # settle on its durable receipt; there is no cron-side turn left to time out.
-    (46, functools.partial(
+    (47, functools.partial(
         _rewrite_key, section="cron", key="bot_chat_delivery_timeout_seconds", new=None,
         match=lambda _cur: True,
         added="removed cron.bot_chat_delivery_timeout_seconds",

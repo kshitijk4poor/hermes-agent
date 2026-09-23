@@ -154,6 +154,14 @@ export function rebindPaneToResumedRuntime({
 }
 
 /** The prompt submit pipeline, extracted from usePromptActions. */
+/** Canonical admission receipt; `user_row_id` binds the optimistic bubble to its durable row. */
+type SubmitReceipt = Pick<PromptSubmitResult, 'user_row_id'> & {
+  admission_id?: string
+  submission_id?: string
+  session_id?: string
+  status?: string
+}
+
 export function useSubmitPrompt(deps: SubmitPromptDeps) {
   const {
     activeSessionIdRef,
@@ -959,7 +967,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           // the next turn untouched — without it, losing the settle race
           // (client saw idle, server still unwinding) redirects or interrupts
           // the live turn with text the user explicitly queued.
-          ...((options?.fromQueue || queueAdmission) && { queued: true })
+          ...((options?.fromQueue || queueAdmission) && { queued: true }),
+          ...(titlePreview && { title_preview: titlePreview })
         })
 
         // A fresh draft had no session owner at entry. Adopt its published
@@ -994,7 +1003,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         try {
           const recoverStoredSessionId = targetStoredSessionId
 
-          const { result, sessionId: receiptSessionId } = await withSessionNotFoundResume<{ admission_id?: string; submission_id?: string; session_id?: string; status?: string }>(
+          const { result, sessionId: receiptSessionId } = await withSessionNotFoundResume<SubmitReceipt>(
             sessionId,
             recoverStoredSessionId,
             liveId =>
@@ -1008,7 +1017,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                 const params: Record<string, unknown> = { ...prepared.params, session_id: liveId }
 
                 try {
-                  return await requestGateway<{ admission_id?: string; submission_id?: string; session_id?: string; status?: string }>(
+                  return await requestGateway<SubmitReceipt>(
                     'prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
                   )
                 } catch (error) {
@@ -1022,7 +1031,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                   await writePreparedSubmission(retryKey, prepared)
                   const { submission_id: _id, ...legacyParams } = params
 
-                  const result = await requestGateway<{ admission_id?: string; submission_id?: string; session_id?: string; status?: string }>(
+                  const result = await requestGateway<SubmitReceipt>(
                     'prompt.submit', legacyParams, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
                   )
 
@@ -1099,6 +1108,26 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
               if (!next.busy && !next.awaitingResponse) {releaseBusy()}
             }
+          }
+
+          const rowId = result?.user_row_id
+
+          if (typeof rowId === 'number' && Number.isSafeInteger(rowId) && rowId > 0) {
+            // The worker may finish before this acknowledgement arrives. Bind
+            // only this send's optimistic occurrence; never reset live state or
+            // assume the newest user row still belongs to this RPC.
+            updateSessionState(receiptSessionId, state => {
+              const index = state.messages.findIndex(message => message.id === optimisticId && message.role === 'user')
+
+              if (index < 0 || state.messages[index].rowId === rowId) {
+                return state
+              }
+
+              return {
+                ...state,
+                messages: state.messages.map((message, i) => (i === index ? { ...message, rowId } : message))
+              }
+            })
           }
         } catch (firstErr) {
           if (firstErr instanceof SessionRecoveryAborted) {

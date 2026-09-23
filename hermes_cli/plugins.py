@@ -1354,6 +1354,11 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
 
         if safe_worker_enabled():
             return
+        if self._discovered and not force and in_plugin_load_worker():
+            # A plugin whose register() re-enters discovery (importing model_tools does) runs on a
+            # deadline worker that cannot re-acquire the sweep's RLock; the flag is already set for the
+            # whole sweep, so return where the locked re-entry used to. Every other caller still waits.
+            return
         with self._discovery_lock, _plugin_home_scope(self.home_path):
             if self._discovered and not force:
                 return

@@ -2419,21 +2419,6 @@ def init_agent(
     side_agent: bool = False, memory_manager=None,
     tool_result_metadata_callback: Optional[Callable[..., dict]] = None,
 ):
-    """Initialize the AI Agent (body of :meth:`AIAgent.__init__`).
-
-    Non-obvious parameters:
-      max_iterations: default unlimited (sys.maxsize); the budget is shared with subagents.
-      requested_provider: provider identity before runtime canonicalization.
-      cwd: logical session workspace, available to memory providers during construction;
-        None or empty leaves the runtime cwd resolver unpinned.
-      openrouter_min_coding_score: coding-score floor for ``openrouter/pareto-code`` only.
-      clarify_callback: ``(question, choices) -> str``; None → the clarify tool errors.
-      reasoning_config: None → ``{"enabled": True, "effort": "medium"}`` on OpenRouter.
-      prefill_messages: priming history. Anthropic Sonnet/Opus 4.6+ 400 on a trailing
-        assistant message — use structured outputs there instead.
-      skip_context_files: skip SOUL.md/.hermes.md/AGENTS.md/CLAUDE.md/.cursorrules injection;
-        load_soul_identity keeps ~/.hermes/SOUL.md as identity regardless.
-    """
     from agent.safe_worker_policy import safe_worker_enabled
 
     if safe_worker_enabled():

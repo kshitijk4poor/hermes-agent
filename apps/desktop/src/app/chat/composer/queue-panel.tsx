@@ -101,6 +101,9 @@ export function QueuePanel({
         // The owner died mid-turn and recovered this row as `unknown`: the
         // FIFO behind it is paused until someone acknowledges the loss.
         const lost = entry.serverStatus === 'unknown'
+        const preview = entryPreview(entry, c)
+        const canExpand = shouldOfferExpandedPreview(preview)
+        const isExpanded = expandedIds.has(entry.id)
 
         return (
           <StatusRow
@@ -126,54 +129,86 @@ export function QueuePanel({
                     {c.queueLostDiscard}
                   </Button>
                 </Tip>
-              ) : !entry.serverStatus && <>
-                <Tip label={c.queueEdit}>
-                  <Button
-                    aria-label={c.queueEdit}
-                    className="size-5 rounded-md"
-                    disabled={Boolean(editingId) && !isEditing}
-                    onClick={() => onEdit(entry)}
-                    size="icon-xs"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <Pencil className={iconSize.xs} />
-                  </Button>
-                </Tip>
-                {canSteer && (
-                  <Tip label={c.queueSteer}>
-                    <Button
-                      aria-label={c.queueSteer}
-                      className="size-5 rounded-md"
-                      disabled={isEditing}
-                      onClick={() => onSteerNow?.(entry.id)}
-                      size="icon-xs"
-                      type="button"
-                      variant="ghost"
-                    >
-                      <SteeringWheel className={iconSize.xs} />
-                    </Button>
-                  </Tip>
-                )}
-                <Tip label={busy ? c.queueSendNext : c.queueSend}>
-                  <Button
-                    aria-label={busy ? c.queueSendNext : c.queueSend}
-                    className="size-5 rounded-md"
-                    disabled={isEditing}
-                    onClick={() => onSendNow(entry.id)}
-                    size="icon-xs"
-                    type="button"
-                    variant="ghost"
-                  >
-                    <CornerDownLeft className={iconSize.xs} />
-                  </Button>
-                </Tip>
-              </>
+              ) : (
+                <>
+                  {canExpand && (
+                    <Tip label={isExpanded ? c.queueCollapse : c.queueExpand}>
+                      <Button
+                        aria-expanded={isExpanded}
+                        aria-label={isExpanded ? c.queueCollapse : c.queueExpand}
+                        className="size-5 rounded-md"
+                        onClick={() => toggleExpanded(entry.id)}
+                        size="icon-xs"
+                        type="button"
+                        variant="ghost"
+                      >
+                        <Codicon
+                          className={cn('transition-transform', isExpanded && 'rotate-180')}
+                          name="chevron-down"
+                          size={iconSize.xs}
+                        />
+                      </Button>
+                    </Tip>
+                  )}
+                  {!entry.serverStatus && (
+                    <>
+                      <Tip label={c.queueEdit}>
+                        <Button
+                          aria-label={c.queueEdit}
+                          className="size-5 rounded-md"
+                          disabled={Boolean(editingId) && !isEditing}
+                          onClick={() => onEdit(entry)}
+                          size="icon-xs"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <Pencil className={iconSize.xs} />
+                        </Button>
+                      </Tip>
+                      {canSteer && (
+                        <Tip label={c.queueSteer}>
+                          <Button
+                            aria-label={c.queueSteer}
+                            className="size-5 rounded-md"
+                            disabled={isEditing}
+                            onClick={() => onSteerNow?.(entry.id)}
+                            size="icon-xs"
+                            type="button"
+                            variant="ghost"
+                          >
+                            <SteeringWheel className={iconSize.xs} />
+                          </Button>
+                        </Tip>
+                      )}
+                      <Tip label={busy ? c.queueSendNext : c.queueSend}>
+                        <Button
+                          aria-label={busy ? c.queueSendNext : c.queueSend}
+                          className="size-5 rounded-md"
+                          disabled={isEditing}
+                          onClick={() => onSendNow(entry.id)}
+                          size="icon-xs"
+                          type="button"
+                          variant="ghost"
+                        >
+                          <CornerDownLeft className={iconSize.xs} />
+                        </Button>
+                      </Tip>
+                    </>
+                  )}
+                </>
+              )
             }
             trailingVisible={isEditing || lost}
           >
             <div className="min-w-0 flex-1">
-              <p className="truncate text-[0.73rem] leading-4 text-foreground/92">{entryPreview(entry, c)}</p>
+              <p
+                className={cn(
+                  'text-[0.73rem] leading-4 text-foreground/92',
+                  isExpanded ? 'max-h-40 overflow-y-auto whitespace-pre-wrap pr-1' : 'line-clamp-2 break-words'
+                )}
+              >
+                {preview}
+              </p>
               {(attachmentsCount > 0 || isEditing || lost) && (
                 <div className="mt-0.5 flex items-center gap-1.5 text-[0.64rem] text-muted-foreground/75">
                   {lost && <span data-slot="queue-lost-note">{c.queueLostNote}</span>}

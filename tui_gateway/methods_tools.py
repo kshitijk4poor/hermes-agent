@@ -427,9 +427,13 @@ def _(rid, params: dict) -> dict:
 # ─── Command catalog / dispatch ──────────────────────────────────────────────
 @_rpc("commands.catalog", 5020)
 def _(rid, params: dict) -> dict:
-    """Registry-backed slash metadata, categorized, no aliases (shared builder in command_discovery)."""
+    """Registry-backed slash metadata, categorized, no aliases (shared builder in command_discovery). Skill
+    discovery is bound to the calling session's profile and workspace (``_completion_cwd``: its record,
+    else the cwd a new session would be seeded with) so project-local skills register for the repo the
+    session is actually in (#114359)."""
     from tui_gateway.command_discovery import command_catalog
-    return _ok(rid, command_catalog(load_cfg=_load_cfg, module_loader=_tools_mod))
+    scope = _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params))
+    return _ok(rid, command_catalog(load_cfg=_load_cfg, module_loader=_tools_mod, scope=scope))
 
 
 @method("cli.exec")

@@ -1825,6 +1825,7 @@ class GatewayShutdownMixin:
         self._draining = True
         from gateway.run_runtime import drain_gateway_runtime
         await drain_gateway_runtime(self)
+        self._mark_api_runs_shutdown_requested()
         # getattr-guards: shutdown-path test doubles may lack the room worker / systemd watchdog.
         stop_room_worker = getattr(self, "_stop_hosted_room_worker", None)
         if callable(stop_room_worker):
@@ -2102,8 +2103,9 @@ class GatewayShutdownMixin:
         _step("Shared SessionDB close error", _close_shared)
         logger.info("Shutdown phase: SessionDB close done at +%.2fs", ctx.elapsed())
 
-    def _stop_persist_exit_state(self, ctx: "GatewayShutdownMixin._StopContext") -> None:
-        """Persist exit markers; process bootstrap releases ownership after writer drain."""
+    async def _stop_persist_exit_state(self, ctx: "GatewayShutdownMixin._StopContext") -> None:
+        """Clean-shutdown marker, restart markers, terminal runtime status; process bootstrap
+        releases PID/lock ownership after the writer drain."""
         from gateway.run import _hermes_home, _planned_restart_notification_path, _shutdown_gateway_health_export
         from utils import atomic_json_write
         # Clean-shutdown marker skips suspend_recently_active() next boot; a timed-out drain left

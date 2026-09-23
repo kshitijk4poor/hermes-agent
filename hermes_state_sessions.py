@@ -375,7 +375,8 @@ class SessionSessionsMixin:
                       system_prompt=system_prompt, user_id=user_id, session_key=session_key,
                       chat_id=chat_id, chat_type=chat_type, thread_id=thread_id,
                       parent_session_id=parent_session_id, cwd=cwd, profile_name=profile_name,
-                      git_repo_root=git_repo_root, origin_json=origin_json, display_name=display_name)
+                      git_repo_root=git_repo_root, origin_json=origin_json, display_name=display_name,
+                      transport_profile=transport_profile)
         self._execute_write(lambda conn: insert_session_row_in_transaction(self, conn, **params),
                             patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 

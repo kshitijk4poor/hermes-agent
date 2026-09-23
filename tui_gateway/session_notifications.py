@@ -139,7 +139,7 @@ def _notification_event_dedup_key(evt: dict) -> tuple:
 _KANBAN_NOTIFY_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked")
 # kanban, /loop + /heartbeat and the bot mailbox share one idle-poll cadence; probing the lease registry on
 # every 0.5s queue timeout cost ~a core at 11 sessions (#108005).
-_KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = _BOT_DELIVERY_POLL_SECONDS = 5.0
+_KANBAN_POLL_SECONDS = _LOOP_POLL_SECONDS = 5.0
 
 
 def _notif_release_turn(session: dict) -> None:
@@ -459,15 +459,6 @@ def _notif_poll_kanban_scoped(sid: str, session: dict) -> None:
                       **({"display_metadata": {"notification_category": "diagnostic"}} if diagnostic else {}))
 
 
-def _background_notifications_off(session: dict) -> bool:
-    """Whether the owning profile set ``display.background_process_notifications: off``. Same
-    gate the messaging gateway applies to its process-event injection; only ``off`` matters
-    here (the other modes shape gateway chat receipts, not agent wakes)."""
-    with _session_profile_runtime_scope(session):
-        raw = (_load_cfg().get("display") or {}).get("background_process_notifications")
-    return raw is False or str(raw or "").strip().lower() == "off"
-
-
 def _notif_defer_event(evt, claim, put=None):
     from tools.async_delegation import defer_completion_delivery
     from tools.process_registry import process_registry
@@ -479,7 +470,15 @@ def _notif_defer_event(evt, claim, put=None):
 def _notif_dispatch_event(sid: str, session: dict, evt: dict, text: str) -> None:
     """Run the claimed (running=True) agent turn for one notification event."""
     from tools.async_delegation import claim_event_delivery, complete_event_delivery, release_event_delivery
-    if (claim := claim_event_delivery(evt, "tui-poller")) is None:
+    try:
+        claim = claim_event_delivery(evt, "tui-poller")
+    except Exception as exc:  # shared ledger busy/unreadable: the durable row stays pending and replays
+        _notif_log_failure("notification delivery claim failed", exc)
+        claim = None
+    if claim is None:
+        # Another consumer holds the durable row — a gateway sharing this home claims before it verifies
+        # the target. No turn will run, and nothing else clears ``running``: a busy session is exempt
+        # from the reaper, keeps its lease, and never reaches its bot mailbox again.
         _notif_release_turn(session)
         return
     evt_type = evt.get("type")
@@ -652,7 +651,7 @@ def _notification_poller_scoped_loop(stop_event: threading.Event, sid: str, sess
     emitted = session.setdefault("_notification_emitted", set())
     handle = lambda events, deferred: _notif_handle_ready(  # noqa: E731
         sid, session, events, emitted, process_registry, format_process_notification, deferred)
-    last_kanban_poll = last_loop_poll = last_bot_poll = 0.0
+    last_kanban_poll = last_loop_poll = 0.0
     while not stop_event.is_set() and not session.get("_finalized"):
         now = time.monotonic()
         # /loop and /heartbeat wakeup drivers: fire a due tick for THIS session while idle (same claim-under-lock

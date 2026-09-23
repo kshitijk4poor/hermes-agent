@@ -217,7 +217,8 @@ def routed_model_rejects_vision_tool_messages(provider: str, model: str) -> bool
 
 
 def list_providers() -> list[ProviderProfile]:
-    """Return all registered provider profiles (one per canonical name)."""
+    """Return all registered provider profiles (one per canonical name); the bound home's
+    ``$HERMES_HOME`` plugins shadow process-wide profiles of the same name."""
     from agent.safe_worker_policy import safe_worker_enabled
 
     if safe_worker_enabled():
@@ -575,7 +576,7 @@ def _discover_providers() -> None:
 
     if safe_worker_enabled():
         return
-    global _discovered
+    global _discovered, _discovering
     if _discovered:
         return
     _discovered = True

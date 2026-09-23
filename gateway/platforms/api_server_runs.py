@@ -1043,15 +1043,19 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
                 result, usage = await observe_api_turn(
                     run.admission, stream_delta_callback=_text_cb,
                     tool_start_callback=_tool_start, tool_complete_callback=_tool_complete)
+            # The canonical turn has no agent object here; the served pair rides on the
+            # committed usage/result runtime metadata when the turn recorded one.
+            served_runtime = ((usage or {}).get("runtime") if isinstance(usage, dict) else None) or (
+                result.get("runtime") if isinstance(result, dict) else None) or {}
         else:
             with self._profile_scope(run.request_profile):
                 agent = self._create_agent(
                     stream_delta_callback=_text_cb, tool_progress_callback=self._make_run_event_callback(run_id, loop),
-                    **run.agent_kwargs)
+                    interim_assistant_callback=_interim_cb, **run.agent_kwargs)
             self._active_run_agents[run_id] = agent
             approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
-            result, usage = await loop.run_in_executor(
-                None, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
+            result, usage, served_runtime = await _submit_api_worker(
+                loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
         if not isinstance(result, dict):
             result = {}
         # The committed outcome decides: a stop issued over WS by another viewer interrupts
@@ -1176,28 +1180,6 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
     response = web.StreamResponse(status=200, headers={
         "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     await response.prepare(request)
-    try:
-        last_seq = max(-1, int(str(raw_last_seq).strip())) if raw_last_seq is not None else -1
-    except (TypeError, ValueError):
-        last_seq = -1
-    q, replay = stream.attach(last_seq)
-    response = web.StreamResponse(status=200, headers=self._sse_headers(request))
-
-    async def _write(data: bytes) -> None:
-        try:
-            async with asyncio.timeout(_RUN_STREAM_WRITE_TIMEOUT):
-                await response.write(data)
-        except TimeoutError:
-            with suppress(Exception):
-                response.force_close()
-            raise
-
-    async def _write_event(seq: int, event: Dict[str, Any]) -> None:
-        payload = dict(event)
-        payload["seq"] = seq
-        await _write(_api_server._sse_frame(payload, id=seq))
-
-    prepared = False
     try:
         await response.prepare(request)
         prepared = True

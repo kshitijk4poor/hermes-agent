@@ -260,13 +260,21 @@ class _FakeAuthority:
         return {k: record[k] for k in ("status", "delivery_id", "profile_home", "session_id", "reply")}
 
 
-def _canonical_target(monkeypatch, target: Path) -> _FakeAuthority:
+def _canonical_target(monkeypatch, *targets: Path) -> _FakeAuthority:
+    """Every ``targets`` profile home has a ready authority (its Bot Chat is admitted canonically);
+    any other home has none, so a DM there falls through to the runner hand-off."""
     from tools import bot_live_delivery as live
 
-    owner = dict(profile_home=str(target.resolve()), session_id="local-bot", canonical=True,
-                 lease_id="authority-1", live_session_id="local-bot")
-    monkeypatch.setattr(live, "find_canonical_live_owner",
-                        lambda home: owner if Path(home).resolve() == target.resolve() else None)
+    homes = {t.resolve() for t in targets}
+
+    def owner_of(home):
+        home = Path(home).resolve()
+        if home not in homes:
+            return None
+        return dict(profile_home=str(home), session_id="local-bot", canonical=True,
+                    lease_id="authority-1", live_session_id="local-bot")
+
+    monkeypatch.setattr(live, "find_canonical_live_owner", owner_of)
     authority = _FakeAuthority()
     monkeypatch.setattr(live, "authority_delivery", authority)
     return authority
@@ -352,6 +360,22 @@ def test_local_delivery_admits_canonically_and_acks(tmp_path, monkeypatch):
     assert params["message"] == content
 
 
+def test_cli_runner_ack_is_a_dispatch_ack_that_names_the_completion_notification(tmp_path, monkeypatch):
+    """``status: queued`` is returned before the background runner has delivered anything; the
+    detail (and the schema text the model reads) must say the completion notification carries
+    the outcome, so a runner that dies at exec is never read as a delivered message."""
+    _capture_spawn(monkeypatch)
+    home = _managed_home(tmp_path, teammates=("researcher",))
+    _canonical_target(monkeypatch, home / "profiles" / "researcher")
+    result = json.loads(bot_mode_dm.message_agent_tool(
+        target="researcher", message="hi", agent=_FakeAgent(home, title="Bot Chat")))
+
+    assert result["status"] == "queued"
+    assert "Do NOT wait or resend" in result["detail"]
+    assert "delivered" not in result["detail"].lower()
+    description = bot_mode_dm.message_agent_tool_schema()["function"]["description"]
+    assert "dispatch acknowledgement" in description and "not a delivery receipt" in description
+    assert "completion notification" in description and "delivery failure" in description
 
 
 def test_cli_runner_ack_is_queued_with_the_runner_delivery_id(tmp_path, monkeypatch):
@@ -362,13 +386,15 @@ def test_cli_runner_ack_is_queued_with_the_runner_delivery_id(tmp_path, monkeypa
 
     calls = _capture_spawn(monkeypatch)
     home = _managed_home(tmp_path, teammates=("researcher",))
+    authority = _canonical_target(monkeypatch, home / "profiles" / "researcher")
     result = json.loads(bot_mode_dm.message_agent_tool(
         target="researcher", message="hi", agent=_FakeAgent(home, title="Bot Chat")))
 
     assert result["status"] == "queued"
     assert result["process_id"] == "proc_test1234"
-    _, dm_file, _ = _runner_parts(calls[0]["command"])
+    _, dm_file, _, _ = _runner_parts(calls[0]["command"])
     assert result["delivery_id"] == hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest()
+    assert authority.calls[0][1]["id"] == result["delivery_id"]
 
 
 def test_relay_ack_is_queued_with_the_envelope_id(tmp_path, monkeypatch):
@@ -405,13 +431,16 @@ def test_friendly_names_and_desktop_slugs_resolve_to_folder_ids(tmp_path, monkey
     _rename(home, "builder", display_name="Builder")
     expected = {"Scribe": "writer", "@scribe": "writer", "Dr. Foo": "foo", "dr-foo": "foo", "drfoo": "foo",
                 "Builder": "builder"}[target]
+    authority = _canonical_target(monkeypatch, *(home / "profiles" / name for name in ("writer", "foo", "builder")))
 
     result = json.loads(bot_mode_dm.message_agent_tool(target=target, message="ping", agent=_FakeAgent(home)))
 
     assert result["status"] == "queued", result
     assert result["to"] == f"@{expected}"
-    _mode, _dm_file, argv = _runner_parts(calls[0]["command"])
+    _mode, _dm_file, argv, profile_home = _runner_parts(calls[0]["command"])
     assert argv[1:3] == ["-p", expected]
+    assert Path(profile_home) == (home / "profiles" / expected).resolve()
+    assert authority.calls[0][1]["profile"] == expected
 
 
 @pytest.mark.parametrize(("target", "local_name", "relayed"), [
@@ -449,6 +478,7 @@ def test_ambiguous_friendly_name_fails_closed(tmp_path, monkeypatch):
     reserved @hermes alias can never be hijacked by a rename."""
     calls = _capture_spawn(monkeypatch)
     home = _managed_home(tmp_path, teammates=("aaa", "bbb", "ops"))
+    _canonical_target(monkeypatch, home, *(home / "profiles" / name for name in ("aaa", "bbb", "ops")))
     _rename(home, "aaa", display_name="Scribe")
     _rename(home, "bbb", display_name="Scribe")
     _rename(home, "ops", display_name="Hermes")
@@ -484,7 +514,7 @@ def test_peer_delivery_command_pins_registry_profile_for_secondary_bots(
     result = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
     )
-    assert result["status"] == "sent"
+    assert result["status"] == "queued"
     mode, _dm_file, transport_argv, _home = _runner_parts(calls[0]["command"])
     assert mode == "stdin"
     # The registry the tool validated against is the machine root's — the
@@ -514,7 +544,7 @@ def test_peer_delivery_command(tmp_path, monkeypatch):
     result2 = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
     )
-    assert result2["status"] == "sent"
+    assert result2["status"] == "queued"
     mode, _dm_file, transport_argv, _home = _runner_parts(calls[1]["command"])
     assert mode == "stdin"
     assert transport_argv == ["hermes", "-p", "default", "peer", "dm", "spark"]
@@ -555,7 +585,7 @@ def test_delivery_pins_the_hermes_entrypoint_beside_this_interpreter(tmp_path, m
     result2 = json.loads(
         bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
     )
-    assert result2["status"] == "sent"
+    assert result2["status"] == "queued"
     mode, _dm_file, transport_argv, _profile_home = _runner_parts(calls[1]["command"])
     assert mode == "stdin"
     assert transport_argv == [str(hermes_entry), "-p", "default", "peer", "dm", "spark"]
@@ -570,7 +600,7 @@ def test_peer_delivery_author_carries_the_sender_hostname_and_local_stays_bare(t
     _canonical_target(monkeypatch, home / "profiles" / "researcher")
     agent = _FakeAgent(home / "profiles" / "coder", title="Bot Chat")
 
-    assert json.loads(bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent))["status"] == "sent"
+    assert json.loads(bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent))["status"] == "queued"
     assert json.loads(bot_mode_dm.message_agent_tool(target="researcher", message="ping", agent=agent))["status"] == "queued"
 
     assert _runner_author(calls[0]["command"]) == {"id": "bot:erimac.local/coder", "name": "coder", "is_bot": True}
@@ -585,25 +615,26 @@ def test_renamed_primary_signs_with_its_friendly_name_and_is_reachable_by_it(tmp
     calls = _capture_spawn(monkeypatch)
     monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: "hermes")
     home = _managed_home(tmp_path, teammates=("coder",))
+    _canonical_target(monkeypatch, home, home / "profiles" / "coder")
     (home / "profile.yaml").write_text("display_name: Maia\n", encoding="utf-8")
 
     result = json.loads(bot_mode_dm.message_agent_tool(target="coder", message="hi", agent=_FakeAgent(home)))
     assert result["status"] == "queued"
-    _mode, dm_file, _argv = _runner_parts(calls[0]["command"])
+    _mode, dm_file, _argv, _home = _runner_parts(calls[0]["command"])
     assert Path(dm_file).read_text(encoding="utf-8").startswith("Message from 🤖 Maia (@hermes): ")
 
     coder = _FakeAgent(home / "profiles" / "coder")
     for target in ("maia", "@maia", "@hermes"):
         result = json.loads(bot_mode_dm.message_agent_tool(target=target, message="pong", agent=coder))
         assert result["status"] == "queued", (target, result)
-        _mode, _dm_file, argv = _runner_parts(calls[-1]["command"])
+        _mode, _dm_file, argv, _home = _runner_parts(calls[-1]["command"])
         assert argv[1:3] == ["-p", "default"], (target, argv)
 
     (home / "profile.yaml").write_text(
         "display_name: Maia\nui_meta:\n  hermes-bots:\n    title: Maia Prime\n", encoding="utf-8"
     )
     json.loads(bot_mode_dm.message_agent_tool(target="coder", message="hi", agent=_FakeAgent(home)))
-    _mode, dm_file, _argv = _runner_parts(calls[-1]["command"])
+    _mode, dm_file, _argv, _home = _runner_parts(calls[-1]["command"])
     assert Path(dm_file).read_text(encoding="utf-8").startswith("Message from 🤖 Maia Prime (@hermes): ")
 
 
@@ -1213,6 +1244,7 @@ def test_ack_names_poll_return_path_when_session_cannot_receive_completions(tmp_
         "output": "Background process started", "session_id": "proc_np1", "notify_on_complete": False,
         "notify_unsupported": "poll"}))
     home = _managed_home(tmp_path, teammates=("researcher",))
+    _canonical_target(monkeypatch, home / "profiles" / "researcher")
     result = json.loads(bot_mode_dm.message_agent_tool(
         target="researcher", message="hi", agent=_FakeAgent(home, title="Bot Chat")))
 
@@ -1225,13 +1257,11 @@ def test_live_owner_ack_carries_the_poll_return_path_when_session_cannot_receive
     """#101142 sibling: a live-owner (Desktop) target still runs the same tracked runner whose
     stdout carries the reply. On a non-push sender the live-owner ack must propagate
     ``reply_delivery="poll"`` and the wait instruction instead of 'finish your turn'."""
-    from tools import bot_live_delivery as live
     import tools.terminal_tool as terminal_tool_module
 
     home = _managed_home(tmp_path)
     target = home / "profiles" / "researcher"
-    owner = dict(profile_home=str(target), session_id="bot", lease_id="lease", live_session_id="live")
-    monkeypatch.setattr(live, "find_canonical_live_owner", lambda h: owner if Path(h) == target else None)
+    _canonical_target(monkeypatch, target)
     monkeypatch.setattr(bot_mode_dm, "_dm_dir", lambda: tmp_path)
     monkeypatch.setattr(terminal_tool_module, "terminal_tool", lambda command, **kw: json.dumps({
         "output": "Background process started", "session_id": "proc_np2", "notify_on_complete": False}))
@@ -1262,6 +1292,7 @@ def test_poll_reply_is_persisted_as_a_delivery_row_when_the_runner_exits(tmp_pat
 
     monkeypatch.setattr(terminal_tool_module, "terminal_tool", fake_terminal_tool)
     home = _managed_home(tmp_path, teammates=("researcher",))
+    _canonical_target(monkeypatch, home / "profiles" / "researcher")
     agent = _FakeAgent(home, title="Bot Chat")
     rows = []
     agent._session_db.append_message = lambda session_id, role, **kw: rows.append((session_id, role, kw)) or 1

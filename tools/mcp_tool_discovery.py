@@ -592,7 +592,8 @@ def discover_mcp_tools(allowed_mcp_names: Optional[List[str]] = None) -> List[st
     from agent.safe_worker_policy import safe_worker_enabled
     if safe_worker_enabled():
         return []
-    servers = _config._load_mcp_config()
+    with _owner_secret_scope():
+        servers = _config._load_mcp_config()
     if not servers:
         logger.debug("No MCP servers configured")
         return []

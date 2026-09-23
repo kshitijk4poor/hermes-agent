@@ -1946,6 +1946,21 @@ def _read_raw_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
     snapshot = worker_config_snapshot()
     if snapshot is not None:
         return snapshot
+
+    # Lock-free fast path for cache hits — same shape as `_load_config_impl`. `_RAW_CONFIG_CACHE`
+    # publishes each entry as ONE `(*sig, data)` tuple replaced wholesale, so a reader sees either
+    # the complete old entry or the complete new one; `_CONFIG_LOCK` only serializes the re-parse
+    # and the writers (`save_config()` holds it across an atomic YAML write, which used to stall
+    # every cached read for the duration). A lost race just falls through to the locked re-check.
+    try:
+        config_path = get_config_path()
+        cache_key = file_signature(config_path.stat())
+        hit = _raw_config_cache_hit(str(config_path), cache_key)
+        if hit is not None:
+            return copy.deepcopy(hit) if want_deepcopy else hit
+    except Exception:
+        pass
+
     with _CONFIG_LOCK:
         config_path = get_config_path()
         try:
@@ -2351,6 +2366,24 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
     snapshot = worker_config_snapshot()
     if snapshot is not None:
         return _deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot)
+
+    # Lock-free fast path for cache hits — same publication contract as `_read_raw_config_impl`
+    # above (whole-tuple replace, `_CONFIG_LOCK` only serializes rebuilds and writers). A hit costs
+    # ~0.024ms; behind a lock held by `save_config()` the same read measured 10010ms, and on a
+    # gateway that stalls every inbound message's hook path. A lost race falls through to the lock.
+    try:
+        config_path = get_config_path()
+        path_key = str(config_path)
+        if path_key in _LOAD_CONFIG_CACHE:
+            _, fast_sig = _load_config_cache_sig(config_path)
+            hit = _load_config_cache_hit(path_key, fast_sig)
+            if hit is not None:
+                return copy.deepcopy(hit) if want_deepcopy else hit
+    except Exception:
+        # Any surprise here falls through to the locked path, which is the
+        # original fully-defensive implementation.
+        pass
+
     with _CONFIG_LOCK:
         ensure_hermes_home()
         config_path = get_config_path()
@@ -2536,21 +2569,16 @@ def load_env() -> Dict[str, str]:
     """Load ~/.hermes/.env as a dict. Memoised inside ``load_env_file`` (``get_env_value()`` runs
     hundreds of times per interactive menu render). Each assignment's value is opaque data for
     boundary discovery."""
-    from agent.secret_scope import load_env_file  # the one .env tokenizer; also installs profile scopes
-
-    return load_env_file(get_env_path())
-
-def load_env() -> Dict[str, str]:
-    """Load ~/.hermes/.env as a dict (memoised; ``get_env_value()`` runs hundreds of times per
-    interactive menu render). Each assignment's value is opaque data for boundary discovery."""
-    global _env_cache
     from agent.safe_worker_policy import worker_config_snapshot
 
     # A frozen-policy worker never opens the profile's files; its secrets arrive
     # through the owner-installed scope, so the .env layer is empty here.
     if worker_config_snapshot() is not None:
         return {}
-    env_path = get_env_path()
+    from agent.secret_scope import load_env_file  # the one .env tokenizer; also installs profile scopes
+
+    return load_env_file(get_env_path())
+
 
 def _parse_env_value(raw_value: str) -> str:
     """Frozen compat surface name (tests/compat/old_updater_surface.json).
@@ -4057,17 +4085,68 @@ _inject_profile_env_vars()
 
 
 def _platform_plugin_manifests():
-    """Yield ``(dir_name, manifest_dict)`` for every bundled ``plugins/platforms/*/plugin.y(a)ml``."""
+    """Yield ``(dir_name, manifest_dict)`` for every platform plugin manifest: bundled
+    ``plugins/platforms/*``, the user's ``<HERMES_HOME>/plugins/platforms/*`` category dir, and flat
+    user installs ``<HERMES_HOME>/plugins/*`` that declare ``kind: platform`` (#46600)."""
     from agent.safe_worker_policy import safe_worker_enabled
 
     if safe_worker_enabled():
         return
-    platforms_dir = get_project_root() / "plugins" / "platforms"
-    if not platforms_dir.is_dir():
-        return
-    for child in platforms_dir.iterdir():
-        manifest_path = next(
-            (p for p in (child / "plugin.yaml", child / "plugin.yml") if child.is_dir() and p.exists()), None)
+    user_plugins = get_hermes_home() / "plugins"
+    roots = (
+        (get_project_root() / "plugins" / "platforms", False),
+        (user_plugins / "platforms", False),
+        (user_plugins, True),  # flat layout: only manifests that say they are platforms
+    )
+    for root, require_kind in roots:
+        try:
+            with os.scandir(root) as it:
+                entries = [e for e in it if _is_plugin_dir_name(e.name)]
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError as exc:
+            yield str(root), None, require_kind, exc
+            continue
+        for entry in entries:
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
+                continue
+            for file_name in ("plugin.yaml", "plugin.yml"):
+                path = Path(entry.path) / file_name
+                try:
+                    st = os.stat(path)
+                except PermissionError as exc:  # the dir itself is not searchable
+                    yield entry.name, None, require_kind, exc
+                    break
+                except OSError:  # missing, a symlink loop: discovery's exists() is False too
+                    continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue
+                yield entry.name, path, require_kind, st
+                break
+
+
+def platform_manifest_stamp(home: Optional[Path] = None) -> tuple:
+    """Change-detection key over every user platform plugin manifest of ``home`` (path plus
+    :func:`utils.file_signature`): it changes when one is added, removed, replaced or edited in
+    place, so a cache keyed on it never serves a stale declaration."""
+    return tuple((name, str(path), file_signature(st) if path is not None else type(st).__name__)
+                 for name, path, _kind, st in _platform_manifest_paths(home, "user"))
+
+
+def _platform_plugin_manifests(home: Optional[Path] = None, source: PlatformManifestSource = "all", *,
+                               strict: bool = False, skipped: "list | None" = None):
+    """Yield ``(dir_name, manifest_dict)`` for every platform plugin manifest (see
+    :func:`_platform_manifest_paths`). ``strict`` raises when a manifest cannot be read instead of
+    skipping it: the child-env scrub must not lose a declared secret to an I/O error. Only a
+    manifest known to be a platform's counts (the bundled and ``plugins/platforms/`` dirs); a
+    flat ``plugins/*`` manifest proves it is one only by its content, so an unreadable one is
+    skipped with a warning, as is an unsearchable plugin directory. A manifest that does not
+    parse declares nothing (its adapter cannot load either) and is skipped. Every skip is appended
+    to ``skipped``, so a caller can tell a complete scan from a partial one."""
+    for dir_name, manifest_path, require_kind, st in _platform_manifest_paths(home, source):
         if manifest_path is None:
             logger.warning("Skipping unreadable plugin directory %s: %s", dir_name, st)
             if skipped is not None:

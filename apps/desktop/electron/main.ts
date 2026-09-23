@@ -6,6 +6,7 @@ import { mintGatewayTicketWithPython } from './local-gateway-python'
 const localGatewayDials = createLocalGatewayDials()
 configureWindowsGatewayTicketClient(async (endpoint, purpose) => {
   const backend = await ensureRuntime(await resolveHermesBackend([]), () => undefined)
+
   if (backend.kind !== 'python' || backend.shell) {
     throw new Error('Gateway ticket bootstrap requires the installed Hermes Python runtime')
   }
@@ -178,7 +179,6 @@ import {
   sanitizeRemoteHeaderValue,
   savedProfileSsh,
   tokenPreview,
-  unscopableMutatingRequest,
   withTransientRetries
 } from './connection-config'
 import { applyConnectionConfigAtomically } from './connection-config-apply'
@@ -216,8 +216,7 @@ import type { RegistryConnection } from './connection-registry'
 import type { RosterProfileMetadata } from './connection-registry'
 import { liveWindowState, overlayWindowState } from './connection-window-state'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
-import { adoptServedDashboardToken, isAttachedBackendTokenDrifted, resolveServedDashboardToken } from './dashboard-token'
-import { resolveDesktopHermesHome, resolveDesktopUserData } from './data-paths'
+import { adoptServedDashboardToken } from './dashboard-token'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import { formatDesktopLogLine, formatLogStamp } from './desktop-log-line'
 import {
@@ -300,16 +299,7 @@ import {
   tightenSecretFileMode,
   writeSecretFileAtomic
 } from './hardening'
-import {
-  type AttachedBackend,
-  attachOrReserveSpawn,
-  HOST_SPAWN_GATE_STALE_MS,
-  spawnLedgerPath,
-  type SpawnReservation
-} from './host-backend-attach'
-import { assertNoSecondLocalBackend, assertNotPassiveSpawn } from './host-backend-singleton'
-import { lookupPublishedSessionToken } from './host-published-token'
-import { claimHostSpawnGate } from './host-spawn-gate'
+import { assertNotPassiveSpawn } from './host-backend-singleton'
 import { requestHudClose } from './hud-close'
 import { cursorPointInWindow } from './hud-cursor'
 import { startHudGameOverlayWatch } from './hud-game-overlay'
@@ -371,6 +361,7 @@ import { registerMcpOauthCallbackIpc } from './mcp-oauth-callback-ipc'
 import { isMediaCapturePermission } from './media-capture-permission'
 import { createMediaProtocolHandler, MEDIA_PROTOCOL } from './media-protocol'
 import { fetchLocalMedia } from './media-range'
+import { createMinimizeToTray } from './minimize-to-tray'
 import { createNativeAccessTokenCoordinator, NativeAuthChangedError } from './native-access-token'
 import { oauthSessionIsLive, resolveJsonBody, resolveOauthRestAuth, resolveReadinessProbeAuth } from './native-auth-decisions'
 import {
@@ -407,7 +398,9 @@ import {
   localRouteFallbackProfiles,
   undialedSshRouteSeeds
 } from './plugin-profile-routes'
+import { createPortalSession } from './portal-session'
 import { createKeepAwake } from './power-save'
+import { readPreUpdateBackupEnabled } from './pre-update-backup-config'
 import { registerPreparedSubmissions } from './prepared-submissions'
 import { capturePreviewContents } from './preview-capture'
 import { onPreviewWatchOwnerDestroyed, sendPreviewFileChangedToOwner } from './preview-file-watch'
@@ -1765,6 +1758,8 @@ let softRehomeInProgress = false
 // forces the next ensure*() to re-dial. A user with no named profiles never
 // populates this map.
 const backendPool = new Map() // scope key -> { connectionPromise, remoteBaseUrl }
+// Escape hatch: a dedicated, private backend for this app instead of the host's.
+const ISOLATED_BACKEND = process.env.HERMES_DESKTOP_ISOLATED_BACKEND === '1'
 const profileDeletionGate = new ProfileDeletionGate()
 
 // rememberLog() state. Declared before any top-level caller that logs during
@@ -1774,13 +1769,6 @@ const hermesLog = []
 let desktopLogBuffer = ''
 let desktopLogFlushTimer = null
 let desktopLogFlushPromise = Promise.resolve()
-
-// Passive reads may reuse a cached descriptor, but never start an owner.
-function assertNotPassiveSpawn(passive: boolean, poolKey: string): void {
-  if (passive) {
-    throw new Error(`Passive read: no warm backend for "${poolKey}"`)
-  }
-}
 
 // Land a spawn failure in desktop.log.
 function logPoolSpawnFailure(label: string, error: unknown): void {
@@ -7950,497 +7938,29 @@ function postJsonNoAuth(url: string, body: unknown, opts: any = {}) {
 }
 
 // All explicit mutations go through the coordinator; only its refresh/store
-// dependencies may call the raw persistence helpers above.
-const nativeAccessTokenCoordinator = createNativeAccessTokenCoordinator({
-  clearTokens: _clearNativeTokens,
-  isRefreshAuthRejection: error => readStatusCode(error) === 401,
-  loadTokens: _loadNativeTokens,
-  normalizeBaseUrl: normalizeRemoteBaseUrl,
-  refreshTokens: async (baseUrl, tokens) =>
-    parseTokenResponse(
-      await postJsonNoAuth(
-        nativeRefreshUrl(baseUrl),
-        { refresh_token: tokens.refreshToken, provider: tokens.provider },
-        { timeoutMs: 10_000 }
-      )
-    ),
-  storeTokens: _storeNativeTokens,
-  tokenNeedsRefresh
-})
-
-const ensureNativeAccessToken = nativeAccessTokenCoordinator.ensure
-
-// OAuth-session download that streams the response body straight to a
-// user-selected destination (via finalizeGatewayDownload). The connect timeout
-// is cleared once the response headers arrive.
-function downloadViaOauthSessionToFile(url, ctx, options: any = {}) {
-  return new Promise((resolve, reject) => {
-    const sess = getOauthSessionForUrl(url)
-
-    if (!sess) {
-      reject(new Error('OAuth session partition is unavailable.'))
-
-      return
-    }
-
-    let parsed
-
-    try {
-      parsed = new URL(url)
-    } catch (error) {
-      reject(new Error(`Invalid URL: ${error.message}`))
-
-      return
-    }
-
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-      reject(new Error(`Unsupported Hermes backend URL protocol: ${parsed.protocol}`))
-
-      return
-    }
-
-    const timeoutMs = resolveTimeoutMs(options.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
-
-    const request = electronNet.request({
-      method: 'GET',
-      url,
-      session: sess,
-      useSessionCookies: true,
-      redirect: 'follow'
-    } as any)
-
-    let settled = false
-
-    const timer = setTimeout(() => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-
-      try {
-        request.abort()
-      } catch {
-        // already finished
-      }
-
-      reject(new Error(`Timed out connecting to Hermes backend after ${timeoutMs}ms`))
-    }, timeoutMs)
-
-    request.on('response', res => {
-      if (settled) {
-        return
-      }
-
-      // Response headers arrived — cancel the connect timeout so it can't abort
-      // the stream while the save dialog is open or bytes are still flowing.
-      settled = true
-      clearTimeout(timer)
-      finalizeGatewayDownload(res, res.statusCode || 500, res.headers || {}, {
-        ...ctx,
-        abort: () => {
-          try {
-            request.abort()
-          } catch {
-            // already finished
-          }
-        }
-      }).then(resolve, reject)
-    })
-    request.on('error', error => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-      clearTimeout(timer)
-      reject(error)
-    })
-    request.end()
-  })
-}
-
-// Shared tail for both transports: validate status, pick a filename, prompt the
-// save dialog, then stream the (still-unconsumed) response body to the chosen
-// destination. On an HTTP error the status code is attached so saveGatewayFile
-// can trigger the 404-only compatibility fallback.
-async function finalizeGatewayDownload(res, statusCode, headers, ctx: any = {}) {
-  if (statusCode >= 400) {
-    throw httpStatusError(statusCode, await readGatewayErrorText(res))
-  }
-
-  const disposition = headers['content-disposition'] || headers['Content-Disposition']
-  const filename = filenameFromContentDisposition(disposition) || ctx.suggested || ctx.fallbackName
-
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: filename,
-    title: 'Save File'
-  })
-
-  if (result.canceled || !result.filePath) {
-    ctx.abort?.()
-
-    return { canceled: true, saved: false }
-  }
-
-  try {
-    // Failure-atomic: exclusive temp create beside the destination, rename into
-    // place only once the body is complete (#96597).
-    await pumpStreamToFile(res, result.filePath, fsPumpDeps())
-  } catch (error) {
-    ctx.abort?.()
-    throw error
-  }
-
-  return { path: result.filePath, saved: true }
-}
-
-// Read a bounded amount of an error response body for the thrown message.
-function readGatewayErrorText(res): Promise<string> {
-  return new Promise(resolve => {
-    const chunks = []
-    let total = 0
-
-    res.on('data', chunk => {
-      if (total >= 500) {
-        return
-      }
-
-      const buffer = Buffer.from(chunk)
-
-      total += buffer.length
-      chunks.push(buffer)
-    })
-    res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8').slice(0, 500)))
-    res.on('error', () => resolve(Buffer.concat(chunks).toString('utf8').slice(0, 500)))
-  })
-}
-
-interface GatewayFileConnection extends RegistryBackendRequestScope {
-  gatewayEndpoint?: GatewayEndpoint
-  authMode?: 'oauth' | 'token' | 'native'
-  baseUrl: string
-  token?: null | string
-}
-
-interface GatewayFileSaveContext {
-  fallbackName: string
-  suggested: string
-}
-
-interface GatewayFileSavePayload {
-  sessionId?: string
-  connectionId?: unknown
-  path?: unknown
-  profile?: unknown
-  suggestedName?: unknown
-}
-
-function gatewayFileRequestPath(
-  connection: GatewayFileConnection,
-  connectionId: null | string,
-  profile: null | string,
-  requestPath: string
-) {
-  return connectionId
-    ? pathForRegistryBackendRequest(requestPath, profile, connection)
-    : pathWithGlobalRemoteProfile(requestPath, profile, profileRouteOptions(profile))
-}
-
-async function saveGatewayFile(payload: GatewayFileSavePayload = {}) {
-  const filePath = gatewayFilePath(payload.path)
-
-  if (!filePath) {
-    throw new Error('Missing gateway file path')
-  }
-
-  const { connection, connectionId, profile } = await resolveGatewayFileBackend<GatewayFileConnection>(payload, {
-    ensureLegacy: ensureBackend,
-    ensureRegistry: ensureRegistryBackend
-  })
-
-  const suggested = String(payload.suggestedName || '').trim()
-  const fallbackName = path.basename(filePath) || suggested || 'download'
-  const ctx = { suggested, fallbackName }
-
-  const requestPaths = gatewayFileRequestPaths(
-    filePath,
-    requestPath => gatewayFileRequestPath(connection, connectionId, profile, requestPath),
-    payload.sessionId
-  )
-
-  const url = `${connection.baseUrl}${requestPaths.download}`
-
-  try {
-    if (connection.authMode === 'oauth') {
-      return await requestWithOauthFallback(connection.baseUrl, {
-        ensureNativeAccessToken,
-        requestWithBearer: bearer => downloadViaTokenToFile(url, null, ctx, finalizeGatewayDownload, { bearer }),
-        requestWithCookie: () => downloadViaOauthSessionToFile(url, ctx)
-      })
-    }
-
-    return await downloadViaTokenToFile(url, connection.token, ctx, finalizeGatewayDownload, {
-      gatewayDescriptor: connection.gatewayEndpoint ? connection : undefined
-    })
-  } catch (error) {
-    // Desktop and the remote gateway update independently. A gateway predating
-    // /api/fs/download 404s here; fall back (ONLY on 404) to the older capped
-    // data-URL route so downloads keep working against older backends.
-    if (isNotFoundError(error)) {
-      return await saveGatewayFileViaDataUrl(connection, requestPaths.dataUrl, ctx)
-    }
-
-    throw error
-  }
-}
-
-// Compatibility fallback: fetch the file through the capped
-// `/api/fs/read-data-url` route, decode it, and save. Bounded by the gateway's
-// data-URL cap, so it only serves smaller files — enough to keep older gateways
-// working until they gain the streaming route.
-async function saveGatewayFileViaDataUrl(
-  connection: GatewayFileConnection,
-  requestPath: string,
-  ctx: GatewayFileSaveContext
-) {
-  const json = await fetchJsonForBackend(connection, requestPath)
-
-  const dataUrl =
-    json && typeof json === 'object' && 'dataUrl' in json && typeof json.dataUrl === 'string' ? json.dataUrl : ''
-
-  if (!dataUrl) {
-    throw new Error('Gateway returned no file data')
-  }
-
-  const buffer = parseDataUrlToBuffer(dataUrl)
-  const filename = ctx.suggested || ctx.fallbackName
-
-  const result = await dialog.showSaveDialog(mainWindow, {
-    defaultPath: filename,
-    title: 'Save File'
-  })
-
-  if (result.canceled || !result.filePath) {
-    return { canceled: true, saved: false }
-  }
-
-  // Same failure-atomic contract as the streaming path: a direct writeFile
-  // truncates an existing destination before the write completes (#96597).
-  await writeBufferToFile(buffer, result.filePath, fsPumpDeps())
-
-  return { path: result.filePath, saved: true }
-}
-
-// Mint a single-use WS ticket for a gated gateway.
-// Ticket POSTs are replay-safe; arbitrary REST mutations never use this retry loop.
-async function mintGatewayWsTicket(baseUrl, headers = {}) {
-  return withTransientRetries(
-    () =>
-      mintOauthGatewayWsTicket(
-        baseUrl,
-        {
-          ensureNativeAccessToken,
-          fetchJson,
-          fetchJsonViaOauthSession
-        },
-        headers
+// dependencies may call the raw persistence helpers above. It single-flights
+// the /auth/native/refresh rotation per host (concurrent callers share one
+// flight instead of racing rotations and losing the winner) and fences a
+// refresh that lands after a login/logout changed the identity underneath it
+// (22751c8fd9b9). A 401 on refresh means the RT is dead — tokens are dropped
+// so the UI prompts a fresh native login; a 503/transient keeps them.
+const nativeAccessTokenCoordinator: ReturnType<typeof createNativeAccessTokenCoordinator> =
+  createNativeAccessTokenCoordinator({
+    clearTokens: _clearNativeTokens,
+    isRefreshAuthRejection: (error: unknown): boolean => readStatusCode(error) === 401,
+    loadTokens: _loadNativeTokens,
+    normalizeBaseUrl: normalizeRemoteBaseUrl,
+    refreshTokens: async (baseUrl: string, tokens: NativeTokenSet): Promise<NativeTokenSet> =>
+      parseTokenResponse(
+        await postJsonNoAuth(
+          nativeRefreshUrl(baseUrl),
+          { refresh_token: tokens.refreshToken, provider: tokens.provider },
+          { timeoutMs: 10_000 }
+        )
       ),
-    {
-      isRetryable: (error: unknown) => !(error instanceof NativeAuthChangedError) && !isGatewayAuthRejection(error)
-    }
-  )
-}
-
-// Build a fresh WS URL for the *current* connection. Critical for reconnects:
-// OAuth WS tickets are single-use with a ~30s TTL, so the ticket baked into
-// the cached connection's wsUrl is stale on the second connect. The renderer
-// calls this immediately before every gateway.connect() so each WS upgrade
-// carries a freshly-minted ticket. For local/token connections this just
-// reuses the static token (no minting needed).
-async function freshGatewayWsUrl(profile, webContentsId) {
-  // Mint for the requested profile's backend, NOT always the primary. The
-  // renderer re-mints right before every gateway.connect(); when swapping to a
-  // pooled profile we must return THAT backend's ws URL, otherwise the connect
-  // silently lands back on the primary (default) backend and writes sessions to
-  // the wrong profile's DB. A null/empty profile resolves to the primary, so
-  // legacy callers and single-profile users are unchanged.
-  const connection = await ensureBackend(profile)
-
-  if (connection.gatewayEndpoint) {
-    return redialLocalGateway({
-      ensure: () => ensureBackend(profile),
-      forget: () => forgetLocalGatewayDescriptor(profile),
-      use: async current => {
-        const ticket = await mintLocalGatewayTicket(current.gatewayEndpoint)
-
-        return localGatewayDials.prepare(current.baseUrl, ticket, webContentsId)
-      }
-    })
-  }
-
-  if (connection.authMode === 'oauth') {
-    const ticket = await mintGatewayWsTicket(connection.baseUrl, connection.headers)
-    const wsUrl = buildGatewayWsUrlWithTicket(connection.baseUrl, ticket)
-
-    rememberRemoteWsHeaders(wsUrl, connection.headers)
-
-    return wsUrl
-  }
-
-  // Local/token: the cached wsUrl already carries the (long-lived) token.
-  rememberRemoteWsHeaders(connection.wsUrl, connection.headers)
-
-  return connection.wsUrl
-}
-
-// --- Hermes Cloud discovery + silent per-agent sign-in (cloud-auto-discovery
-// Phase 3) ---------------------------------------------------------------
-//
-// The "cloud" connection mode lets a user sign in to the Nous portal ONCE in
-// the OAuth session partition, then (a) discover their hosted agents and (b)
-// connect to any of them with no second interactive sign-in. Both ride the one
-// portal session cookie living in `persist:hermes-remote-oauth`:
-//   - discovery  → GET {portal}/api/agents over the partition-bound net; the
-//     portal session cookie authenticates it (NAS Phase 2.5 accepts the cookie).
-//   - cascade    → opening an agent's own /login in the same partition hits the
-//     portal's silent auto-approve (org member, existing session) and 302s back
-//     with that agent's session cookie — no prompt. Each agent still completes
-//     its own PKCE exchange; SSO removes the human click, not a security check.
-
-// Canonical Nous portal base URL, overridable for staging/dev. Mirrors the CLI
-// convention (hermes_cli/auth.py DEFAULT_NOUS_PORTAL_URL + the same env names)
-// so a single override flips every Hermes surface to the same portal.
-const DEFAULT_NOUS_PORTAL_URL = 'https://portal.nousresearch.com'
-
-function resolvePortalBaseUrl() {
-  const raw = process.env.HERMES_PORTAL_BASE_URL || process.env.NOUS_PORTAL_BASE_URL || DEFAULT_NOUS_PORTAL_URL
-
-  return String(raw).trim().replace(/\/+$/, '')
-}
-
-// Whether the OAuth partition currently holds a live Nous portal session — the
-// credential that powers both discovery and the silent cascade. The portal
-// authenticates via PRIVY, not the Hermes gateway session cookies, so this
-// checks for the `privy-token` cookie on the portal host (NOT
-// hasLiveOauthSession, which looks for hermes_session_at/rt that the portal
-// never sets). See connection-config.ts cookiesHavePrivySession.
-//
-// Mirrors hasLiveOauthSession's cold-start guard (#73495): a `persist:`
-// partition's cookie store hydrates lazily, so the FIRST read on a fresh boot
-// can come back empty even for a signed-in user. The renderer checks Cloud
-// status exactly once on entering cloud mode, so a single false-negative here
-// used to clear the discovered agent list and demand a re-login that a plain
-// retry would have avoided. Warm the store and re-read with a short backoff
-// before trusting a negative.
-async function hasLivePortalSession() {
-  const sess = getOauthSession()
-
-  if (!sess) {
-    return false
-  }
-
-  const portalBaseUrl = resolvePortalBaseUrl()
-  const parsed = new URL(portalBaseUrl)
-
-  const readPortal = async () => {
-    try {
-      const cookies = await sess.cookies.get({ url: portalBaseUrl })
-
-      return cookiesHavePrivySession(cookies)
-    } catch {
-      try {
-        const cookies = await sess.cookies.get({ domain: parsed.hostname })
-
-        return cookiesHavePrivySession(cookies)
-      } catch {
-        return false
-      }
-    }
-  }
-
-  if (await readPortal()) {
-    return true
-  }
-
-  await warmOauthCookieStore()
-
-  for (const delayMs of [30, 60, 90]) {
-    if (await readPortal()) {
-      return true
-    }
-
-    await new Promise(resolve => setTimeout(resolve, delayMs))
-  }
-
-  return readPortal()
-}
-
-// Whether the jar holds the short-lived Privy ACCESS token — the exact cookie
-// `/api/agents` validates. hasLivePortalSession() answers "signed in at all?"
-// (renewal material counts); this answers "can discovery succeed right now?".
-async function hasPortalAccessToken() {
-  const sess = getOauthSession()
-
-  if (!sess) {
-    return false
-  }
-
-  const portalBaseUrl = resolvePortalBaseUrl()
-  const parsed = new URL(portalBaseUrl)
-
-  try {
-    const cookies = await sess.cookies.get({ url: portalBaseUrl })
-
-    return cookiesHavePrivyAccessToken(cookies)
-  } catch {
-    try {
-      const cookies = await sess.cookies.get({ domain: parsed.hostname })
-
-      return cookiesHavePrivyAccessToken(cookies)
-    } catch {
-      return false
-    }
-  }
-}
-
-// Bounded silent renewal of the short-lived Privy access token (#73495).
-//
-// After a Desktop restart the long-lived `privy-session` / `privy-refresh-token`
-// cookies routinely survive while the ~1h `privy-token` access cookie has
-// expired. Discovery then 401s and the only offered recovery used to be a full
-// interactive re-login — even though the persisted refresh material can mint a
-// fresh access token with no user action: loading any portal page runs the
-// Privy client, which rotates a new `privy-token` from the refresh session.
-//
-// This drives exactly that, headlessly: a hidden window on the portal root in
-// the OAuth partition, polled until the access cookie lands, torn down on a
-// bounded timeout. Never shown — if renewal can't complete silently the caller
-// falls back to the interactive needsCloudLogin path. The in-flight promise is
-// shared so concurrent discovery + cascade calls ride one renewal.
-let portalAccessRenewal: Promise<boolean> | null = null
-
-function renewPortalAccessSilently() {
-  if (portalAccessRenewal) {
-    return portalAccessRenewal
-  }
-
-  portalAccessRenewal = (async () => {
-    if (!app.isReady()) {
-      return false
-    }
-
-    const sess = getOauthSession()
-
-    if (!sess) {
-      return false
-    }
-
-    // No renewal material at all → nothing to renew; interactive login is
-    // genuinely required.
-    if (!(await hasLivePortalSession())) {
-      return false
-    }
+    storeTokens: _storeNativeTokens,
+    tokenNeedsRefresh
+  })
 
 // Return a valid native access token for baseUrl, refreshing via
 // /auth/native/refresh if the stored one is at/near expiry. Returns null when
@@ -8449,7 +7969,8 @@ const ensureNativeAccessToken: (baseUrl: string, options?: NativeAccessTokenOpti
   nativeAccessTokenCoordinator.ensure
 
 interface GatewayFileConnection extends RegistryBackendRequestScope {
-  authMode?: 'oauth' | 'token'
+  gatewayEndpoint?: GatewayEndpoint
+  authMode?: 'oauth' | 'token' | 'native'
   baseUrl: string
   token?: null | string
 }
@@ -8500,24 +8021,25 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<Ga
       dialog.showSaveDialog(mainWindow, options)
   }
 
-  return saveGatewayDownload(requestPaths, ctx, {
-    ...deps,
-    download: async (requestPath: string, context: GatewayFileSaveContext): Promise<GatewayFileSaveResult> => {
-      const url: string = `${connection.baseUrl}${requestPath}`
+  try {
+    if (connection.authMode === 'oauth') {
+      return await requestWithOauthFallback(connection.baseUrl, {
+        ensureNativeAccessToken,
+        requestWithBearer: bearer => downloadViaTokenToFile(url, null, ctx, finalizeGatewayDownload, { bearer }),
+        requestWithCookie: () => downloadViaOauthSessionToFile(url, ctx)
+      })
+    }
 
-      if (connection.authMode === 'oauth') {
-        return requestWithOauthFallback(connection.baseUrl, {
-          ensureNativeAccessToken,
-          requestWithBearer: (bearer: string): Promise<GatewayFileSaveResult> =>
-            downloadViaTokenToFile(url, null, context, deps, { bearer }),
-          requestWithCookie: (): Promise<GatewayFileSaveResult> =>
-            downloadViaOauthSessionToFile<Session>(url, context, {
-              ...deps,
-              getSession: getOauthSessionForUrl,
-              request: electronNet.request
-            })
-        })
-      }
+    return await downloadViaTokenToFile(url, connection.token, ctx, finalizeGatewayDownload, {
+      gatewayDescriptor: connection.gatewayEndpoint ? connection : undefined
+    })
+  } catch (error) {
+    // Desktop and the remote gateway update independently. A gateway predating
+    // /api/fs/download 404s here; fall back (ONLY on 404) to the older capped
+    // data-URL route so downloads keep working against older backends.
+    if (isNotFoundError(error)) {
+      return await saveGatewayFileViaDataUrl(connection, requestPaths.dataUrl, ctx)
+    }
 
       return downloadViaTokenToFile(url, connection.token ?? null, context, deps)
     },
@@ -8581,7 +8103,7 @@ async function mintGatewayWsTicket(baseUrl: string, headers: Record<string, stri
 // calls this immediately before every gateway.connect() so each WS upgrade
 // carries a freshly-minted ticket. For local/token connections this just
 // reuses the static token (no minting needed).
-async function freshGatewayWsUrl(profile) {
+async function freshGatewayWsUrl(profile, webContentsId) {
   // Mint for the requested profile's backend, NOT always the primary. The
   // renderer re-mints right before every gateway.connect(); when swapping to a
   // pooled profile we must return THAT backend's ws URL, otherwise the connect
@@ -8589,6 +8111,18 @@ async function freshGatewayWsUrl(profile) {
   // the wrong profile's DB. A null/empty profile resolves to the primary, so
   // legacy callers and single-profile users are unchanged.
   const connection = await ensureBackend(profile)
+
+  if (connection.gatewayEndpoint) {
+    return redialLocalGateway({
+      ensure: () => ensureBackend(profile),
+      forget: () => forgetLocalGatewayDescriptor(profile),
+      use: async current => {
+        const ticket = await mintLocalGatewayTicket(current.gatewayEndpoint)
+
+        return localGatewayDials.prepare(current.baseUrl, ticket, webContentsId)
+      }
+    })
+  }
 
   if (connection.authMode === 'oauth') {
     const ticket = await mintGatewayWsTicket(connection.baseUrl, connection.headers)
@@ -11488,6 +11022,7 @@ async function forgetLocalGatewayDescriptor(profile) {
 // put it.
 async function forgetRegistryLocalGatewayDescriptor(connectionId, profile) {
   const profileKey = String(profile ?? '').trim() || 'default'
+
   const localRoute = resolveRegistryLocalRoute(profileKey, {
     globalRemote: globalRemoteActive(),
     profileRemoteOverride: Boolean(profileHasRemoteOverride(profileKey))
@@ -11502,7 +11037,10 @@ async function forgetRegistryLocalGatewayDescriptor(connectionId, profile) {
   }
 }
 
-async function ensureBackend(profile, opts: { passive?: boolean } = {}) {
+async function ensureBackend(
+  profile,
+  opts: { passive?: boolean; request?: { method?: string; path?: string } } = {}
+) {
   const key = profile && String(profile).trim() ? String(profile).trim() : primaryProfileKey()
   const passive = Boolean(opts.passive)
 
@@ -12436,6 +11974,7 @@ async function dialPoolBackend(profile, entry, opts: { forceLocal?: boolean; poo
       await resolveHermesBackend(['--profile', profile, 'gateway', 'ensure', '--json']),
       () => assertPoolEntryStillOwned(poolKey, entry)
     )
+
     profileDeletionGate.assertCanStart(profile)
     assertPoolEntryStillOwned(poolKey, entry)
 
@@ -12460,17 +11999,6 @@ async function dialPoolBackend(profile, entry, opts: { forceLocal?: boolean; poo
 async function stopPoolBackend(profile: string) {
   backendPool.delete(profile)
 }
-
-const poolRetirer = createPoolRetirer({
-  pool: backendPool,
-  coordinator: localBackendSpawnCoordinator,
-  ...createPoolRetirementClient(fetchJson),
-  stopBackend: stopPoolBackend,
-  onRetiring: broadcastPoolBackendRetiring,
-  log: rememberLog
-})
-
-localBackendLifecycle.signal.addEventListener('abort', poolRetirer.dispose, { once: true })
 
 async function teardownPoolBackendAndWait(profile) {
   await Promise.all(localProfilePoolKeys(profile).map(key => stopPoolBackend(key)))
@@ -12610,6 +12138,15 @@ async function prepareProfileRenameRequest(request) {
   })
 }
 
+/**
+ * The terminal boot failure currently latched in this process, if any. These
+ * latches are cleared only by an explicit recovery path (reset, repair,
+ * apply-config, confirmed sign-in), never by a retry.
+ */
+function latchedBootFailure(): Error | null {
+  return bootstrapFailure ?? backendStartFailure ?? remoteReauthFailure ?? null
+}
+
 async function startHermes(requestedProfile?: string) {
   // Only the single-instance lock holder may reap/spawn/claim the desktop
   // backend. A lock-losing instance must stay inert even if some path reaches
@@ -12740,7 +12277,6 @@ async function startHermes(requestedProfile?: string) {
     const setup = await runPrimaryBackendStartup({
       signal: localBackendLifecycle.signal,
       assertCurrentAttempt: () => backendConnectionState.assertCurrentAttempt(connectionAttempt),
-      attachHostBackend: attachToRunningHostBackend,
       connectRemote,
       ensureLocalRuntime: backend =>
         ensureRuntime(backend, () => backendConnectionState.assertCurrentAttempt(connectionAttempt)),
@@ -12784,35 +12320,10 @@ async function startHermes(requestedProfile?: string) {
       return setup.connection
     }
 
-    // Multiplex-only: a backend was already running on this host and we attached
-    // to it. Nothing was spawned, so there is no child to own — liveness is
-    // polled instead (startAttachedBackendMonitor).
+    // No `attachHostBackend` is wired: `hermes gateway ensure` below IS the
+    // attach-or-start step for the canonical local gateway.
     if (setup.kind === 'attached') {
-      const attached = setup.attached
-
-      setWslBridgeProfileState(primaryProfile, true)
-      startAttachedBackendMonitor(attached)
-
-      updateBootProgress({
-        phase: 'backend.ready',
-        message: 'Attached to the running Hermes backend',
-        progress: 94,
-        running: true,
-        error: null
-      })
-
-      return {
-        baseUrl: attached.baseUrl,
-        mode: 'local',
-        source: 'local',
-        authMode: 'token',
-        attached: true,
-        token: attached.token,
-        profile: primaryProfile,
-        wsUrl: attached.wsUrl,
-        logs: hermesLog.slice(-80),
-        ...getWindowState()
-      }
+      throw new Error('Unexpected attached backend outcome without a host attach step.')
     }
 
     // Local WSL backend — paths are bridgeable.
@@ -12832,8 +12343,6 @@ async function startHermes(requestedProfile?: string) {
     // the primary actually booted as another profile (#825324fd).
     return { ...connection, profile: primaryProfileKey(), logs: hermesLog.slice(-80), ...getWindowState() }
   })().catch(async error => {
-    releaseHostSpawnReservation()
-
     if (!backendConnectionState.clearPromiseForAttempt(connectionAttempt)) {
       throw error
     }
@@ -12873,7 +12382,7 @@ async function startHermes(requestedProfile?: string) {
     // on "session expired" until a full restart, defeating reconnect, the
     // "Sign out & sign in" reload, and the wake-recovery revalidate path.
     // A supervisor-owned respawn never latches (see the predicate).
-    if (shouldLatchBackendStartFailure({ attemptedRemote, supervisorRecovery })) {
+    if (shouldLatchBackendStartFailure({ attemptedRemote })) {
       backendStartFailure = error instanceof Error ? error : new Error(message)
     }
 
@@ -14798,6 +14307,7 @@ async function connectDesktopProfileRoute(route: DesktopProfileRoute) {
   // both land here. The claim key mirrors ensureBackend()'s own profile
   // normalization so every spelling of the primary coalesces onto one dial.
   const scopeKey = backendScopeKey(route.connectionId, route.profile)
+
   const connection = await backendDialClaims.run(scopeKey, () =>
     route.connectionId ? ensureRegistryBackend(route.connectionId, route.profile) : ensureBackend(route.profile)
   )
@@ -16829,7 +16339,11 @@ async function handleHermesApiRequest(request) {
   let connection
 
   try {
-    const connection = await ensureBackend(routeProfile, { passive: request?.passive })
+    const connection = await ensureBackend(routeProfile, {
+      passive: request?.passive,
+      request: { method: request?.method, path: request?.path }
+    })
+
     const timeoutMs = resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     const url = `${connection.baseUrl}${apiRoute.requestPath}`

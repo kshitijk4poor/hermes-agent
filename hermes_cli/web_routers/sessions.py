@@ -845,6 +845,10 @@ async def prune_sessions_endpoint(body: SessionPrune):
     """Delete ended sessions matching filters without blocking the event loop."""
     if body.dry_run:
         return await asyncio.to_thread(_prune_sessions, body)
+    # Same destructive rule as the rest of the family; a dry run deletes nothing, so it
+    # keeps working unnamed (it is the preview the confirm dialog reads).
+    body = body.model_copy(update={
+        "profile": destructive_profile(body.profile, "POST /api/sessions/prune")})
     from hermes_cli.web_server_sessions import _with_session_maintenance
     return await asyncio.to_thread(_with_session_maintenance, body.profile, _prune_sessions, body)
 

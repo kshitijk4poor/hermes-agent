@@ -765,6 +765,10 @@ class OpenAICompatRoutesMixin:
             run_kwargs.update(
                 request_id=f'chat:{self._run_idempotency_scope(request)}:{key}' if key else None,
                 history_from_session=bool(provided_session_id))
+        # This is presentation only. The ordinary API-key/session authorization
+        # above still applies; it grants no internal ingress or control authority.
+        if provided_session_id and body.get("hermes_notification_category") == "diagnostic":
+            run_kwargs["notification_category"] = "diagnostic"
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
             # tool_call_ids with an emitted "running": a "completed" without one (internal/

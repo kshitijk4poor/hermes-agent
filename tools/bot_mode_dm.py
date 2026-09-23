@@ -419,6 +419,12 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
     return acquire_turn_lock(_hermes_root(Path(_default_home())), argv[2])
 
 
+def _dm_delivery_id(dm_file: "str | os.PathLike") -> str:
+    """One delivery id per DM file: the dispatch ack, the live-owner intent and every retry
+    of the runner derive it the same way, so the sender can correlate all of them."""
+    return hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest()
+
+
 def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dict] = None) -> dict | None:
     """Pin intent before admission; retries may inspect, never change transport."""
     from tools.bot_live_delivery import deliver_to_live_owner, find_canonical_live_owner, read_delivery_result
@@ -434,7 +440,7 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
         if owner is None:
             raise ValueError("canonical Bot Chat target is unavailable; no local fallback")
         intent = dict(owner=owner, message=Path(dm_file).read_text(encoding="utf-8"),
-                      delivery_id=hashlib.sha256(str(Path(dm_file).resolve()).encode()).hexdigest(),
+                      delivery_id=_dm_delivery_id(dm_file),
                       **({"author": author} if author else {}))
         try:
             fd = os.open(intent_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)

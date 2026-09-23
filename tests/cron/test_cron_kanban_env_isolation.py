@@ -395,7 +395,8 @@ def test_dispatcher_grants_only_the_assigned_worker_scope(tmp_path, monkeypatch)
     assert pid is not None
     _, status = os.waitpid(pid, 0)  # windows-footgun: ok — Linux-only real dispatcher spawn
     assert os.waitstatus_to_exitcode(status) == 0
-    assert json.loads(output.read_text())["ok"]
+    result = json.loads(output.read_text())
+    assert result["ok"] and result["beat"] is True, result
     assert kb.get_task(conn, tid).status == "done"
     assert os.environ["HERMES_KANBAN_TASK"] == "prior-task"
     conn.close()

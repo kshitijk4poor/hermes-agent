@@ -574,7 +574,7 @@ class TestRunOneJobHonoursInterruptedFlag:
         import cron.scheduler as sched
 
         job = dict(self._make_job(), deliver="telegram")
-        sched._interrupted_job_ids.add(job["id"])
+        sched._interrupted_job_ids.add(sched._inflight_key(job["id"]))
 
         with patch("cron.scheduler.claim_dispatch", return_value=True), \
              patch("agent.secret_scope.set_secret_scope", return_value=None), \

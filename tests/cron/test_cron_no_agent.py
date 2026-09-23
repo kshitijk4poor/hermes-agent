@@ -197,6 +197,40 @@ def test_no_agent_script_of_launch_profile_keeps_its_own_env_credential(hermes_e
 
 
 
+
+        def communicate(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="slow.py", timeout=timeout)
+
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired(cmd="slow.py", timeout=timeout)
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(scheduler.subprocess, "Popen", _NeverFinishes)
+    monkeypatch.setattr(sched_script, "_get_script_timeout", lambda: 1)
+    monkeypatch.setattr(sched_script, "_terminate_cron_script_process",
+        lambda proc: setattr(proc, "returncode", -15),
+    )
+    monkeypatch.setattr(
+        scheduler,
+        "_deliver_result",
+        lambda _job, content, **_kwargs: delivered.append(content),
+    )
+
+    assert scheduler.run_one_job(job) is True
+    assert len(delivered) == 1
+    assert "script timed out" in delivered[0].lower()
+    assert "provider" not in delivered[0].lower()
+    assert "fallback" not in delivered[0].lower()
+
+
+def test_agent_provider_timeout_delivery_keeps_fallback_guidance(hermes_env, monkeypatch):
+    """Provider timeout classification remains available to agent-backed jobs."""
+    from cron.jobs import create_job
+    import cron.scheduler as scheduler
+    from cron import scheduler_script as sched_script
+
     job = create_job(
         prompt="Summarize the overnight logs.",
         schedule="every 5m",
@@ -222,6 +256,12 @@ def test_no_agent_script_of_launch_profile_keeps_its_own_env_credential(hermes_e
         ),
     )
 
+    assert scheduler.run_one_job(job) is True
+    assert len(delivered) == 1
+    assert "did not respond in time" in delivered[0].lower()
+    # Chain wording is honest (#85508): "no backup provider succeeded" when configured,
+    # "no backup provider is configured" guidance otherwise.
+    assert "backup provider" in delivered[0].lower()
 
 
 # ---------------------------------------------------------------------------

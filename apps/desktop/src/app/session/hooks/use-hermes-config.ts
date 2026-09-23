@@ -7,6 +7,7 @@ import { normalize } from '@/lib/text'
 import { $busyInputConfig, busyInputOwnerKey, normalizeBusyInputMode } from '@/store/busy-input-mode'
 import { setDisplayTimestampsFromConfig } from '@/store/display-timestamps'
 import { $activeGatewayProfile } from '@/store/profile'
+import { setShowReasoningFromConfig } from '@/store/reasoning-disclosure'
 import { $connection } from '@/store/session'
 import {
   getComposerSelectionGeneration,

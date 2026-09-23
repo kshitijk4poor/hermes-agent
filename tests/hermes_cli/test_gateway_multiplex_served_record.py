@@ -126,7 +126,8 @@ def test_setup_gateway_service_step_skips_install_for_served_profile(served_root
 
     monkeypatch.setenv("HERMES_HOME", str(served_root / "profiles" / "other"))  # not in the live record
     assert ensure_gateway_service(context="setup", install=True) is True
-    assert calls == ["install", "start"]
+    assert calls == []
+    assert "Profile 'other' does not get a gateway of its own" in capsys.readouterr().out
 
 
 def test_recycled_pid_does_not_lend_a_stale_record_its_served_profiles(served_root):

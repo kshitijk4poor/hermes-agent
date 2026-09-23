@@ -1107,6 +1107,27 @@ describe('profile-aware plugin session opens', () => {
         error => String(error)
       )
 
+    await Promise.resolve()
+    expect($gatewaySwapTarget.get()).toBe('jimin')
+
+    // A later open that never awaits hydration (a paint-first wake) bumps the
+    // generation counter but never touches $gatewaySwapTarget - it has
+    // nothing of its own to clear, so the first wake's own cleanup is the
+    // only thing standing between here and a permanently stuck overlay.
+    await host.openSession('chat-b', { profile: 'hyoseob' })
+
+    expect(await firstOutcome).toMatch(/timed out loading/i)
+    expect($gatewaySwapTarget.get()).toBeNull()
+  })
+
+  it('keeps chrome API home on the previous profile when opening a Bot Chat', async () => {
+    $activeGatewayProfile.set('default')
+
+    await host.openSession('bot-chat', {
+      profile: 'worker',
+      keepAllProfilesScope: true
+    })
+
     expect(ensureGatewayProfile).not.toHaveBeenCalled()
     expect(openGatewayForProfile).toHaveBeenCalledWith('worker')
     expect(setShowAllProfiles).toHaveBeenCalledWith(true)

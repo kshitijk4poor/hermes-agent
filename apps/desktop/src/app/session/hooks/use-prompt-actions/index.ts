@@ -75,6 +75,7 @@ import {
   type SurvivorUserRowIds
 } from './rewind'
 import { useSlashCommand } from './slash'
+import { captureSteeringSession } from './steering-session'
 import { captureSubmissionDestination } from './submission-destination'
 import { useSubmitPrompt } from './submit'
 import {
@@ -120,7 +121,7 @@ export async function uploadComposerAttachment(
     terminalBackend?: string
   }
 ): Promise<ComposerAttachment> {
-  const { backendCwd, remote, storedSessionId, onSessionRecovered, terminalBackend } = opts
+  const { backendCwd, remote, storedSessionId, onRecovered, onSessionRecovered, terminalBackend } = opts
 
   const destination = captureSubmissionDestination(storedSessionId ?? opts.sessionId, opts.requestGateway)
   const requestGateway = destination.requestGateway
@@ -363,8 +364,14 @@ export function usePromptActions({
     ): Promise<{ attachments: ComposerAttachment[]; sessionId: string }> => {
       const updateComposerAttachments = options.updateComposerAttachments ?? true
 
+      // The submit's own target, never the chat on screen: a queued send drains
+      // after the user has moved on, so a stale runtime here must recover the
+      // session the text belongs to — not stage the files on, and then submit
+      // into, whichever chat is selected now (#46194, the attachments edition).
       const storedSessionId =
         options.storedSessionId !== undefined ? options.storedSessionId : selectedStoredSessionIdRef.current
+
+      const targetIsForeground = storedSessionId === selectedStoredSessionIdRef.current
 
       const uploadRequest =
         options.requestGateway ??
@@ -394,11 +401,6 @@ export function usePromptActions({
 
       const onSessionRecovered = (recoveredId: string) => {
         liveSessionId = recoveredId
-
-        if (activeSessionIdRef.current === sessionId) {
-          activeSessionIdRef.current = recoveredId
-          setActiveSessionId(recoveredId)
-        }
       }
 
       for (const original of attachments) {
@@ -826,7 +828,7 @@ export function usePromptActions({
       const send = async (id: string): Promise<boolean> => {
         // Reserve the correction's arrival position, but do not seal the live
         // stream until acceptance: a refusal must leave in-flight deltas intact.
-        const messageId = appendSessionTextMessage(id, 'user', text)
+        const messageId = appendSessionTextMessage(id, 'user', text, target.storedSessionId)
 
         const discardOptimisticMessage = () =>
           updateSessionState(id, state => ({
@@ -844,7 +846,7 @@ export function usePromptActions({
           })
 
         try {
-          const result = await requestGateway<SessionRedirectResponse>(
+          const result = await target.requestGateway<SessionRedirectResponse>(
             mode === 'steer' ? 'session.steer' : 'session.redirect',
             { session_id: id, text }
           )
@@ -905,7 +907,16 @@ export function usePromptActions({
         throw err
       }
     },
-    [activeSessionIdRef, appendSessionTextMessage, copy.promptFailed, requestGateway, selectedStoredSessionIdRef, updateSessionState]
+    [
+      activeSessionIdRef,
+      appendSessionTextMessage,
+      copy.promptFailed,
+      getRoutedStoredSessionId,
+      requestGateway,
+      runtimeIdByStoredSessionIdRef,
+      selectedStoredSessionIdRef,
+      updateSessionState
+    ]
   )
 
   // A hidden note that lands mid-turn must reach the model without becoming a

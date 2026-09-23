@@ -68,7 +68,13 @@ export class HermesGateway extends JsonRpcGatewayClient {
       closedErrorMessage: 'Hermes gateway connection closed',
       connectErrorMessage: 'Could not connect to Hermes gateway',
       createRequestId: nextId => nextId,
-      notConnectedErrorMessage: 'Hermes gateway is not connected',
+      notConnectedErrorMessage: GATEWAY_NOT_CONNECTED_MESSAGE,
+      // The channel already answered -32603; surface the crash in devtools like the dial-failure sink.
+      onRequestHandlerError: (error, request) =>
+        console.error(`[gateway] server request handler crashed for ${request.method} (${request.id}):`, error),
+      // The channel already answered -32601; note the missing registry in devtools.
+      onUnhandledRequest: request =>
+        console.warn(`[gateway] Hermes Desktop has no server-request registry for ${request.method} (${request.id})`),
       requestTimeoutMs: DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS,
       socketFactory: url => {
         const parsed = new URL(url)

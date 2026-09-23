@@ -556,6 +556,13 @@ export class JsonRpcGatewayClient {
         })
       )
 
+      // The socket that owned this replay was dropped while its requests were
+      // settling. Its results and cleanup must not consume the replacement
+      // socket's replay window.
+      if (this.replayGeneration !== replayGeneration) {
+        return
+      }
+
       for (const [index, result] of results.entries()) {
         if (result.status !== 'fulfilled' || !Array.isArray(result.value?.events)) {
           continue
@@ -592,10 +599,6 @@ export class JsonRpcGatewayClient {
         } else if (typeof epoch === 'string' && epoch && !this.replayEpoch) {
           this.replayEpoch = epoch
         }
-
-      if (!Array.isArray(result?.events)) {
-        return
-      }
 
       for (const event of result.events) {
         // Event handlers can synchronously invalidate and replace the socket.

@@ -192,6 +192,13 @@ def main(argv: list[str] | None = None) -> None:
     import acp
     from .server import HermesACPAgent
 
+    # Windows: import the configured memory provider (and numpy) on the main thread before
+    # the ACP stdin-reader thread starts. A first-time native-extension import racing another
+    # thread's import chain deadlocked in create_module and session/new never answered (#58083).
+    if sys.platform == "win32":
+        _warm_memory_provider_import(logger)
+
+    # MCP discovery and execution belong to the gateway daemon; this process is a viewer.
     agent = HermesACPAgent()
 
     async def serve():

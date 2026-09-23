@@ -584,6 +584,9 @@ def _restore_db_pages(src: Path, dst: Path) -> bool:
         return _unlink_move_restore_db(src, dst)
 
 
+def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
+    """Fallback restore: unlink+move. Only safe when no process holds the DB open.
+
     ZipFile.write finalizes its destination member while unwinding a source-read
     failure, so the partial bytes can otherwise become a CRC-valid archive member.
     This runs immediately after that failed write, so the dropped bytes are the tail
@@ -887,6 +890,17 @@ def run_import(args) -> Optional[int]:
     # restore at the live root while the profile directory stays empty.
     hermes_root = get_hermes_home()
 
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        # Validate
+        ok, reason = _validate_backup_zip(zf)
+        if not ok:
+            print(f"Error: {reason}")
+            sys.exit(1)
+
+        prefix = _detect_prefix(zf)
+        members = [n for n in zf.namelist() if not n.endswith("/")]
+        file_count = len(members)
+
 def _import_members(
     zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
 ) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
@@ -911,13 +925,6 @@ def _import_members_exclusive(
     zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
 ) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
     """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
-
-        prefix = _detect_prefix(zf)
-        members = [n for n in zf.namelist() if not n.endswith("/")]
-        file_count = len(members)
-
-        print(f"Backup contains {file_count} files")
-        print(f"Target: {display_hermes_home()}")
 
         if prefix:
             print(f"Detected archive prefix: {prefix!r} (will be stripped)")

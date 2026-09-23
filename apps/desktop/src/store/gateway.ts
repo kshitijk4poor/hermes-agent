@@ -451,13 +451,21 @@ function isPrimaryRegistryRoute(connectionId: null | string, profile: string): b
   )
 }
 
-/** True when `connectionId` is the window's already-attached source AND that
- *  source is a one-host-many-profiles remote (`sharedRemote`). Named member
- *  profiles on that host must reuse the primary socket — a registry secondary
- *  dials a second WebSocket at the same Tailscale URL, which accept/closes in
- *  ~30ms (`messages=1`) and never runs `session.create` (#96493). Isolated
- *  SSH/pooled backends (`sharedRemote: false`) still get their own secondary. */
-async function isAttachedSharedRemote(connectionId: null | string, profile: string): Promise<boolean> {
+/** True when `connectionId` is the window's already-attached source AND main
+ *  says `profile` rides the backend that source's primary socket is already
+ *  connected to — a one-host-many-profiles remote (`sharedRemote`, #96493) or
+ *  the one local host backend that serves every local profile under
+ *  multiplex-only (`sharedPrimary`, #118246). Either way a registry secondary
+ *  would be a SECOND WebSocket to the SAME process: on a remote it accept/closes
+ *  in ~30ms and never runs `session.create`; on the local host backend it joins
+ *  the chat's transport fan-out and the renderer receives every event twice
+ *  (garbled streaming text + a duplicate interim bubble, #120005). Isolated
+ *  SSH/pooled backends (neither flag) still get their own secondary. */
+async function ridesPrimaryBackend(
+  connectionId: null | string,
+  profile: string,
+  spawnPriority: SpawnPriority = 'background'
+): Promise<boolean> {
   const id = String(connectionId ?? '').trim()
   const key = normKey(profile)
   const parked = g.secondaries.get(registryBackendScopeKey(connectionId, key))
@@ -1155,7 +1163,8 @@ async function sharedPrimaryRoute(profile: string): Promise<boolean> {
 // request-scope flag; dedicated local/remote profiles use their pooled socket.
 async function gatewayForProfile(
   profile: string,
-  leaseRequest = false
+  leaseRequest = false,
+  spawnPriority: SpawnPriority = 'background'
 ): Promise<{ gateway: HermesGateway | null; key: string; release: () => void; scopeProfile: boolean }> {
   const key = normKey(profile)
   const noRelease = () => undefined
@@ -1240,11 +1249,9 @@ export async function requestGatewayForProfile<T>(
   params: Record<string, unknown> = {},
   timeoutMs?: number,
   signal?: AbortSignal,
-  // Dial intent (#111651): accepted so Settings-scoped callers keep one call
-  // shape; the canonical ensure path has no slot to reserve.
-  _options: { spawnPriority?: SpawnPriority } = {}
+  { spawnPriority = 'background' }: { spawnPriority?: SpawnPriority } = {}
 ): Promise<T> {
-  const route = await gatewayForProfile(profile, true)
+  const route = await gatewayForProfile(profile, true, spawnPriority)
 
   try {
     if (!route.gateway) {
@@ -1309,7 +1316,7 @@ export async function requestGatewayForAgent<T>(
     return requestGatewayForProfile<T>(key, method, params, timeoutMs, signal, { spawnPriority })
   }
 
-  if (await isAttachedSharedRemote(connectionId, key)) {
+  if (await ridesPrimaryBackend(connectionId, key, spawnPriority)) {
     return requestOnPrimaryGateway<T>(method, { ...params, profile: key }, timeoutMs, signal)
   }
 
@@ -1516,7 +1523,7 @@ export function retainGatewayForRelay(connectionId: null | string, profile: stri
 export async function retainGatewayForAgent(
   connectionId: null | string,
   profile: string,
-  _options: { spawnPriority?: SpawnPriority } = {}
+  { spawnPriority = 'background' }: { spawnPriority?: SpawnPriority } = {}
 ): Promise<() => void> {
   const key = normKey(profile)
   const scope = registryBackendScopeKey(connectionId, key)
@@ -1524,12 +1531,12 @@ export async function retainGatewayForAgent(
   if (scope === key) {
     // Plain-profile route: gatewayForProfile's request lease IS the retain —
     // hold it until the caller releases.
-    const route = await gatewayForProfile(key, true)
+    const route = await gatewayForProfile(key, true, spawnPriority)
 
     return route.release
   }
 
-  if (isPrimaryRegistryRoute(connectionId, key) || (await isAttachedSharedRemote(connectionId, key))) {
+  if (isPrimaryRegistryRoute(connectionId, key) || (await ridesPrimaryBackend(connectionId, key, spawnPriority))) {
     // Primary socket stays open for the window lifetime — no secondary to hold.
     return () => undefined
   }
@@ -1729,7 +1736,13 @@ function scopeHasTurnLease(scope: string): boolean {
 // skip for cooperative retirement (electron/pool-retire.ts), never the proof:
 // main asks the backend itself before stopping anything. From #104871.
 function publishTurnLease(scope: string, activeTurn: boolean): void {
-  void window.hermesDesktop?.touchBackend?.(scope, { activeTurn }).catch(() => undefined)
+  // Older Desktop hosts own pooled children. Canonical hosts expose no touch
+  // capability: their gateway lifetime is independent of renderer leases.
+  const desktop = window.hermesDesktop as (typeof window.hermesDesktop & {
+    touchBackend?: (scope: string, options?: { activeTurn?: boolean }) => Promise<unknown>
+  })
+
+  void desktop?.touchBackend?.(scope, { activeTurn }).catch(() => undefined)
 }
 
 function releaseTerminalTurnLease(scope: string, event: GatewayEvent): void {
@@ -1779,8 +1792,11 @@ function releaseTerminalTurnLease(scope: string, event: GatewayEvent): void {
 // it. No scheduleReconnect on failure: a hover is speculative, so a dead
 // backend must not start a background retry loop — the real switch owns retry
 // and error UX. An already-open (or primary) profile is a no-op.
-export async function openGatewayForProfile(profile: string): Promise<void> {
-  await gatewayForProfile(profile, false)
+export async function openGatewayForProfile(
+  profile: string,
+  { spawnPriority = 'background' }: { spawnPriority?: SpawnPriority } = {}
+): Promise<void> {
+  await gatewayForProfile(profile, false, spawnPriority)
 }
 
 // ── Connection-scoped agents (multi-source roster) ─────────────────────────
@@ -1800,15 +1816,18 @@ export async function openGatewayForProfile(profile: string): Promise<void> {
 export async function openGatewayForAgent(
   connectionId: null | string,
   profile: string,
-  { activationLease = false }: { activationLease?: boolean } = {}
+  {
+    activationLease = false,
+    spawnPriority = 'background'
+  }: { activationLease?: boolean; spawnPriority?: SpawnPriority } = {}
 ): Promise<void> {
   const scope = registryBackendScopeKey(connectionId, profile)
 
   if (scope === normKey(profile) || isPrimaryRegistryRoute(connectionId, profile)) {
-    return openGatewayForProfile(profile)
+    return openGatewayForProfile(profile, { spawnPriority })
   }
 
-  if (await isAttachedSharedRemote(connectionId, profile)) {
+  if (await ridesPrimaryBackend(connectionId, profile, spawnPriority)) {
     if (!isOpen(g.primaryGateway)) {
       throw new Error('Hermes gateway unavailable')
     }
@@ -1864,7 +1883,7 @@ export async function ensureGatewayForAgent(
 
   const activationEpoch = beginGatewayActivation()
 
-  if (await isAttachedSharedRemote(connectionId, profile)) {
+  if (await ridesPrimaryBackend(connectionId, profile, 'foreground')) {
     // A retained primary can be open while the foreground still points at a
     // different source. Reusing its socket must also move the active route.
     return Boolean(isOpen(g.primaryGateway) && !signal?.aborted && applyActive(g.primaryProfile, activationEpoch))
@@ -2218,7 +2237,7 @@ export function touchSecondaryGateways(): void {
   // Older Desktop hosts own pooled children. Canonical hosts expose no touch
   // capability: their gateway lifetime is independent of renderer keepalives.
   const desktop = window.hermesDesktop as (typeof window.hermesDesktop & {
-    touchBackend?: (scope: string) => Promise<unknown>
+    touchBackend?: (scope: string, options?: { activeTurn?: boolean }) => Promise<unknown>
   })
 
   for (const entry of g.secondaries.values()) {

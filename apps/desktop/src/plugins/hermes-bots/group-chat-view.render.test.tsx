@@ -1,4 +1,4 @@
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 
@@ -111,6 +111,8 @@ it('removes Stop controls from historical working rows after the room settles', 
   activity.recordGroupActivity('Settled', { kind: 'settled', member: null })
 
   render(<GroupChatWorkspace group="Settled" members={[{ name: 'builder' }]} />)
+  // The room paints once the async group-driver gate resolves to the legacy workspace.
+  await waitFor(() => expect(screen.getByRole('button', { name: /^Activity/ })).toBeTruthy())
   fireEvent.click(screen.getByRole('button', { name: /^Activity/ }))
 
   expect(screen.getByText('builder is working…')).toBeTruthy()

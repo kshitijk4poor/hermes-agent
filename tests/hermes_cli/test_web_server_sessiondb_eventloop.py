@@ -30,6 +30,9 @@ TARGET_HANDLERS = {
     "prune_sessions_endpoint",
     "get_usage_analytics",
     "get_models_analytics",
+    "search_sessions",
+    "get_session_stats",
+    "get_session_detail",
 }
 
 

@@ -127,8 +127,6 @@ export interface ClarifyQuestion {
 
 export interface ClarifyReq {
   sharedControl?: SharedControl
-  choices: string[] | null
-  question: string
   requestId: string
   questions: ClarifyQuestion[]
   /** Answers already locked server-side (qid → answer): seeded from the

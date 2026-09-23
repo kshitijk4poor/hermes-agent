@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - Windows
     fcntl = None
 import json
 import os
-import subprocess
+import re
 import sys
 import threading
 import time

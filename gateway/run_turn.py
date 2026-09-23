@@ -141,6 +141,33 @@ def bound_model_input_without_hygiene(history: List[Any], limit: int) -> List[An
     return history[:head_end] + history[tail_start:]
 
 
+def hygiene_no_commit_reason(agent) -> str:
+    """Name WHY a hygiene compression left the session id unchanged with no in-place commit.
+    The terminal ``else`` used to blame "no session_db on the hygiene agent" for every route into it,
+    but that is one of several causes (#71097): an attempt that ABORTED before any commit boundary
+    (lock skip, transient cooldown, summary timeout, codex thread interrupted) leaves
+    ``_last_compression_attempt_in_place`` at ``None``; a DB-less agent is only the case when
+    ``_session_db`` really is missing. Read the per-attempt signals the compressor sets, in that order."""
+    if not bool(getattr(agent, "_last_compression_attempt_recorded", False)):
+        return "compression did not run"
+    lock_skip = getattr(agent, "_compression_skipped_due_to_lock", None)
+    if lock_skip is True or isinstance(lock_skip, str):
+        return "attempt skipped: compression lease held by another process"
+    blocked = getattr(agent, "_compression_blocked_transient", None)
+    if blocked:
+        return f"attempt blocked: {blocked}"
+    if getattr(agent, "_last_compression_attempt_in_place", None) is None:
+        detail = "summary timed out" if getattr(agent, "_last_compression_timed_out", False) else "aborted before commit"
+        warning = getattr(agent, "_last_compression_summary_warning", None)
+        return f"attempt {detail}" + (f": {warning}" if warning else "")
+    if getattr(agent, "_session_db", None) is None:
+        return "no session_db on the hygiene agent"
+    return "in-place commit did not complete"
+
+
+class GatewayTurnMixin:
+    """Agent-turn execution for GatewayRunner (see module docstring)."""
+
 
 from gateway.run_turn_prepare import GatewayTurnPrepareMixin
 from gateway.run_turn_hygiene import GatewayTurnHygieneMixin
@@ -998,7 +1025,7 @@ class GatewayTurnMixin(GatewayTurnPrepareMixin, GatewayTurnHygieneMixin, Gateway
         enabled_toolsets, disabled_toolsets = self._resolve_turn_toolsets(user_config, source, platform_key)
         if policy:
             enabled_toolsets = list(policy.toolsets)
-        adapter = self._adapter_for_source(source)
+        adapter = self._delivery_adapter_for(source)
         # Tool preview length (0 = no limit) and friendly tool labels (default on), per-platform.
         for _setter, _setting, _default, _cast in (
             ("set_tool_preview_max_len", "tool_preview_length", 0, lambda v: int(v) if v else 0),

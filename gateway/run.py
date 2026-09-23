@@ -3392,8 +3392,15 @@ class GatewayRunner(
     GatewayVoiceMixin, GatewayAdapterLifecycleMixin, GatewayTopicThreadsMixin, GatewayTurnMixin,
     GatewayShutdownMixin, GatewayBusySessionMixin, GatewayConfigLoadersMixin, GatewayStartupMixin,
     GatewaySessionWatchersMixin, GatewayNotificationsMixin, GatewayInboundMixin, GatewayGoalsMixin,
-    GatewayAgentCacheMixin, GatewayRuntimeInitMixin, GatewayProfileReconcileMixin):
+    GatewayAgentCacheMixin, GatewayRuntimeInitMixin, GatewayProfileReconcileMixin, GatewayPluginRewireMixin):
     """Main gateway controller: manages adapter lifecycles, routes messages to/from the agent."""
+
+    def _adapter_for_source(self, source):
+        """The adapter that owns *source* for the session authority (admission checks, canonical
+        automation, native route checks, recovery bindings). Main split the old resolver into the
+        intake and delivery seams; the authority needs the answering adapter, so this is the
+        delivery seam under its historical name."""
+        return self._delivery_adapter_for(source)
 
     # Class-level defaults so partial construction in tests doesn't blow up on attribute access.
     _busy_input_mode: str = "interrupt"
@@ -3522,7 +3529,6 @@ class GatewayRunner(
         self._init_startup_checks()
         self._init_session_db()
         self._init_registries_and_clocks()
-
 
     def _open_session_db_for_active_scope(self, raise_on_error: bool = False) -> Any:
         """AsyncSessionDB for the active profile scope, resolved per access (not in ``__init__``) since
@@ -4911,10 +4917,259 @@ async def _wait_for_pid_exit(pid: int, attempts: int, delay: float) -> bool:
     return False
 
 
-async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
+def _start_gateway_make_restart_signal_handler(runner):
+    """Build the SIGUSR1 handler: log what the signal means, then the drain-aware service restart."""
+    def restart_signal_handler():
+        # systemd's `reload` verb (ExecReload=kill -USR1) lands here too; say so, because operators
+        # expect `reload` to mean an in-process config reload, not a drain-and-relaunch (#117267).
+        logger.info(
+            "SIGUSR1 received (systemctl reload / hermes gateway restart): performing a graceful "
+            "gateway restart — drain active turns, exit, supervisor relaunches. Not an in-process "
+            "config reload.")
+        runner.request_restart(detached=False, via_service=True)
+    return restart_signal_handler
+
+
+def _claim_host_gateway_role(force: bool = False) -> None:
+    """Take the HOST-wide gateway lock, publish the record — or REFUSE to be the second gateway.
+
+    The lock is no longer observe-only. ``gateway.host_attach`` already answers "is there a host
+    gateway and does it serve me?" before anything binds, but it reads a RECORD, and a record is
+    published a moment after the owner starts: two gateways launched together (a supervisor
+    restarting two units, an update relaunch racing a manual start) can both see no owner and both
+    proceed. The lock is the only atomic arbiter of that race, so losing it means we are the second
+    gateway on this host — the shape multiplex-only forbids.
+
+    The refusal is deliberately EX_TEMPFAIL (75), never the parking 78: losing a lock race is a
+    runtime observation, not a config verdict. Every supervisor we generate retries 75, and on the
+    retry the owner's record exists, so the attach path resolves the profile properly (attach,
+    rescan-then-attach, or a named refusal) instead of the unit being parked forever.
+
+    ``--force`` skips the question exactly as it does in the attach path.
+    """
+    from gateway import host_rendezvous as hr
+
+    # The host lock can be free after a standalone owner exits while a coexisting
+    # multiplexer remains live. Its per-home channel still governs our opt-out.
+    if not force:
+        from gateway.host_attach import REFUSE, standalone_attach_decision
+        decision = standalone_attach_decision(get_hermes_home(), None)
+        if decision is not None and decision.outcome == REFUSE:
+            from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
+            print(decision.message)
+            raise SystemExit(GATEWAY_SERVICE_RESTART_EXIT_CODE)
+    try:
+        outcome, error = hr.claim_host_lock(hr.ROLE_GATEWAY)
+        if outcome is hr.HostLockOutcome.ACQUIRED:
+            # PROVISIONAL: an owner exists, its served set is not decided yet (multiplex is
+            # settled by the runner, and the attach channel is not bound for another moment).
+            # Publishing a guessed set here parked a second profile's supervised unit against
+            # profiles this process may never serve; _refresh_host_gateway_record() fills it in
+            # once the control socket answers.
+            hr.publish_record(hr.ROLE_GATEWAY, profiles=(), home=str(get_hermes_home()))
+            # SIGTERM (systemd stop, docker stop, the update relaunch) does not run atexit.
+            hr.cleanup_on_exit(hr.ROLE_GATEWAY)
+            return
+        if outcome is hr.HostLockOutcome.COULD_NOT_OPEN:
+            # NOT contention: a read-only/undeletable lock dir. Refusing here would take a working
+            # single-gateway host down over an unusable directory.
+            logger.warning(
+                "Host gateway lock could not be opened (%s); this gateway is not discoverable. "
+                "No second gateway is implied — the lock directory itself is unusable.", error)
+            return
+    except Exception:
+        logger.debug("host gateway rendezvous failed", exc_info=True)
+        return
+    # Lost the lock. Reading the owner's record may fail (it is published a moment after the
+    # claim); that changes WHO we can name, never the verdict -- we are the second gateway.
+    owner = None
+    try:
+        owner = hr.read_record(hr.ROLE_GATEWAY, include_stale=True)
+    except Exception:
+        logger.debug("host gateway record unreadable", exc_info=True)
+    if force:
+        logger.warning("--force: starting a second gateway although %s owns this host.",
+                       hr.describe(owner) if owner else "another process")
+        return
+    from gateway.host_attach import (
+        ATTACH_CHANNEL_WAIT_S, START, host_gateway, launched_by_other_tenant, standalone_attach_decision,
+    )
+    from hermes_cli.profiles import profile_is_standalone
+    if owner is not None and launched_by_other_tenant(owner.home, get_hermes_home()):
+        # The lock is per OS user, so a second tenant root can never win it against the first:
+        # refusing 75 here would retry forever and its gateway would never start (#121352).
+        logger.warning(
+            "Another Hermes home's gateway owns this host (%s); starting this home's gateway beside it.",
+            hr.describe(owner))
+        return
+    if profile_is_standalone(get_hermes_home()):
+        # Recheck after losing the atomic lock: the pre-lock served set may be stale.
+        live_owner = host_gateway(wait_for_channel=ATTACH_CHANNEL_WAIT_S)
+        if live_owner is not None:
+            decision = standalone_attach_decision(get_hermes_home(), live_owner)
+            if decision is not None:
+                if decision.outcome == START:
+                    return
+                from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
+                print(decision.message)
+                raise SystemExit(GATEWAY_SERVICE_RESTART_EXIT_CODE)
+        _refuse_second_host_gateway(owner)
+    if _owner_is_standalone():
+        # COMPOSITION with #118236: `host_attach.decide` sent us here with START precisely because
+        # the owner is another profile's STANDALONE gateway and will never serve us. Refusing now
+        # exits 75, the supervisor retries in 5s, and the next claim loses the same race — the host
+        # lock is per OS user and every gateway takes it, so a second profile can NEVER win. An
+        # unmigrated fleet would spin forever instead of running. Start beside it and point at the
+        # one command that converges; multiplex-only is enforced against a MULTIPLEXER owner.
+        logger.warning(
+            "Another profile's standalone gateway owns this host (%s); starting beside it rather "
+            "than retrying a race no second profile can win. Fold every profile onto one gateway "
+            "with: %s", hr.describe(owner) if owner else "owner unknown", _migrate_command())
+        return
+    _refuse_second_host_gateway(owner)
+
+
+def _migrate_command() -> str:
+    from hermes_cli.gateway_migrate import MIGRATE_COMMAND
+
+    return MIGRATE_COMMAND
+
+
+def _owner_is_standalone() -> bool:
+    """True when the host owner answers that it does NOT multiplex (an unmigrated fleet).
+
+    Asked only on the lock-losing path, and any failure answers False: an owner we cannot reach
+    is treated as a multiplexer, which keeps the second-gateway refusal as the default.
+    """
+    try:
+        from gateway.host_attach import host_gateway, profile_name_for_home, request_serve_profile
+
+        owner = host_gateway()
+        if owner is None or owner.pid == os.getpid():
+            return False
+        answered = request_serve_profile(profile_name_for_home(get_hermes_home()), owner=owner)
+        return bool(answered is not None and answered.standalone)
+    except Exception:
+        logger.debug("standalone-owner probe failed; keeping the second-gateway refusal",
+                     exc_info=True)
+        return False
+
+
+def _refuse_second_host_gateway(owner) -> None:
+    """Print the named refusal and exit 75 so a supervisor retries instead of parking the unit.
+
+    Reached only after losing the host lock, so ``--replace`` is not offered: an owner that serves
+    this profile was already handled before the claim, and ``--replace`` does not skip the lock.
+    """
+    from gateway import host_rendezvous as hr
+    from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
+
+    who = hr.describe(owner) if owner else "owner unknown (its record is gone)"
+    message = (
+        f"❌ Another gateway already owns this host: {who}\n"
+        f"   Exactly one gateway per host serves every profile, so this process will not start a\n"
+        f"   second one (it would double-bind this profile's platforms).\n"
+        f"   Fold every profile onto the owner:  {_migrate_command()}\n"
+        f"   Or stop the other gateway first, then start this one.\n"
+        f"   Or start one anyway (skips the host-lock check):  hermes gateway run --force\n"
+        f"   (--replace does not skip this check; it only replaces an owner that serves this profile.)")
+    logger.error("Refusing to start a second gateway on this host: %s", who)
+    print(message)
+    raise SystemExit(GATEWAY_SERVICE_RESTART_EXIT_CODE)
+
+
+def _log_standalone_profiles_at_boot(runner) -> None:
+    """One INFO line per standalone profile when the MULTIPLEXER takes its served set at boot.
+
+    The host gateway silently omits an opted-out profile from its served set; without this line an
+    operator reading the boot log cannot tell "not created yet" from "excluded by config".
+    """
+    try:
+        if not getattr(runner.config, "multiplex_profiles", False):
+            return
+        from hermes_cli.profiles import profiles_to_serve, profile_is_standalone
+        from hermes_cli.gateway_multiplex_mode import STANDALONE_DEPRECATION_NOTICE
+        served = set(runner.served_profile_names())
+        for name, home in profiles_to_serve(True, include_standalone=True, include_parked=True):
+            if name != "default" and name not in served and profile_is_standalone(home):
+                logger.warning("profile '%s' is standalone (gateway.standalone: true); not served by "
+                               "this gateway. %s", name, STANDALONE_DEPRECATION_NOTICE)
+    except Exception:
+        logger.warning("standalone-profile boot notice failed", exc_info=True)
+
+
+def _refresh_host_gateway_record(runner) -> None:
+    """Republish the host record with the SETTLED served set, now that the channel answers.
+
+    The claim-time publish is deliberately empty: only the runner knows whether multiplex ended up
+    on and which profiles it took. A standalone gateway serves exactly its own profile — not the
+    whole roster ``served_profiles()`` would have guessed for it.
+    """
+    from gateway import host_rendezvous as hr
+    from gateway.host_attach import profile_name_for_home
+
+    try:
+        if not hr.owns_host_lock(hr.ROLE_GATEWAY):
+            return
+        home = get_hermes_home()
+        if getattr(runner.config, "multiplex_profiles", False):
+            served = tuple(runner.served_profile_names())
+        else:
+            served = (profile_name_for_home(home),)
+        hr.publish_record(hr.ROLE_GATEWAY, profiles=served, home=str(home))
+    except Exception:
+        logger.debug("host gateway record refresh failed", exc_info=True)
+
+
+# Bootstrap phases bound on the facade: ``_host_attach_or_none`` reads the replace step through this
+# module, and the lifecycle tests patch/drive these phases as ``gateway.run`` attributes.
+from gateway.run_bootstrap import (  # noqa: E402
+    _start_gateway_make_shutdown_signal_handler, _start_gateway_replace_existing_instance,
+    _start_gateway_shutdown_tail, _start_gateway_start_cron_and_housekeeping,
+)
+
+
+async def _host_attach_or_none(replace: bool, force: bool = False) -> Optional[bool]:
+    """Attach / rescan / refuse against the ONE host gateway; ``None`` = start normally.
+
+    Returns ``True`` when this invocation is satisfied by the running host process (exit 0, nothing
+    spawned) and ``False`` when it must refuse. The per-home duplicate guard below cannot answer
+    this at all: another profile's gateway lives in another home, so it sees no PID and starts a
+    second process — the shape multiplex-only forbids.
+
+    ``force`` is the operator's escape hatch when the owner is wedged or lying: skip the whole
+    question and start. Ignoring it here made ``--force`` print the starting banner and then attach
+    anyway, leaving no supported way to start a gateway at all.
+    """
+    if force:
+        logger.warning("--force: starting a gateway without asking the host owner.")
+        return None
+
+    from gateway.host_attach import ATTACH, REFUSE, REPLACE_HOST, decide
+
+    decision = decide(get_hermes_home(), replace=replace)
+    if decision.outcome == ATTACH:
+        logger.info("Attaching to the host gateway instead of starting a second one: %s",
+                    decision.owner.describe() if decision.owner else "unknown")
+        print(decision.message)
+        return True
+    if decision.outcome == REFUSE:
+        logger.error("Refusing to start a second gateway on this host: %s",
+                     decision.owner.describe() if decision.owner else "unknown")
+        print(decision.message)
+        return False
+    if decision.outcome == REPLACE_HOST and decision.owner is not None:
+        # decide() only targets an owner that serves this profile or has not published its served set.
+        if not await _start_gateway_replace_existing_instance(decision.owner.pid, True):
+            return False
+    return None
+
+
+async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False,
+                        verbosity: Optional[int] = 0, force: bool = False) -> bool:
     """Run the process lifecycle; the runner facade remains the public entrypoint."""
     from gateway.run_bootstrap import start_gateway as bootstrap
-    return await bootstrap(config, replace, verbosity)
+    return await bootstrap(config, replace, verbosity, force)
 
 
 def _guard_corrupt_user_config() -> None:

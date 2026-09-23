@@ -273,7 +273,10 @@ def _(rid, params: dict) -> dict:
 @_catch(5020)
 def _(rid, params: dict) -> dict:
     from tui_gateway.command_discovery import slash_completions
-    return _ok(rid, slash_completions(params.get("text", "")))
+    # Skill/bundle lookups are home- and cwd-keyed: bind the calling session's profile and workspace so
+    # the popup offers the project-local skills ``command.dispatch`` accepts for that session (#114359).
+    scope = _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params))
+    return _ok(rid, slash_completions(params.get("text", ""), scope=scope))
 
 
 def _session_agent(params: dict):

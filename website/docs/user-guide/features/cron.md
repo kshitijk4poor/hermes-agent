@@ -879,8 +879,6 @@ Or set the `HERMES_CRON_MEDIA_SEND_TIMEOUT` environment variable. The resolution
 
 A `bot-chat` delivery is admitted to the target profile's running gateway and executed there as a full agent turn. The job's run status records the admission receipt (`delivery_outcome=queued`) until the target's durable receipt settles; a retry of the same run reuses the same receipt and never re-admits. If the target profile's gateway is not running, the run is recorded `delivery_failed` and no local fallback turn is run.
 
-The cap bounds the bot's **turn** only. When that turn messages a teammate (`message_agent`), the delivery process stays alive afterwards — bounded by `terminal.oneshot_completion_wait_seconds` — so the teammate's reply can land in the Bot Chat; that wait is not part of the delivery and is never counted against, or cut short by, this cap.
-
 ## Standalone send timeout
 
 When the live gateway adapter cannot deliver (or no gateway is running), a target is sent through the platform's standalone sender. That send is bounded by a wall-clock timeout — 60 seconds by default — so a transport that is mid-reconnect cannot pin the job run (and a pending restart drain behind it) indefinitely:
@@ -914,6 +912,18 @@ Semantics:
 - No tokens, no model, no provider fallback — the job never touches the inference layer.
 
 `.sh` / `.bash` files run under `bash` from `PATH` when available, otherwise `/bin/bash` (important on Windows Git Bash). Anything else runs under the current Python interpreter (`sys.executable`). `script` is always a **file**, never a command line: `--script "echo hi"` is refused at creation (write the command into `~/.hermes/scripts/hi.sh` and pass `hi.sh`). Scripts must resolve inside `$HERMES_HOME/scripts/` — relative names, absolute paths, and `~`-prefixed paths are accepted when the resolved target stays in that directory; paths that escape it are rejected. Subprocess env is sanitized (`_sanitize_subprocess_env`): provider API credentials and other Hermes-managed secrets are **not** inherited by cron scripts.
+
+#### Giving a script a credential
+
+A script that must authenticate to an external service (an API token, a service-account key) gets it the same way terminal and `execute_code` children do — declare the variable name in the owning profile's `config.yaml` and define the value in that profile's `.env` (or an external [secret source](../secrets/index.md)):
+
+```yaml
+terminal:
+  env_passthrough:
+    - MY_SERVICE_TOKEN
+```
+
+The variable is forwarded into the script's environment with the **owning profile's** value: for a job that belongs to a profile served by a multi-profile gateway or the Desktop/dashboard backend, the value is resolved through that profile's secret scope, never the launch profile's process environment, and that profile's own `.env` credentials never reach another profile's scripts. Hermes-managed provider credentials (`OPENAI_API_KEY`, gateway tokens, …) cannot be declared — the sanitizer rejects them. On a single-profile install the script inherits what the gateway's `.env` put in the process environment, as before. Log presence (`set`/`MISSING`), never the value: script output is delivered verbatim.
 
 ### The agent sets these up for you
 

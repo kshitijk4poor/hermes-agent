@@ -397,15 +397,15 @@ function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: R
 }
 
 export function setSessionArchived(id: string, archived: boolean, profile?: string | null): Promise<{ ok: boolean }> {
-  return mutateSessionHttp(id, 'PATCH', { archived }, profile)
+  return mutateSessionHttp(id, 'PATCH', { archived }, sessionWriteProfile(profile))
 }
 
 export function setSessionPinnedRemote(id: string, pinned: boolean, profile?: string | null): Promise<{ ok: boolean }> {
-  return mutateSessionHttp(id, 'PATCH', { pinned }, profile)
+  return mutateSessionHttp(id, 'PATCH', { pinned }, sessionWriteProfile(profile))
 }
 
 export function setSessionUnreadRemote(id: string, unread: boolean, profile?: string | null): Promise<{ ok: boolean }> {
-  return mutateSessionHttp(id, 'PATCH', { unread }, profile)
+  return mutateSessionHttp(id, 'PATCH', { unread }, sessionWriteProfile(profile))
 }
 
 export function searchSessions(query: string): Promise<SessionSearchResponse> {
@@ -685,5 +685,5 @@ export function deleteSession(id: string, profile?: ProfileScope): Promise<{ ok:
 }
 
 export function renameSession(id: string, title: string, profile?: string | null): Promise<{ ok: boolean; title: string }> {
-  return mutateSessionHttp(id, 'PATCH', { title }, profile)
+  return mutateSessionHttp(id, 'PATCH', { title }, sessionWriteProfile(profile))
 }

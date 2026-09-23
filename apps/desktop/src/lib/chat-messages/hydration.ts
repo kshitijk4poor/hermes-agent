@@ -46,6 +46,12 @@ function persistedImageRefs(text: string) {
   return { cleanedText: extracted.cleanedText, refs: [...extracted.refs, ...paths.map(path => `@image:${formatRefValue(path)}`)] }
 }
 
+// Gateway routing note for Discord turns (gateway/run_inbound.py::discord_triggering_note).
+// Current gateways persist the authored text; this heals rows written before that fix. Only
+// the note is model-facing — the `[Replying to: …]` pointer next to it is kept.
+const DISCORD_TRIGGERING_NOTE_RE =
+  /(^|\n)\[Triggering message id: `[^`\n]*` — use as `message_id` for reply\/react\/pin via the discord tools\.\]\n*/
+
 /**
  * Backend history projection authorizes/sanitizes public commentary before it
  * reaches Desktop. Raw Responses sidecars are used only for final-answer fallback;

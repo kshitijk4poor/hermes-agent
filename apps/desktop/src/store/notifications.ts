@@ -1,6 +1,7 @@
 import { atom } from 'nanostores'
 
 import { translateNow } from '@/i18n'
+import { isOutOfSyncRpcParams } from '@/lib/gateway-rpc'
 import { requestBackendRestart, requestRoute } from '@/store/recovery-requests'
 
 export type NotificationKind = 'error' | 'warning' | 'info' | 'success'
@@ -311,6 +312,8 @@ export function notifyError(
 
   return notify({
     action: options.action ?? readable.action,
+    // A caller that can fire again for the same cause names its toast, so the repeat replaces it.
+    id: options.id,
     kind: 'error',
     title: fallback,
     message: readable.message,
