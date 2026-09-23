@@ -755,10 +755,6 @@ export function useMainApp(gw: GatewayClient) {
   const cancelClarify = useCallback(() => {
     const clarify = overlay.clarify
 
-    if (!clarify) {
-      return
-    }
-
       const fresh = capturePromptResponseGuard('clarify', clarify)
 
       if (!fresh()) {
@@ -767,8 +763,7 @@ export function useMainApp(gw: GatewayClient) {
 
       const label = toolTrailLabel('clarify')
 
-    turnController.turnTools = turnController.turnTools.filter(line => !sameToolTrailGroup(label, line))
-    patchTurnState({ turnTrail: turnController.turnTools })
+    const label = toolTrailLabel('clarify')
 
       // Canonical shared controls answer through the generation-bound RPC; a
       // legacy server→client request resolves its response frame locally.
