@@ -685,14 +685,13 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
     # inside one JXA script string; the gateway itself is its child and is matched on its own command line.
     if basenames[0] == "osascript":
         return None
-    # Gateway-dedicated entrypoints carry no subcommand to inspect.
+    # Gateway-dedicated entrypoints carry no subcommand to inspect (``python -m gateway.run`` is the
+    # module spelling of the same script: its PID record renders argv as ``gateway/run.py``, and a
+    # liveness probe that read the live ``-m`` cmdline as "not a gateway" made every fixture-launched
+    # standalone owner invisible to the multiplex preflight).
     if any(t == "gateway/run.py" or t.endswith("/gateway/run.py") for t in tokens):
         return "run"
-    # Atomic Hermes' bundled desktop runner shares HERMES_HOME with the CLI; without this,
-    # `gateway run --replace` does not recognise it as a running gateway, skips the
-    # terminate-and-scoped-lock-handoff path, and collides with its still-held scoped locks
-    # (e.g. the Discord bot-token lock). See #22418.
-    if any(b == "desktop-gateway.py" for b in basenames):
+    if any(tokens[i] == "-m" and tokens[i + 1] == "gateway.run" for i in range(len(tokens) - 1)):
         return "run"
     if any(b in ("hermes-gateway", "hermes-gateway.exe") for b in basenames):
         return "run"
@@ -1579,9 +1578,13 @@ def get_runtime_status_running_pid(
     pid = _live_pid_from_record(payload)
     if pid is None:
         return None
-    # The record's hermes_home must match the home asked about (this process unscoped) so a stale
-    # or copied record cannot lend another home's gateway identity; legacy records without the
-    # stamp prove nothing either way and fall through to the live command-line check.
+    # A record we wrote ourselves earlier in this boot (the multiplex verdict is persisted before
+    # the PID claim) is not a rival gateway; reporting it made a restart over a SIGKILLed owner
+    # lose the "PID file race" to its own process and skip the stale gateway.pid cleanup.
+    if pid == os.getpid():
+        return None
+    # Active-profile context: the record's hermes_home must match this process so a stale record
+    # cannot lend another profile's identity.
     if expected_home is None and not _pid_record_belongs_to_current_profile(payload):
         return None
     if expected_home is not None and recorded_gateway_home_conflicts(payload, expected_home=expected_home):
