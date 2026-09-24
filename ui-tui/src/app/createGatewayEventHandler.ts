@@ -904,7 +904,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         if (incoming.running === false) {
           turnController.clearStatusTimer()
-          turnController.idle()
+          // The authority settles the row before it publishes the final, so this snapshot
+          // can land a frame ahead of `message.complete`; the trail (tool rows, reasoning)
+          // stays parked for that final to archive instead of being dropped here.
+          turnController.idle({ keepTurnArchive: true })
           setStatus('ready')
         }
 

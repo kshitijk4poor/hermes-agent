@@ -338,17 +338,21 @@ class TurnController {
     patchTurnState({ reasoningActive: false, reasoningStreaming: false })
   }
 
-  idle() {
+  idle(opts: { keepTurnArchive?: boolean } = {}) {
     this.endReasoningPhase()
     this.activeTools = []
     this.streamTimer = clear(this.streamTimer)
     this.bufRef = ''
-    this.pendingSegmentTools = []
-    this.segmentMessages = []
+    // `keepTurnArchive`: the turn-over signal arrived before the final; the sealed segments
+    // and finished tool rows wait for `recordMessageComplete` to archive them.
+    if (!opts.keepTurnArchive) {
+      this.pendingSegmentTools = []
+      this.segmentMessages = []
+    }
 
     patchTurnState({
-      streamPendingTools: [],
-      streamSegments: [],
+      streamPendingTools: opts.keepTurnArchive ? this.pendingSegmentTools : [],
+      streamSegments: opts.keepTurnArchive ? this.segmentMessages : [],
       streaming: '',
       subagents: [],
       tools: [],
@@ -1090,7 +1094,11 @@ class TurnController {
     }
 
     patchUiState({ busy: true })
-    patchTurnState({ activity: [], outcome: '', subagents: [], toolTokens: 0, tools: [], turnTrail: [] })
+    // A turn whose final never came (owner died between settle and publish) must not leak its
+    // parked archive into this one.
+    this.segmentMessages = []
+    this.pendingSegmentTools = []
+    patchTurnState({ activity: [], outcome: '', streamPendingTools: [], streamSegments: [], subagents: [], toolTokens: 0, tools: [], turnTrail: [] })
   }
 
   upsertSubagent(

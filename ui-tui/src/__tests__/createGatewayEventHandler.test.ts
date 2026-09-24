@@ -107,6 +107,28 @@ describe('createGatewayEventHandler', () => {
     expect(getUiState().busy).toBe(false)
   })
 
+  it('an idle snapshot a frame ahead of the final leaves the tool trail for the final to archive', () => {
+    const appended: Msg[] = []
+    const onEvent = createGatewayEventHandler(buildCtx(appended))
+    patchUiState({ sid: 'focused', info: { model: 'test', skills: {}, tools: {} } as any })
+    const emit = (type: string, payload: any) => onEvent({ type, payload, session_id: 'focused' } as any)
+
+    emit('message.start', {})
+    emit('tool.start', { tool_id: 'c1', name: 'terminal', context: 'echo TOOLMARK' })
+    emit('tool.complete', { tool_id: 'c1', name: 'terminal', duration_s: 0.1 })
+    // The authority settles the row (running: false) before it publishes message.complete.
+    emit('session.info', { running: false })
+    expect(getUiState().busy).toBe(false)
+    emit('message.complete', { text: 'BETA after the tool' })
+
+    const trail = appended.find(m => m.kind === 'trail')
+    expect(trail?.tools?.join('\n')).toContain('TOOLMARK')
+    expect(appended.at(-1)).toMatchObject({ role: 'assistant', text: 'BETA after the tool' })
+    // Nothing is left parked for the next turn.
+    emit('message.start', {})
+    expect(getTurnState().streamSegments).toEqual([])
+  })
+
   it('fences restarted owner lifecycle events until resume establishes the new epoch', () => {
     const appended: Msg[] = []
     const onEvent = createGatewayEventHandler(buildCtx(appended))
