@@ -236,6 +236,9 @@ class GatewayChatView:
                 return 0 if outcome == "completed" else 1
             from prompt_toolkit import PromptSession
             from prompt_toolkit.patch_stdout import patch_stdout
+            from hermes_cli.skin_engine import get_active_skin
+            welcome = "Welcome to Hermes Agent! Type your message or /help for commands."
+            print(get_active_skin().get_branding("welcome", welcome), flush=True)
             prompt = PromptSession()
             with patch_stdout():
                 while not self.failure:
