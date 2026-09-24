@@ -12032,6 +12032,28 @@ function reapInstallRootedStragglers(excludePids: number[]): void {
 
   const payloadRoot = installShape() === 'bundled' ? process.resourcesPath : null
 
+  try {
+    reapPackageRootedProcesses({
+      installRoots: [payloadRoot],
+      listProcesses: () =>
+        listWindowsProcesses(
+          (file, args, options) =>
+            execFileSync(file, args, {
+              ...hiddenWindowsChildOptions({ encoding: 'utf8', timeout: options.timeout }),
+              windowsHide: options.windowsHide
+            }) as unknown as string
+        ),
+      killProcess: pid => process.kill(pid, 'SIGKILL'),
+      selfPid: process.pid,
+      excludePids,
+      isWindows: true,
+      log: message => rememberLog(message)
+    })
+  } catch (err) {
+    rememberLog(`[package-reap] skipped: ${(err as Error).message}`)
+  }
+}
+
   stopBackendChild(primary)
   // Bounded: a backend that ignores SIGTERM must not wedge app quit (main's 7 s teardown budget).
   await waitForTeardown([localShutdown, waitForBackendExit(primary), stopAllPoolBackends()], 7_000)
