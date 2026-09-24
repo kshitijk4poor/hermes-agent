@@ -211,6 +211,10 @@ class GatewayChatView:
                          "failed": outcome not in ("completed", "cancelled"), "interrupted": outcome == "cancelled"},
                         session_id=self.session_id, exit_code=130 if outcome == "cancelled" else 0)
                 print(terminal.get("text") or terminal.get("content") or "", flush=True)
+                # Same stderr exit contract as the legacy -Q path: automation wrappers read the
+                # durable id from this line, and it names the physical row (a compaction may have
+                # advanced it past the row printed at start).
+                print(f"\nsession_id: {self.session_id}", file=sys.stderr, flush=True)
                 return 0 if outcome == "completed" else 1
             from prompt_toolkit import PromptSession
             from prompt_toolkit.patch_stdout import patch_stdout
