@@ -383,12 +383,11 @@ import {
   withoutInteractiveOauthLogin
 } from './oauth-rest-request'
 import { wireOauthSessionResponse } from './oauth-session-response'
-import { createParentStartMarkerResolver } from './parent-process-identity'
-import { registerPetOverlayIpc } from './pet-overlay-ipc'
-import {
-  pendingNotice as pendingPluginCompatNotice,
-  recordDismissed as recordPluginCompatDismissed
-} from './plugin-compat-notice'
+import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
+import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
+import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
+import { petOverlayClickThrough } from './pet-overlay'
+import { placePetOverlay, registerPetOverlayIpc } from './pet-overlay-ipc'
 import {
   buildRegistryProfileRoutes,
   isLocalEnumerationFailure,
@@ -18142,7 +18141,8 @@ function configureSpellChecker() {
 
 // Does quitting take the agent down with the app? Reads the primary profile's
 // route through the same resolver resolveRemoteBackend uses, plus every backend
-// the quit teardown below will stop (spawned children, SSH-managed servers).
+// the quit teardown below will stop (SSH-managed servers; the local gateway is
+// attached, never owned).
 // A route we can't resolve counts as owned: the lost-work warning is the safe
 // side to be wrong on.
 function quitStopsBackendWork(): boolean {

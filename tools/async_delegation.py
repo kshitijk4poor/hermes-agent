@@ -254,10 +254,9 @@ def _recovered_results(task: Dict[str, Any], result_json: Optional[str], error: 
     return [recorded.get(i) or {"task_index": i, "status": "unknown", "summary": None, "error": error} for i in indexes]
 
 
-def recover_abandoned_delegations() -> int:
-    """Classify records whose owning process disappeared as outcome unknown; children a multi-child unit had already
-    recorded (``record_unit_child``) are replayed with their real results."""
-    require_ledger_owner()
+def _owner_liveness() -> Optional[Callable[[Any, Any], bool]]:
+    """``alive(owner_pid, owner_started_at)`` over the shared drift-tolerant start-time comparator,
+    or None when the liveness probes cannot be imported."""
     try:
         from gateway.status import _pid_exists, get_process_start_time, start_time_fingerprints_match
     except Exception:
@@ -272,6 +271,7 @@ def recover_abandoned_delegations() -> int:
 def recover_abandoned_delegations() -> int:
     """Classify records whose owning process disappeared as outcome unknown; children a multi-child unit had already
     recorded (``record_unit_child``) are replayed with their real results."""
+    require_ledger_owner()
     alive = _owner_liveness()
     if alive is None:
         return 0
