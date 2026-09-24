@@ -270,11 +270,8 @@ import {
   resolveGatewayFileBackend,
   saveGatewayDownload
 } from './gateway-file-download'
-import { downloadViaOauthSessionToFile, downloadViaTokenToFile } from './gateway-file-download-transport'
-import { stopGatewayBeforeUpdate } from './gateway-stop-before-update'
-import { resolveGatewayVersion } from './gateway-version'
-import { probeGatewayWebSocket, spawnedBackendProbeOptions } from './gateway-ws-probe'
-import { windowsGitCandidates } from './git-binary-candidates'
+import { startGatewaysAfterUpdateAbort, stopGatewayBeforeUpdate } from './gateway-stop-before-update'
+import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { registerGitIpc } from './git-ipc'
 import { desktopBackendSpawnEnv, guestOnboardingEnabled } from './guest-onboarding'
 import { readAndConsumeHandoffResult } from './handoff-result'

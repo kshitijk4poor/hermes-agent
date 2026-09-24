@@ -275,7 +275,9 @@ def _(rid, params: dict) -> dict:
     from tui_gateway.command_discovery import slash_completions
     # Skill/bundle lookups are home- and cwd-keyed: bind the calling session's profile and workspace so
     # the popup offers the project-local skills ``command.dispatch`` accepts for that session (#114359).
-    scope = _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params))
+    # A new-chat draft has no session yet: it names its rail-selected ``profile`` instead (#124651).
+    scope = _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params),
+                                profile=params.get("profile"))
     return _ok(rid, slash_completions(params.get("text", ""), scope=scope))
 
 

@@ -1145,8 +1145,8 @@ class GatewayStartupMixin:
         with _log_suppressed(logging.WARNING, "Could not restore async delegation completions: %s"):
             from tools.async_delegation import restore_undelivered_completions
             restore_undelivered_completions(process_registry.completion_queue)
-        # Recover sessions active at last exit (exact turn markers + 120s recency fallback for
-        # marker-less older turns). SKIP after a clean exit — the previous process already drained.
+        # Recover the turns the last process left marked (in flight, or reply not yet ledgered).
+        # SKIP after a clean exit — the previous process already drained.
         _clean_marker = _hermes_home / ".clean_shutdown"
         if _clean_marker.exists():
             logger.info("Previous gateway exited cleanly — skipping session suspension")

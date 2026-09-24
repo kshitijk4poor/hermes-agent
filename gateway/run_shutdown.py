@@ -2108,8 +2108,8 @@ class GatewayShutdownMixin:
         releases PID/lock ownership after the writer drain."""
         from gateway.run import _hermes_home, _planned_restart_notification_path, _shutdown_gateway_health_export
         from utils import atomic_json_write
-        # Clean-shutdown marker skips suspend_recently_active() next boot; a timed-out drain left
-        # half-finished sessions, so no marker — the next startup suspends them.
+        # Clean-shutdown marker skips crash-turn recovery next boot; a timed-out drain left
+        # half-finished sessions, so no marker — the next startup recovers their turn markers.
         if not ctx.timed_out:
             with suppress(Exception):
                 (_hermes_home / ".clean_shutdown").touch()
