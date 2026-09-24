@@ -1009,6 +1009,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         # removing this in-process gateway write does not affect any of them.
         from gateway.session_policy import policy_for_source
         policy = policy_for_source(runner, ctx.source)
+        if policy and policy.yolo and ctx.session_key:
+            from tools.approval import enable_session_yolo
+            enable_session_yolo(ctx.session_key)
         platform_key = policy.platform if policy else ("cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value)
         combined_ephemeral = self._combined_ephemeral_prompt()
         max_iterations = policy.max_turns if policy else _current_max_iterations()
