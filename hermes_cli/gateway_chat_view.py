@@ -236,20 +236,24 @@ class GatewayChatView:
                 return 0 if outcome == "completed" else 1
             from prompt_toolkit import PromptSession
             from prompt_toolkit.patch_stdout import patch_stdout
-            from hermes_cli.skin_engine import get_active_skin
+            from hermes_cli.skin_engine import get_active_prompt_symbol, get_active_skin
             welcome = "Welcome to Hermes Agent! Type your message or /help for commands."
             print(get_active_skin().get_branding("welcome", welcome), flush=True)
-            prompt = PromptSession()
+            prompt = PromptSession(erase_when_done=True)
+            prompt_symbol = get_active_prompt_symbol("❯ ")
             with patch_stdout():
                 while not self.failure:
                     try:
-                        text = (await prompt.prompt_async("You> ")).strip()
+                        text = (await prompt.prompt_async(prompt_symbol)).strip()
                         if not text:
                             continue
                         if text.startswith("/"):
                             if not await self.command(text):
                                 return 0
                         else:
+                            # Same scrollback shape as the in-process CLI: the typed prompt line is
+                            # erased on submit and the message lands as a `●` preview row.
+                            print(f"\n{'─' * 40}\n● {text}", flush=True)
                             await self.submit(text)
                     except KeyboardInterrupt:
                         print("Use /stop to interrupt execution, /quit to detach.")
