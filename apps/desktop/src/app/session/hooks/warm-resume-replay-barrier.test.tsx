@@ -1,10 +1,10 @@
-import type { HermesGateway } from '@/api/client'
 import { type GatewayEvent, JsonRpcGatewayClient } from '@hermes/shared'
 import { QueryClient } from '@tanstack/react-query'
 import { act, cleanup, renderHook } from '@testing-library/react'
 import { useRef } from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 
+import type { HermesGateway } from '@/api/client'
 import { reconcileActiveTranscript } from '@/app/contrib/hooks/use-background-sync'
 import { getLatestSessionMessages } from '@/hermes'
 import { chatMessageText, toChatMessages } from '@/lib/chat-messages'
