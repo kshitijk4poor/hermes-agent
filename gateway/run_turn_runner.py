@@ -1038,27 +1038,37 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             )
         except Exception as exc:
             # Model/credential resolution failed before the turn began; the raw text (URLs, status
-            # codes) belongs in the log, and the chat gets the commands that fix it.
+            # codes) belongs in the log, and the chat gets the commands that fix it. The result is
+            # a FAILED turn: a one-shot client exits non-zero, transcript persistence closes the
+            # turn, and an API receipt reports failure, never a completed turn with an apology.
             logger.warning("Model resolution failed for session %s: %s", ctx.session_key or "", exc)
             from hermes_state_runtime import RuntimeStoreError
+            from agent.turn_failure_copy import stamp_failure
+
+            def _unresolved(text: str) -> dict:
+                return stamp_failure({"final_response": text, "messages": [], "api_calls": 0, "tools": [],
+                                      "failed": True, "completed": False, "error": str(exc)},
+                                     "auth_permanent", False)
             if isinstance(exc, RuntimeStoreError):
                 # Session-policy refusals carry a stable reason code (e.g. a CLI launch key
                 # revoked by daemon restart): keep it in the reply so clients can act on it, and
                 # do not suggest /login — the profile's own credentials were never in play.
-                text = (f"⚠️ This session's launch credentials are no longer available "
-                        f"({exc.reason}), so this message wasn't processed. Start a new "
-                        "session from the CLI to bind them again.")
-                return {"final_response": text, "messages": [], "api_calls": 0, "tools": []}
+                return _unresolved(f"⚠️ This session's launch credentials are no longer available "
+                                   f"({exc.reason}), so this message wasn't processed. Start a new "
+                                   "session from the CLI to bind them again.")
             from hermes_cli.auth import is_rate_limited_auth_error
             if is_rate_limited_auth_error(exc.__cause__):
                 # Quota cap with valid credentials: /login cannot help; name the reset window (#89401).
                 from gateway.run import _gateway_provider_error_reply
-                return {"final_response": _gateway_provider_error_reply(str(exc)),
-                        "messages": [], "api_calls": 0, "tools": []}
-            return {
-                "final_response": t("gateway.errors.no_credentials"),
-                "messages": [], "api_calls": 0, "tools": [],
-            }
+                return _unresolved(_gateway_provider_error_reply(str(exc)))
+            if ctx.source.platform == Platform.LOCAL:
+                # The local operator reads the terminal: the resolver's own sentence ("provider
+                # 'custom' resolved without credentials ...") is the diagnosis; /login is not.
+                return _unresolved(f"⚠️ {exc}")
+            return _unresolved(
+                "⚠️ I couldn't connect to the AI model service, so this message wasn't processed. "
+                "Use /login to sign in again, or /model to pick a different model. If it keeps "
+                "failing, run `hermes doctor` on the host.")
         pr = runner._provider_routing
         reasoning_config = (policy.reasoning_config if policy else
             runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))

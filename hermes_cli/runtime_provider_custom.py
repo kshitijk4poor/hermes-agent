@@ -550,10 +550,13 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
     base_url = ((explicit_base_url or "").strip() or custom_provider.get("base_url", "")).rstrip("/")
     if not base_url:
         return None
+    # The credential pool is the profile's auth store (``hermes auth add``), not config: a frozen
+    # config snapshot still owes a pooled ``providers:`` entry its keys, or the turn ships the
+    # ``no-key-required`` placeholder to a host that wants one (C11 pool rows).
     pool_result = rp._try_resolve_from_custom_pool(
         base_url, "custom", custom_provider.get("api_mode"),
         provider_name=custom_provider.get("provider_key") or custom_provider.get("name"),
-    ) if config is None else None
+    )
     if pool_result:
         # The pool doesn't know the custom_providers fields — propagate them here too.
         _apply_custom_provider_extras(custom_provider, target_model, pool_result)
