@@ -73,9 +73,19 @@ class GatewayChatView:
             self.changed.set()
 
     def _tool_start(self, admission, payload):
+        # Deltas before a tool call are interim commentary the final reply does not repeat;
+        # close that segment so `_complete` measures only the final's own stream.
+        if self.streams.pop(admission, None) and not self.quiet:
+            print(flush=True)
         if self.emitter is not None:
             self.emitter.on_tool_progress("tool.started", payload.get("tool_name"), None, payload.get("args"),
                                           tool_call_id=payload.get("tool_call_id") or None)
+        elif not self.quiet:
+            # Same line shape the in-process CLI prints: the tool's emoji and its primary argument.
+            from agent.display import build_tool_preview, get_tool_emoji
+            name = payload.get("tool_name") or payload.get("name") or "tool"
+            preview = build_tool_preview(name, payload.get("args") or {}, max_len=0)
+            print(f"{get_tool_emoji(name)} {name}{f': {preview}' if preview else ''}", flush=True)
 
     def _tool_complete(self, admission, payload):
         if self.emitter is not None:
@@ -91,16 +101,24 @@ class GatewayChatView:
             self.emitter.on_text_delta(text)
         elif not self.quiet:
             self.streams[admission] = self.streams.get(admission, "") + text
-            print(text, end="", flush=True)
+            # No flush: under the live composer, patch_stdout line-buffers this so a redraw
+            # (a resize mid-stream) never interleaves with a half-written line. Complete lines
+            # still appear as they stream; the last one lands with `_complete`.
+            print(text, end="")
 
     def _complete(self, admission, payload):
         text = payload.get("text") or payload.get("content") or ""
         streamed = self.streams.pop(admission, "")
         if not self.quiet:
+            # The final's deltas carry the agent's segment break (leading blank lines after a
+            # tool call) that the settled text has trimmed; a match modulo that edge whitespace
+            # is the same reply already on screen.
             if not streamed:
                 print(text, flush=True)
             elif text.startswith(streamed):
                 print(text[len(streamed):], flush=True)
+            elif text.strip() == streamed.strip():
+                print(flush=True)
             else:
                 print("\n" + text, flush=True)
         self.completions[admission] = payload
