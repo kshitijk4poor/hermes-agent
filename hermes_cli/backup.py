@@ -857,19 +857,6 @@ def _import_member_rel(member: str, prefix: str) -> tuple[str, bool]:
     rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
     return rel, _import_skipped(rel)
 
-def _import_db_member(
-    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
-    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
-    try:
-        with exclusive_maintenance([target.absolute().parent, target.resolve().parent]):
-            _import_db_member_exclusive(zf, member, target, new_file_mode)
-    except OwnershipConflict as exc:
-        raise OSError(str(exc)) from exc
-
-
-def _import_db_member_exclusive(
-    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
-    """Publish a SQLite ``.db`` member onto *target* without replacing its inode.
 
 def run_import(args) -> Optional[int]:
     """Restore a Hermes backup; return 1 on damaged archives or incomplete restores."""
@@ -901,37 +888,25 @@ def run_import(args) -> Optional[int]:
         members = [n for n in zf.namelist() if not n.endswith("/")]
         file_count = len(members)
 
-def _import_members(
-    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
-) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
-    """Reserve all affected profiles before publishing even the first config file."""
-    from gateway.runtime_ownership import exclusive_maintenance
-    homes = {hermes_root}
-    for member in members:
-        rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
-        parts = Path(rel).parts
-        if len(parts) >= 3 and parts[0] == 'profiles':
-            home = hermes_root / parts[0] / parts[1]
-            if _is_within(home, hermes_root.resolve()):
-                homes.add(home)
-        target = hermes_root / rel
-        if target.suffix == '.db' and _is_within(target, hermes_root.resolve()):
-            homes.update([target.absolute().parent, target.resolve().parent])
-    with exclusive_maintenance(homes):
-        return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
-
-
-def _import_members_exclusive(
-    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
-) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
-    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
+        print(f"Backup contains {file_count} files")
+        print(f"Target: {display_hermes_home()}")
 
         if prefix:
             print(f"Detected archive prefix: {prefix!r} (will be stripped)")
 
-        # Check for existing installation
-        has_config = (hermes_root / "config.yaml").exists()
-        has_env = (hermes_root / ".env").exists()
+def _import_db_member(
+    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
+    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
+    try:
+        with exclusive_maintenance([target.absolute().parent, target.resolve().parent]):
+            _import_db_member_exclusive(zf, member, target, new_file_mode)
+    except OwnershipConflict as exc:
+        raise OSError(str(exc)) from exc
+
+
+def _import_db_member_exclusive(
+    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
+    """Publish a SQLite ``.db`` member onto *target* without replacing its inode.
 
         if (has_config or has_env) and not args.force:
             print()
@@ -1006,11 +981,30 @@ def _import_members_exclusive(
                     print(f"  {restored}/{file_count} files ...")
                 continue
 
-            # Strip prefix if detected
-            if prefix and member.startswith(prefix):
-                rel = member[len(prefix):]
-            else:
-                rel = member
+def _import_members(
+    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Reserve all affected profiles before publishing even the first config file."""
+    from gateway.runtime_ownership import exclusive_maintenance
+    homes = {hermes_root}
+    for member in members:
+        rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
+        parts = Path(rel).parts
+        if len(parts) >= 3 and parts[0] == 'profiles':
+            home = hermes_root / parts[0] / parts[1]
+            if _is_within(home, hermes_root.resolve()):
+                homes.add(home)
+        target = hermes_root / rel
+        if target.suffix == '.db' and _is_within(target, hermes_root.resolve()):
+            homes.update([target.absolute().parent, target.resolve().parent])
+    with exclusive_maintenance(homes):
+        return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
+
+
+def _import_members_exclusive(
+    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
 
             if not rel:
                 continue
@@ -1084,8 +1078,10 @@ def _import_members_exclusive(
         print(f"Import {'incomplete' if errors else 'complete'}: {restored} files restored in {elapsed:.1f}s")
         print(f"  Target: {display_hermes_home()}")
 
-def run_import(args) -> None:
-    """Restore a Hermes backup from a zip file."""
+    Return 1 when the archive is damaged (refused before anything is written) or the restore is
+    incomplete (some members were not written); None on success or when the overwrite prompt is
+    declined. A missing, non-zip or invalid archive exits 1 via ``sys.exit``.
+    """
     zip_path = Path(args.zipfile).expanduser().resolve()
     if not zip_path.is_file():
         print(f"Error: File not found: {zip_path}")
@@ -1109,6 +1105,15 @@ def run_import(args) -> None:
             print(f"Detected archive prefix: {prefix!r} (will be stripped)")
         if not args.force and not _confirm_import_overwrite(hermes_root):
             return
+        # Every member is decompressed once here and once again below: a damaged archive
+        # must be refused while the home is still untouched, not half-way through the restore.
+        print("\nChecking archive integrity ...")
+        # Members the restore skips anyway (gateway.pid, WAL sidecars) cannot block it.
+        corrupt = _find_corrupt_members(zf, [m for m in members if not _import_member_rel(m, prefix)[1]])
+        if corrupt:
+            _print_capped(f"Error: backup archive is damaged ({len(corrupt)} member(s) fail to "
+                          f"decompress or fail their CRC); nothing was restored:", corrupt, "  ")
+            return 1
         print(f"\nImporting {file_count} files ...")
         hermes_root.mkdir(parents=True, exist_ok=True)
         t0 = time.monotonic()
@@ -1120,7 +1125,8 @@ def run_import(args) -> None:
             print(f"\nImport refused; no files restored: {exc}")
             sys.exit(1)
         elapsed = time.monotonic() - t0
-        print(f"\nImport complete: {restored} files restored in {elapsed:.1f}s\n  Target: {display_hermes_home()}")
+        print(f"\nImport {'incomplete' if errors else 'complete'}: {restored} files restored in {elapsed:.1f}s\n"
+              f"  Target: {display_hermes_home()}")
         if restored_external:
             print(
                 f"\n  Restored {restored_external} memory-provider file(s) to "
@@ -1251,6 +1257,7 @@ def run_import(args) -> None:
                   "Fix the cause and re-run the import.")
             return 1
         print("Done. Your Hermes configuration has been restored.")
+
 
 def _restore_profile_wrappers(hermes_root: Path) -> List[str]:
     """Re-create shell wrapper scripts for restored named profiles; return the profile names seen."""

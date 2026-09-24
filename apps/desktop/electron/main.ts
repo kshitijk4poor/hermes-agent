@@ -84,7 +84,12 @@ import { dashboardFallbackArgs, serveBackendArgs } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { assertDescriptorStillOwned, forgetFailedDescriptor } from './backend-descriptor-cache'
 import { BackendDialClaims } from './backend-dial-claim'
-import { buildDesktopBackendEnv, hermesManagedNodePathEntries, normalizeHermesHomeRoot } from './backend-env'
+import {
+  buildDesktopBackendEnv,
+  hermesManagedNodePathEntries,
+  normalizeHermesHomeRoot,
+  profileBackendParentEnv
+} from './backend-env'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import {
   backendCommandMatches,
@@ -11974,7 +11979,13 @@ async function dialPoolBackend(profile, entry, opts: { forceLocal?: boolean; poo
     profileDeletionGate.assertCanStart(profile)
     assertPoolEntryStillOwned(poolKey, entry)
 
-    return runGatewayEnsure({ ...backend, env: desktopBackendSpawnEnv(backend.env || {}, GUEST_ONBOARDING) }, resolveHermesCwd(), HERMES_HOME)
+    // Never another profile's dotenv credentials from the Desktop env (#68367).
+    return runGatewayEnsure(
+      { ...backend, env: desktopBackendSpawnEnv(backend.env || {}, GUEST_ONBOARDING) },
+      resolveHermesCwd(),
+      HERMES_HOME,
+      profileBackendParentEnv({ hermesHome: HERMES_HOME, profile })
+    )
   }, async () => {
     await waitForUpdateClearance(updateGateDeps(), { pollMs: UPDATE_WAIT_POLL_MS, timeoutMs: UPDATE_WAIT_TIMEOUT_MS })
     // Update waits yield: retirement or profile deletion may win in that gap.
@@ -12303,7 +12314,12 @@ async function startHermes(requestedProfile?: string) {
     // Local WSL backend — paths are bridgeable.
     setWslBridgeProfileState(primaryProfile, true)
 
-    const connection = await ensureLocalGateway(() => runGatewayEnsure({ ...setup.backend, env: desktopBackendSpawnEnv(setup.backend.env || {}, GUEST_ONBOARDING) }, resolveHermesCwd(), HERMES_HOME))
+    const connection = await ensureLocalGateway(() => runGatewayEnsure(
+      { ...setup.backend, env: desktopBackendSpawnEnv(setup.backend.env || {}, GUEST_ONBOARDING) },
+      resolveHermesCwd(),
+      HERMES_HOME,
+      profileBackendParentEnv({ hermesHome: HERMES_HOME, profile: primaryProfile })
+    ))
     void showPluginCompatNoticeOnce()
 
     backendConnectionState.assertCurrentAttempt(connectionAttempt)

@@ -1,6 +1,20 @@
 import { expect, test } from 'vitest'
 
-import { createLocalGatewayDials, ensureLocalGateway, routedGatewayEndpoint } from './local-gateway'
+import { createLocalGatewayDials, ensureLocalGateway, routedGatewayEndpoint, runGatewayEnsure } from './local-gateway'
+
+test('the ensure client inherits the caller-scrubbed parent env, not the raw Desktop env', async () => {
+  // #68367: a sibling profile's `gateway ensure` must not see the launch profile's dotenv
+  // credentials. The parent env passed in IS the environment; only HERMES_HOME and the
+  // backend's own entries are layered on top.
+  const printEnv = ['-e', 'process.stdout.write(JSON.stringify({ leak: process.env.LEAK ?? null, home: process.env.HERMES_HOME, own: process.env.OWN }))']
+  const result = await runGatewayEnsure(
+    { command: process.execPath, args: printEnv, env: { OWN: '1' }, shell: false },
+    process.cwd(),
+    '/home/x/.hermes',
+    { PATH: process.env.PATH ?? '', OWN: '0' }
+  )
+  expect(JSON.parse(result.stdout)).toEqual({ leak: null, home: '/home/x/.hermes', own: '1' })
+})
 
 test('canonical ensure cannot cross a rejected update or profile lifecycle gate', async () => {
   let ran = false
