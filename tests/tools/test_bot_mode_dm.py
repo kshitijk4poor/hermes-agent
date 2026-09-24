@@ -439,6 +439,7 @@ def test_connection_qualified_target_reaches_the_relay_not_a_look_alike_local_bo
     calls = _capture_spawn(monkeypatch)
     monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: "hermes")
     home = _managed_home(tmp_path, teammates=("ops",))
+    _canonical_target(monkeypatch, home / "profiles" / "ops")  # the local bot's authority is up
     _rename(home, "ops", display_name=local_name)
     bot_relay.write_remote_roster(home, [
         {"profile": "default", "handle": "hermes", "connection_id": "mini", "connection_label": "Mini"},
