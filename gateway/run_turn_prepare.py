@@ -629,7 +629,13 @@ class GatewayTurnPrepareMixin:
 
         # The context prompt render is pinned per session, keyed by a hash of the renderer inputs, so
         # the system prompt cannot drift turn-over-turn; a miss (thread rename, /sethome) re-renders.
-        context_prompt = self._pinned_session_context_prompt(context, _redact_pii, session_key)
+        # A LOCAL session (CLI one-shot, ACP, cron run-now, TUI attach) is the operator's own machine:
+        # the messaging block ("Source: Local", connected platforms, cron delivery targets) was never
+        # part of the classic in-process prompt, and the TUI gateway still builds that prompt in-process.
+        # Rendering it here would make every surface hop of one durable session a system-prompt
+        # (and prompt-cache) break.
+        context_prompt = "" if source.platform == Platform.LOCAL else \
+            self._pinned_session_context_prompt(context, _redact_pii, session_key)
 
         # Per-turn notes ride the user message via the api_content sidecar, NOT context_prompt
         # (appending to the ephemeral system prompt forced a full agent rebuild).
