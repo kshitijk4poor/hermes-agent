@@ -266,6 +266,11 @@ def _ws_peer_label(ws: Any) -> str:
     return f"{host}:{port}" if port is not None else host
 
 
+def _is_unknown_method(resp) -> bool:
+    error = resp.get("error") if isinstance(resp, dict) else None
+    return isinstance(error, dict) and error.get("code") == -32601
+
+
 def _disable_nagle(ws: Any) -> None:
     """Disable Nagle + enable TCP keepalive on the raw socket (best-effort). Without TCP_NODELAY the kernel
     coalesces small per-token frames, so a burst after the model's think-pause lands in one tick and no
@@ -435,6 +440,12 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
             try:
                 if authority_connection is not None:
                     resp = await authority_connection.dispatch(req)
+                    if _is_unknown_method(resp) and req_method in server._methods:
+                        # Session verbs live on the authority; everything else the sidecar still
+                        # registers (pet, wake word, active-session list, connectors) keeps its
+                        # legacy handler. A real -32601 reaches the client only for methods
+                        # neither side knows, which is what its version-skew notice keys on.
+                        resp = await asyncio.to_thread(server.dispatch, req, transport)
                 else:
                     resp = await asyncio.to_thread(server.dispatch, req, transport)
             except Exception:
