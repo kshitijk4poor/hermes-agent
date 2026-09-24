@@ -100,9 +100,11 @@ def _systemd(home: Path, deadline: float) -> ExistingService | None:
     paths = (Path.home() / ".config/systemd/user" / unit, Path("/etc/systemd/system") / unit)
     # On non-systemd hosts there is no manager to own transient units. Installed
     # definitions still count: a broken manager is not permission to bypass one.
-    manager_paths = (Path("/run/systemd/system"),
-                     Path(f"/run/user/{os.getuid()}/systemd/private"))  # windows-footgun: ok — native systemd only
-    if not any(_exists(p) for p in (*paths, *manager_paths)):
+    # Every Hermes entrypoint ensures the gateway, so a host with no installed unit must not
+    # touch the service manager at all (a headless runner has no user bus to answer it).
+    # With a unit installed anywhere, both scopes are asked: two claiming the name is a conflict.
+    installed = (*paths, Path("/usr/lib/systemd/system") / unit, Path("/lib/systemd/system") / unit)
+    if not any(_exists(p) for p in installed):
         return None
     found = []
     for system in (False, True):
@@ -111,8 +113,8 @@ def _systemd(home: Path, deadline: float) -> ExistingService | None:
                        "--property=LoadState,ActiveState,SubState,UnitFileState," + ",".join(SYSTEMD_IDENTITY_PROPERTIES)], deadline)
         props = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
         if not _exists(paths[int(system)]) and (result.returncode or props.get("LoadState") == "not-found"):
-            # Nothing installed in this scope, so a manager we cannot reach there (a headless
-            # runner without a user bus) has no unit that could serve or block this home.
+            # Nothing installed in this scope: an unreachable or empty manager there has no
+            # unit that could serve or block this home.
             continue
         if result.returncode or props.get("LoadState") != "loaded":
             raise RuntimeStartError("service_manager_unavailable")
