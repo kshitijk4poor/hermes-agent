@@ -1926,8 +1926,9 @@ def cmd_chat(args):
 
 def cmd_gateway(args):
     """Gateway management commands."""
-    _sync_bundled_skills_quietly()
-
+    # `gateway run` seeds skills itself (run_bootstrap._start_gateway_configure_logging) inside its
+    # own home; a second pass here doubled a cold boot on a fresh home while every attaching client
+    # waited on the ensure deadline. Management verbs never need the library.
     from hermes_cli.gateway import gateway_command
 
     gateway_command(args)

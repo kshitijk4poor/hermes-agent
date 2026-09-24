@@ -373,7 +373,7 @@ Use `hermes gateway run` instead of `hermes gateway start` — WSL's systemd sup
 ### Local runtime discovery and startup
 
 ```bash
-hermes gateway ensure --json --timeout 30
+hermes gateway ensure --json --timeout 60
 ```
 
 `ensure` targets the active profile and emits one JSON object with `state`,
@@ -381,7 +381,8 @@ hermes gateway ensure --json --timeout 30
 local discovery reports compatible session readiness. Output contains no bootstrap
 tickets or bearer credentials. JSON is also the default without `--json`.
 
-The timeout is a finite, positive total deadline in seconds (default `30`). An
+The timeout is a finite, positive total deadline in seconds (default `60`, enough for a
+cold daemon boot on a loaded host). An
 existing reservation or starting owner is waited for, not replaced. When absence
 is established, an existing service takes precedence; an unmanaged process is
 requested only when no service is found. This command never installs or rewrites
