@@ -460,6 +460,12 @@ function ConfigSettingsInner({
             label={c.disableF12Title}
             onChange={setDisableF12}
           />
+          <ToggleRow
+            checked={alwaysExternalLinks}
+            description={c.alwaysExternalLinksDesc}
+            label={c.alwaysExternalLinksTitle}
+            onChange={setAlwaysExternalLinks}
+          />
           <QuickEntrySettings />
         </>
       )}

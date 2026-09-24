@@ -1,3 +1,4 @@
+import type { HermesGateway } from '@/api/client'
 import { type GatewayEvent, JsonRpcGatewayClient } from '@hermes/shared'
 import { QueryClient } from '@tanstack/react-query'
 import { act, cleanup, renderHook } from '@testing-library/react'
@@ -136,7 +137,8 @@ async function mountWithPendingReplay() {
     }
   })
 
-  setPrimaryGateway(client)
+  // The store types the primary as the desktop subclass; the barrier under test lives on the shared base.
+  setPrimaryGateway(client as unknown as HermesGateway)
   client.onEvent(gatewayEvent => hook.result.current.stream.handleGatewayEvent(gatewayEvent))
 
   const connect = async () => {
