@@ -466,6 +466,20 @@ def _open_profile_session_db(profile_home):
         raise RuntimeError(f"profile session store unavailable: {db_path}: {exc}") from exc
 
 
+def _bootstrap_served_profile_store(db_path: Path) -> None:
+    """A served profile whose first RPC is a read (Bot Chat registry lookup on a fresh bot) has no
+    ``state.db`` yet. Browsing never creates a store, but THIS process is the profile's session
+    owner (``_open_profile_session_db`` acquires the writer for every agent build), so it seeds the
+    store it is about to own instead of answering ``storage_unavailable`` until a turn happens."""
+    try:
+        if db_path.stat().st_size > 0:
+            return
+    except FileNotFoundError:
+        pass
+    from hermes_state_registry import acquire, release_or_close
+    release_or_close(acquire(db_path))
+
+
 @contextlib.contextmanager
 def _profile_db(params: dict | None = None, *, writer: bool = False):
     """Yield the SessionDB for ``params['profile']`` (None when unavailable); closes dedicated
@@ -486,6 +500,7 @@ def _profile_db(params: dict | None = None, *, writer: bool = False):
                 db = acquire(Path(profile_home) / "state.db")
             else:
                 from hermes_cli.web_server_sessions import _open_session_db_at_path
+                _bootstrap_served_profile_store(Path(profile_home) / "state.db")
                 db = _open_session_db_at_path(Path(profile_home) / "state.db", read_only=True)
             owns = True
         except Exception as exc:

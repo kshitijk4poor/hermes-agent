@@ -38,7 +38,12 @@ function mutationSummary(operation: string, value: Record<string, unknown>): str
 }
 
 // Explicit desktop methods that travel as canonical `session.mutate`.
-const MUTATION_METHODS = new Set(['session.title', 'session.archive', 'session.branch', 'session.compress'])
+// `session.branch_stored` / `session.branch_whole` are legacy whole-history branches keyed by a
+// stored parent id; the authority has ONE branch, a `branch` mutation on the parent, whose child
+// is a local route the authority can restore (a legacy-minted child has no local policy and every
+// resume on it answers not_found).
+const BRANCH_METHODS = new Set(['session.branch', 'session.branch_stored', 'session.branch_whole'])
+const MUTATION_METHODS = new Set(['session.title', 'session.archive', 'session.compress', ...BRANCH_METHODS])
 
 export class CanonicalDesktopProtocol {
   private creates = new Map<string, string>()
@@ -106,6 +111,14 @@ export class CanonicalDesktopProtocol {
 
     if (fenced) { return this.retainedMutation(params.session_id, fenced.operation, fenced.payload, true) }
 
+    if (method === 'session.branch_stored' || method === 'session.branch_whole') {
+      // The stored-parent form names the parent as `parent_session_id`; the live form as `session_id`.
+      const parent = params.parent_session_id ?? params.session_id
+      const payload = typeof params.title === 'string' && params.title ? { title: params.title } : {}
+
+      return this.retainedMutation(parent, 'branch', payload, true)
+    }
+
     if (method === 'slash.exec') {
       const directive = slashMutation(String(params.command ?? ''))
 
@@ -117,9 +130,11 @@ export class CanonicalDesktopProtocol {
       const unsupported = Object.keys(params).filter(key => !allowed.has(key) && !(key === 'fast' && params[key] === false))
 
       if (unsupported.length) { throw new Error(`Canonical gateway does not support explicit session options: ${unsupported.join(', ')}`) }
+
       // The socket is bound to a profile already; only a sibling the host multiplexes rides as `profile`.
       const result = Object.fromEntries(Object.entries(params).filter(([key, value]) =>
         ['request_id', 'cwd', 'model', 'toolsets', 'title', 'hidden'].includes(key) || (key === 'profile' && value && value !== 'default')))
+
       const key = JSON.stringify(result)
       const requestId = params.request_id ?? this.creates.get(key) ?? crypto.randomUUID()
       this.creates.set(key, String(requestId))
@@ -217,7 +232,7 @@ export class CanonicalDesktopProtocol {
 
       for (const [key, mutation] of this.mutations) { if (mutation.request_id === params.request_id) { this.mutations.delete(key) } }
 
-      if (method === 'session.branch') {
+      if (BRANCH_METHODS.has(method)) {
         return { ...value, session_id: value.branched_session_id, stored_session_id: value.branched_session_id, parent_session_id: params.session_id, message_count: value.copied_messages }
       }
 

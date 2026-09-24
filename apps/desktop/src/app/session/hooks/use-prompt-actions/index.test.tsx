@@ -381,6 +381,32 @@ describe('durable submit acknowledgement', () => {
       expect.any(Number)
     )
   })
+
+  it('a legacy backend refusing submission_id as version skew (4000) gets one identityless retry', async () => {
+    // `hermes serve` validates params against a strict contract: an unknown key is refused
+    // as 4000 before any handler ran (surfaced by the remote-topology E2E as "Session unavailable").
+    const submits: Array<Record<string, unknown>> = []
+
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      if (method !== 'prompt.submit') {return {} as never}
+      submits.push(params!)
+
+      if ('submission_id' in params!) {
+        throw Object.assign(new Error('invalid params for prompt.submit: submission_id: Extra inputs are not permitted — the client and the Hermes backend are out of sync (different versions)'), { code: 4000 })
+      }
+
+      return { status: 'streaming' } as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} rawAdmissionReceipts refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+    expect(await handle!.submitText('hi remote')).toBe(true)
+    expect(submits).toHaveLength(2)
+    expect(submits[1]).not.toHaveProperty('submission_id')
+    expect(submits[1]).toMatchObject({ text: 'hi remote' })
+  })
 })
 
 describe('submit timeout admission fences', () => {

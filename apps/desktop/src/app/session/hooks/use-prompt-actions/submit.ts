@@ -162,6 +162,14 @@ type SubmitReceipt = Pick<PromptSubmitResult, 'user_row_id'> & {
   status?: string
 }
 
+/** A refusal the backend issued before admitting anything, so an identityless retry cannot duplicate a turn. */
+function isPreAdmissionRefusal(error: unknown): boolean {
+  if (!error || typeof error !== 'object' || !('code' in error)) { return false }
+  const { code, message } = error as { code?: unknown; message?: unknown }
+
+  return code === 4094 || (code === 4000 && typeof message === 'string' && /submission_id/.test(message))
+}
+
 export function useSubmitPrompt(deps: SubmitPromptDeps) {
   const {
     activeSessionIdRef,
@@ -1021,9 +1029,12 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
                     'prompt.submit', params, PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
                   )
                 } catch (error) {
-                  // 4094 is an explicit PRE-admission capability refusal. Never
-                  // downgrade on a timeout, malformed ACK or an ambiguous retry.
-                  if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 4094 || prepared.legacyAttempted) {
+                  // 4094 is an explicit PRE-admission capability refusal; 4000 is the
+                  // legacy `hermes serve` contract refusing `submission_id` as an unknown
+                  // key (version skew) before any handler ran. Both are pre-admission and
+                  // safe to retry identityless. Never downgrade on a timeout, malformed
+                  // ACK or an ambiguous retry.
+                  if (!isPreAdmissionRefusal(error) || prepared.legacyAttempted) {
                     throw error
                   }
 

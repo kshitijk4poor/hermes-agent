@@ -193,13 +193,26 @@ class SessionTitlesMixin:
     def get_next_title_in_lineage(self, base_title: str) -> str:
         """Next title in a lineage ("my session" -> "my session #2"): strip any " #N" suffix,
         then increment the highest existing number."""
-        match = _NUMBERED_TITLE_RE.match(base_title)
-        base = match.group(1) if match else base_title
-        rows = self._read_all(
-            "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
-            (base, f"{_escape_like(base)} #%"))
-        if not rows:
-            return base
-        # The unnumbered original counts as #1.
-        numbers = [int(m.group(2)) for m in (_NUMBERED_TITLE_RE.match(row["title"]) for row in rows) if m]
-        return f"{base} #{max([1, *numbers]) + 1}"
+        base, sql, args = _lineage_title_query(base_title)
+        return _next_lineage_title(base, self._read_all(sql, args))
+
+
+def _lineage_title_query(base_title: str):
+    match = _NUMBERED_TITLE_RE.match(base_title)
+    base = match.group(1) if match else base_title
+    return base, "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'", (base, f"{_escape_like(base)} #%")
+
+
+def _next_lineage_title(base: str, rows) -> str:
+    if not rows:
+        return base
+    # The unnumbered original counts as #1.
+    numbers = [int(m.group(2)) for m in (_NUMBERED_TITLE_RE.match(row["title"]) for row in rows) if m]
+    return f"{base} #{max([1, *numbers]) + 1}"
+
+
+def lineage_title_on_conn(conn, base_title: str) -> str:
+    """``get_next_title_in_lineage`` inside an authority-owned transaction (same connection, so a
+    sibling branch committed in this transaction is counted)."""
+    base, sql, args = _lineage_title_query(base_title)
+    return _next_lineage_title(base, conn.execute(sql, args).fetchall())

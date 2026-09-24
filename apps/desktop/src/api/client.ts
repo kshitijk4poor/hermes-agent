@@ -37,6 +37,23 @@ export const GATEWAY_NOT_CONNECTED_MESSAGE = 'Hermes gateway is not connected'
 const CANONICAL_PROMPT_EVENTS: Record<string, 'approval' | 'clarify'> = { 'approval.request': 'approval', 'clarify.request': 'clarify' }
 
 const ATTACH_REQUIRED = new Set(['prompt.submit', 'approval.respond', 'clarify.respond', 'session.interrupt', 'prompt.cancel'])
+// A branch is a CAS mutation on the PARENT: an un-attached parent (right-click on a sidebar row
+// that was never opened) has no cached revision, so attach it first to learn one.
+const PARENT_ATTACH_REQUIRED = new Set(['session.branch_stored', 'session.branch_whole'])
+
+// Canonical-only identity keys. The legacy `hermes serve` contract refuses an unknown key as
+// version skew (4000), so they are stripped on a non-canonical dial. `prompt.submit` keeps its
+// `submission_id` on purpose: the submit path retries identityless on that exact refusal and
+// records the send as legacy-attempted, which a silent strip here would hide.
+const LEGACY_STRIP: Record<string, string[]> = { 'session.create': ['request_id'], 'session.branch_stored': ['request_id'] }
+
+function legacyParams(method: string, params: Record<string, unknown>): Record<string, unknown> {
+  const strip = LEGACY_STRIP[method]
+
+  if (!strip || !strip.some(key => key in params)) { return params }
+
+  return Object.fromEntries(Object.entries(params).filter(([key]) => !strip.includes(key)))
+}
 
 export class HermesGateway extends JsonRpcGatewayClient {
   private canonical = false
@@ -114,12 +131,19 @@ export class HermesGateway extends JsonRpcGatewayClient {
   private attached = new Set<string>()
 
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
-    if (!this.canonical) { return super.request<T>(method, params, timeoutMs, signal) }
+    if (!this.canonical) { return super.request<T>(method, legacyParams(method, params), timeoutMs, signal) }
     const sid = typeof params.session_id === 'string' ? params.session_id : null
 
     if (sid && ATTACH_REQUIRED.has(method) && !this.attached.has(sid)) {
       await this.request('session.resume', { session_id: sid, defer_history: true, omit_messages: true, ...(params.profile ? { profile: params.profile } : {}) })
     }
+
+    const parent = PARENT_ATTACH_REQUIRED.has(method) ? params.parent_session_id ?? params.session_id : null
+
+    if (typeof parent === 'string' && parent && !this.attached.has(parent)) {
+      await this.request('session.resume', { session_id: parent, defer_history: true, omit_messages: true, ...(params.profile ? { profile: params.profile } : {}) })
+    }
+
     const prepared = this.protocol.prepare(method, params)
     const wireMethod = this.protocol.wire(method, prepared)
 
