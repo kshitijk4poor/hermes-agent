@@ -45,12 +45,17 @@ def _voice_event(room_id="!a:example.org", event_id="$voice1"):
         })
 
 
-def _bare_mention(room_id="!a:example.org", event_id="$text1"):
+# Element's pill: body is the bot's display name, the link lives only in formatted_body.
+_PILL = {"body": "Hermes: ", "format": "org.matrix.custom.html",
+         "formatted_body": '<a href="https://matrix.to/#/@hermes:example.org">Hermes</a>: '}
+
+
+def _bare_mention(room_id="!a:example.org", event_id="$text1", body="@hermes:example.org", **extra):
     return SimpleNamespace(
         sender="@alice:example.org", event_id=event_id, room_id=room_id,
         timestamp=int(time.time() * 1000),
-        content={"body": "@hermes:example.org", "msgtype": "m.text",
-                 "m.mentions": {"user_ids": ["@hermes:example.org"]}})
+        content={"body": body, "msgtype": "m.text",
+                 "m.mentions": {"user_ids": ["@hermes:example.org"]}, **extra})
 
 
 def _dispatched(adapter):
@@ -58,16 +63,19 @@ def _dispatched(adapter):
 
 
 @pytest.mark.asyncio
-async def test_bare_mention_claims_parked_voice(monkeypatch):
-    """Only a bare mention in the voice's own room claims it; another room's mention is plain text."""
+@pytest.mark.parametrize("mention", [{}, _PILL], ids=["mxid", "pill"])
+async def test_bare_mention_claims_parked_voice(monkeypatch, mention):
+    """Only a bare mention (typed MXID or Element pill) in the voice's own room claims it; another
+    room's mention and a mention with a question are plain text."""
     adapter = _make_adapter(monkeypatch)
 
     await adapter._on_room_message(_voice_event())
-    await adapter._on_room_message(_bare_mention(room_id="!b:example.org", event_id="$textB"))
-    assert _dispatched(adapter) == [("!b:example.org", "$textB")]
+    await adapter._on_room_message(_bare_mention(room_id="!b:example.org", event_id="$textB", **mention))
+    await adapter._on_room_message(_bare_mention(event_id="$full", body="@hermes:example.org what time is it"))
+    assert _dispatched(adapter) == [("!b:example.org", "$textB"), ("!a:example.org", "$full")]
 
-    await adapter._on_room_message(_bare_mention(event_id="$textA"))
-    assert _dispatched(adapter) == [("!b:example.org", "$textB"), ("!a:example.org", "$voice1")]
+    await adapter._on_room_message(_bare_mention(event_id="$textA", **mention))
+    assert _dispatched(adapter)[-1] == ("!a:example.org", "$voice1")
 
 
 @pytest.mark.asyncio

@@ -37,10 +37,10 @@ import shutil
 import subprocess
 import sys
 import time
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 from dataclasses import dataclass, field
 
-from html import escape as _html_escape
+from html import escape as _html_escape, unescape as _html_unescape
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, NamedTuple, Optional, Set
@@ -402,6 +402,8 @@ from hermes_constants import get_hermes_dir as _get_hermes_dir
 _STARTUP_GRACE_SECONDS = 5  # ignore messages older than this many seconds before startup
 _VOICE_CLAIM_WINDOW_SECONDS = 120.0  # a parked unmentioned voice waits this long for a bare @mention
 _MSC3245_VOICE_KEY = "org.matrix.msc3245.voice"
+_BARE_MENTION_FILLER = " \t\r\n:,.;!?"  # left around a mention by composers ("Hermes: ")
+_HTML_ANCHOR_RE = re.compile(r'<a\s[^>]*?href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
 
 
 class _ParkedVoice(NamedTuple):
@@ -2171,9 +2173,8 @@ class MatrixAdapter(BasePlatformAdapter):
             return
         # A bare @mention from the same sender in the same room claims that sender's parked voice,
         # so the reply answers the voice rather than the empty mention text.
-        # (_strip_mention only removes @mention tokens, so a /command never strips to empty.)
         parked = self._pending_voice.get((room_id, sender))
-        if parked and self._content_mentions_bot(body, source_content) and not self._strip_mention(body).strip():
+        if parked and await self._is_bare_bot_mention(room_id, body, source_content):
             del self._pending_voice[(room_id, sender)]
             if time.time() - parked.parked_at <= _VOICE_CLAIM_WINDOW_SECONDS:
                 await self._handle_media_message(
@@ -2911,6 +2912,27 @@ class MatrixAdapter(BasePlatformAdapter):
     def _content_mentions_bot(self, body: str, source_content: dict) -> bool:
         """``_is_bot_mentioned`` over an event's body, formatted_body and ``m.mentions``."""
         return self._is_bot_mentioned(body, source_content.get("formatted_body"), _mention_user_ids(source_content))
+
+    async def _is_bare_bot_mention(self, room_id: str, body: str, source_content: dict) -> bool:
+        """True when the text is nothing but a mention of the bot. An Element pill puts the bot's
+        DISPLAY NAME in ``body`` (the matrix.to link is in formatted_body, the MXID in m.mentions),
+        so when the event itself confirms the pill, the display name / pill text is removed too.
+        A /command never reduces to empty: only mention tokens and filler are removed."""
+        if not self._content_mentions_bot(body, source_content):
+            return False
+        rest = self._strip_mention(body)
+        formatted = unquote(source_content.get("formatted_body") or "")
+        pill_href = f"matrix.to/#/{self._user_id}"
+        confirmed = self._user_id and (
+            self._user_id in (_mention_user_ids(source_content) or []) or pill_href in formatted)
+        if rest.strip(_BARE_MENTION_FILLER) and confirmed:
+            names = {await self._get_display_name(room_id, self._user_id)}
+            names.update(
+                _html_unescape(re.sub(r"<[^>]+>", "", text)) for href, text in _HTML_ANCHOR_RE.findall(formatted)
+                if href.endswith(pill_href))
+            for name in filter(None, (n.strip() for n in names)):
+                rest = re.sub(r"(?<!\w)" + re.escape(name) + r"(?!\w)", "", rest, flags=re.IGNORECASE)
+        return not rest.strip(_BARE_MENTION_FILLER)
 
     def _is_bot_mentioned(
         self, body: str, formatted_body: Optional[str] = None, mention_user_ids: Optional[list] = None) -> bool:
