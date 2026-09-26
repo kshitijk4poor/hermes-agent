@@ -317,31 +317,36 @@ def _resolve_script_path(script_path: str) -> tuple[Optional[Path], Optional[str
     return path, None
 
 
-def _posix_managed_python_invocation(python_exe: str) -> tuple[str, dict[str, str]]:
-    """POSIX managed-install interpreter for cron ``.py`` scripts (#123440).
+def _committed_env_python(repo_root: Path) -> Optional[Path]:
+    """POSIX interpreter of PM's committed dependency environment for cron ``.py`` scripts, or ``None``.
 
-    ``sys.executable`` under the PM runtime is the bare store Python: the sanitizer
-    strips PYTHONPATH and the store ships no third-party packages, so the script dies
-    importing Hermes modules or ``ruamel.yaml``. The committed environment's own
-    interpreter carries its site-packages via ``pyvenv.cfg`` — and, unlike a
-    PYTHONPATH overlay of the dependency site, it leaves every child the script
-    spawns on its own clean environment (a helper on another interpreter must not
-    import this tree's compiled extensions first).
+    Under the PM runtime ``sys.executable`` is the bare store Python: the sanitizer strips
+    PYTHONPATH and the store ships no third-party packages, so a script launched on it dies
+    importing Hermes modules or ``ruamel.yaml`` (#123440). The committed environment's own
+    interpreter carries that environment's site-packages via ``pyvenv.cfg``.
+
+    ``None`` on Windows (its invocation overlays venv paths instead), when no environment is
+    committed or its interpreter is missing or unreadable, and when it already is
+    ``sys.executable``. That last check compares the paths unresolved on purpose: a relocatable
+    uv venv's ``bin/python`` is a symlink to the store interpreter, and Python only honours
+    ``pyvenv.cfg`` when launched through the unresolved venv path.
     """
     if os.name == "nt":
-        return python_exe, {}
-    from cron import scheduler_worker_env
+        return None
+    try:
+        from pm.environments import committed_venv, venv_python
 
-    repo = Path(__file__).resolve().parents[1]
-    managed = scheduler_worker_env.managed_runtime_python(repo)
-    # Never compare resolved paths: a relocatable uv venv's bin/python is a symlink
-    # to the store interpreter (== sys.executable), and Python only honours
-    # pyvenv.cfg when launched through the unresolved venv path.
-    if managed is None:
-        return python_exe, {}
-    # The repo pin is the worker's own #112729 remedy: a stale editable mapping
-    # must not leave ``import cron`` dead on the venv interpreter either.
-    return str(managed), {"PYTHONPATH": str(repo)}
+        venv = committed_venv(repo_root)
+        if venv is None:
+            return None
+        python = venv_python(venv, windows=False)
+    except (RuntimeError, OSError, ValueError, KeyError):
+        # A broken runtime record must not crash the run; the script then fails with its own
+        # ImportError, as it did before this path existed.
+        return None
+    if python == Path(sys.executable) or not python.is_file():
+        return None
+    return python
 
 
 def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optional[str]]:
@@ -362,7 +367,12 @@ def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optio
     python_exe, env_overlay = _windows_cron_python_invocation(sys.executable)
     if env_overlay:
         return _windows_cron_bootstrap_argv(python_exe, env_overlay, str(path)), env_overlay, None
-    python_exe, env_overlay = _posix_managed_python_invocation(python_exe)
+    repo = Path(__file__).resolve().parents[1]
+    managed = _committed_env_python(repo)
+    if managed is not None:
+        # The repo pin is the worker's own #112729 remedy: a stale editable mapping
+        # must not leave ``import cron`` dead on the venv interpreter either.
+        return [str(managed), str(path)], {"PYTHONPATH": str(repo)}, None
     return [python_exe, str(path)], env_overlay, None
 
 
