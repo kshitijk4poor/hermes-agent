@@ -413,6 +413,10 @@ class _ParkedVoice(NamedTuple):
     content: dict
     relates_to: dict
 
+    def live(self, now: float) -> bool:
+        """Still inside the claim window at ``now``."""
+        return now - self.parked_at <= _VOICE_CLAIM_WINDOW_SECONDS
+
 
 def _is_msc3245_voice(msgtype: str, content: dict) -> bool:
     """An ``m.audio`` event is a voice message when it carries a non-null MSC3245 marker."""
@@ -2073,8 +2077,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 if not is_mentioned and _is_msc3245_voice(source_content.get("msgtype", ""), source_content):
                     now = time.time()
                     self._pending_voice = {
-                        k: v for k, v in self._pending_voice.items()
-                        if now - v.parked_at <= _VOICE_CLAIM_WINDOW_SECONDS}
+                        k: v for k, v in self._pending_voice.items() if v.live(now)}
                     self._pending_voice[(room_id, sender)] = _ParkedVoice(event_id, now, source_content, relates_to)
                     logger.debug("Matrix: parked unmentioned voice %s in %s", event_id, room_id)
                     return None
@@ -2176,7 +2179,7 @@ class MatrixAdapter(BasePlatformAdapter):
         parked = self._pending_voice.get((room_id, sender))
         if parked and await self._is_bare_bot_mention(room_id, body, source_content):
             del self._pending_voice[(room_id, sender)]
-            if time.time() - parked.parked_at <= _VOICE_CLAIM_WINDOW_SECONDS:
+            if parked.live(time.time()):
                 await self._handle_media_message(
                     room_id, sender, parked.event_id, time.time(), parked.content, parked.relates_to,
                     "m.audio", mentioned=True)
