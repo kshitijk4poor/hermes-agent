@@ -244,12 +244,16 @@ def offline_file_access(path: Path | str, *, what: str = "read"):
     in between loses its POSIX locks to the raw ``close()``). Held only for the raw I/O."""
     with _live_lock:
         if _is_live_key(path):
-            raise LiveConnectionError(
-                f"Refusing to {what} {path}: a connection to it is still open "
-                "in this process, and raw file access would cancel that "
-                "connection's POSIX advisory locks. Close all database "
-                "handles (stop the gateway/dashboard) and retry.")
+            raise LiveConnectionError(live_connection_refusal(path, what))
         yield
+
+
+def live_connection_refusal(path: Path | str, what: str) -> str:
+    """The user-facing refusal for a raw *what* on a live database (shared by check-only callers)."""
+    return (f"Refusing to {what} {path}: a connection to it is still open "
+            "in this process, and raw file access would cancel that "
+            "connection's POSIX advisory locks. Close all database "
+            "handles (stop the gateway/dashboard) and retry.")
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

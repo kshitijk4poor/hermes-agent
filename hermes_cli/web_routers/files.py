@@ -739,15 +739,13 @@ async def fs_read_data_url(
 async def fs_download(
     path: str, profile: Optional[str] = None, session_id: Optional[str] = None,
 ):
-    from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
+    from hermes_cli.sqlite_safe_read import has_live_connection, live_connection_refusal
     target, _st = _fs_regular_file(await _fs_download_path(path, profile, session_id))
-    try:
-        # The registry lock cannot span a streamed response, so refuse up front:
-        # FileResponse's raw close would cancel this process's SQLite locks.
-        with offline_file_access(target, what="download"):
-            pass
-    except LiveConnectionError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    # The registry lock cannot span a streamed response, so refuse up front:
+    # FileResponse's raw close would cancel this process's SQLite locks. Off the
+    # event loop: _live_lock is a process-wide lock held across raw DB I/O.
+    if await asyncio.to_thread(has_live_connection, target):
+        raise HTTPException(status_code=409, detail=live_connection_refusal(target, "download"))
     return FileResponse(
         path=str(target),
         media_type=_fs_mime_type(target),
