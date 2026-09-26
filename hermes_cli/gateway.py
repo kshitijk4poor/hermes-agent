@@ -1761,13 +1761,7 @@ def _reaper_candidate_is_supervisor_owned(pid: int) -> bool:
 
 
 def _gateway_process_age_s(pid: int) -> float:
-    """Seconds since ``pid`` started, or ``0.0`` when undeterminable (never negative).
-
-    Delegates to the shared dashboard reaper probe instead of re-deriving the
-    psutil/epoch math, and swallows its failure: an unknown age must never widen
-    a reap, so it reads as "too young to touch" under a positive grace (and is
-    irrelevant when the grace is 0).
-    """
+    """Seconds since ``pid`` started; ``0.0`` if unknown so a failed probe never widens a reap."""
     try:
         from hermes_cli.dashboard_procs import _process_age_seconds
 
@@ -1784,13 +1778,8 @@ def _reap_unsupervised_gateway_orphans(
     then lets a live orphan keep the webhook port while a restart stacks a duplicate. No-op where a
     supervisor exists (there ``gateway restart`` is a transient command). ``extra_exclude``: already killed.
 
-    ``min_age_s`` spares a candidate younger than the grace: a gateway claims
-    ``gateway.pid``/``gateway.lock`` only after imports + runner setup, so a process
-    that a previous Desktop generation (or a concurrent ``gateway start``) just launched
-    is scan-visible but not yet record-visible, and the argv sweep cannot tell it from
-    a corpse. Reaping it writes a planned-stop marker it consumes seconds later — a clean
-    exit 0 with no supervisor to revive it (#122533). Only the Desktop boot sweep passes a
-    grace (it is the one caller that races a launch); stop/restart keep reaping at once.
+    ``min_age_s`` spares a still-booting gateway that has not claimed gateway.pid/lock yet
+    (#122533); only the Desktop boot sweep passes it, stop/restart reap at once.
     """
     try:
         supervised_host = supports_systemd_services()
