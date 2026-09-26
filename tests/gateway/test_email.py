@@ -320,29 +320,30 @@ class TestDispatchMessage(unittest.TestCase):
             self.assertEqual(len(captured), 1)
 
     def test_unauthenticated_denied_with_allow_all_when_auth_required(self):
-        """An explicit require_authenticated_sender: true holds under allow-all; authenticated mail still passes."""
+        """An explicit require_authenticated_sender: true (bool or quoted string) holds under allow-all; authenticated mail still passes."""
         import asyncio
-        with patch.dict(os.environ, {"EMAIL_ALLOW_ALL_USERS": "true"}):
-            os.environ.pop("EMAIL_ALLOWED_USERS", None)
-            os.environ.pop("GATEWAY_ALLOWED_USERS", None)
-            adapter = self._make_adapter(extra={"require_authenticated_sender": True})
-            captured = []
+        for value in (True, "true"):
+            with self.subTest(value=value), patch.dict(os.environ, {"EMAIL_ALLOW_ALL_USERS": "true"}):
+                os.environ.pop("EMAIL_ALLOWED_USERS", None)
+                os.environ.pop("GATEWAY_ALLOWED_USERS", None)
+                adapter = self._make_adapter(extra={"require_authenticated_sender": value})
+                captured = []
 
-            async def capture_handle(event):
-                captured.append(event)
+                async def capture_handle(event):
+                    captured.append(event)
 
-            adapter.handle_message = capture_handle
-            msg_data = {
-                "uid": b"204", "sender_addr": "ceo@victim.com", "sender_name": "CEO", "subject": "Re: offer",
-                "message_id": "<forged@victim.com>", "in_reply_to": "", "body": "ACCEPT", "attachments": [],
-                "date": "", "sender_authenticated": False, "auth_reason": "no Authentication-Results header",
-            }
-            asyncio.run(adapter._dispatch_message(msg_data))
-            self.assertEqual(len(captured), 0)
+                adapter.handle_message = capture_handle
+                msg_data = {
+                    "uid": b"204", "sender_addr": "ceo@victim.com", "sender_name": "CEO", "subject": "Re: offer",
+                    "message_id": "<forged@victim.com>", "in_reply_to": "", "body": "ACCEPT", "attachments": [],
+                    "date": "", "sender_authenticated": False, "auth_reason": "no Authentication-Results header",
+                }
+                asyncio.run(adapter._dispatch_message(msg_data))
+                self.assertEqual(len(captured), 0)
 
-            msg_data.update(uid=b"205", message_id="<real@victim.com>", sender_authenticated=True, auth_reason="dkim pass")
-            asyncio.run(adapter._dispatch_message(msg_data))
-            self.assertEqual(len(captured), 1)
+                msg_data.update(uid=b"205", message_id="<real@victim.com>", sender_authenticated=True, auth_reason="dkim pass")
+                asyncio.run(adapter._dispatch_message(msg_data))
+                self.assertEqual(len(captured), 1)
 
 
 class TestDispatchDefersToGatewayAuthorization(unittest.TestCase):

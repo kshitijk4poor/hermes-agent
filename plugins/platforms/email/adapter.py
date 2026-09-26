@@ -357,12 +357,12 @@ class EmailAdapter(BasePlatformAdapter):
         # Require an authenticated From: domain (SPF/DKIM/DMARC) before trusting it for authorization
         # (GHSA-rxqh-5572-8m77). Default ON; opt out via require_authenticated_sender: false / EMAIL_TRUST_FROM_HEADER=true.
         if "require_authenticated_sender" in extra:
-            self._require_authenticated_sender = bool(extra["require_authenticated_sender"])
+            self._require_authenticated_sender = is_truthy_value(extra["require_authenticated_sender"])
         else:
             self._require_authenticated_sender = not _esecret_bool("EMAIL_TRUST_FROM_HEADER", False)
         # Open access skips the check unless the operator explicitly asked for it: a public inbox that keys sessions
         # or downstream authorization on the sender address still needs the From: to be genuine.
-        self._auth_required_under_open_access = extra.get("require_authenticated_sender") is True
+        self._auth_required_under_open_access = "require_authenticated_sender" in extra and self._require_authenticated_sender
         # Optional authserv-id pinning Authentication-Results to the operator's own server (defeats an injected header sorting first).
         self._authserv_id = (extra.get("authserv_id", "") or _get_secret("EMAIL_AUTHSERV_ID", "")).strip().lower()
         self._seen_uids: set = set()
