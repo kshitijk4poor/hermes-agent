@@ -18,6 +18,7 @@ from typing import Awaitable, Callable
 from agent.model_metadata import CHARS_PER_TOKEN, estimate_tokens_rough
 from hermes_cli._subprocess_compat import IS_WINDOWS, harden_git_argv, noninteractive_git_env, windows_hide_flags
 from hermes_cli.sizefmt import format_bytes
+from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
 
 # ── Plugin context-reference provider API ────────────────────────────────────
 
@@ -296,7 +297,6 @@ def _expand_path_reference(ref: ContextReference, cwd: Path, *, allowed_root: Pa
     if is_folder:
         listing = _build_folder_listing(path, cwd, display_base=allowed_root)
         return None, f"📁 {ref.raw} ({estimate_tokens_rough(listing)} tokens)\n{listing}"
-    from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
     try:
         # Keep admission through every sniff, line count and text read: a connection
         # can start between a check and a later open otherwise.
@@ -652,7 +652,6 @@ def _file_metadata(path: Path) -> str:
         return "unknown size"
     # A listing line is a summary, not content: past the cap, byte size conveys the
     # same "how big is this" without a full scan per entry.
-    from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
     try:
         # A directory preview inspects each entry separately; the registry lock
         # must cover both its binary sniff and optional line-count read.

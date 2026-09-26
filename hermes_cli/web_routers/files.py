@@ -25,6 +25,12 @@ from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
 from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli.sqlite_safe_read import (
+    LiveConnectionError,
+    has_live_connection,
+    live_connection_refusal,
+    offline_file_access,
+)
 from hermes_cli.web_deps import late
 from hermes_cli.web_server_files import (
     _fs_path, _managed_file_entry, _managed_response_meta, _resolve_managed_path,
@@ -176,7 +182,6 @@ def _fs_regular_file(path: Path) -> tuple[Path, os.stat_result]:
 
 def _fs_read_bytes(target: Path, limit: Optional[int] = None) -> bytes:
     """Read (a prefix of) ``target``; 403/400 on failure."""
-    from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
     try:
         # Keep admission through close; a raw close cancels this process's SQLite locks.
         with offline_file_access(target, what="preview file"):
@@ -739,7 +744,6 @@ async def fs_read_data_url(
 async def fs_download(
     path: str, profile: Optional[str] = None, session_id: Optional[str] = None,
 ):
-    from hermes_cli.sqlite_safe_read import has_live_connection, live_connection_refusal
     target, _st = _fs_regular_file(await _fs_download_path(path, profile, session_id))
     # The registry lock cannot span a streamed response, so refuse up front:
     # FileResponse's raw close would cancel this process's SQLite locks. Off the
