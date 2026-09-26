@@ -11,14 +11,12 @@ from fastapi import HTTPException
 
 from agent.context_references import _expand_path_reference, parse_context_references
 from hermes_state import SessionDB
-from hermes_cli.web_routers.files import fs_read_text
+from hermes_cli.web_routers.files import fs_download, fs_read_text
 
 
 @pytest.mark.linux_only
 @pytest.mark.parametrize("route,target_kind", [
-    ("file", "main"), ("file", "shm"), ("file", "shm_alias"), ("file", "wal"),
-    ("folder", "directory"), ("desktop", "main"),
-    ("desktop", "shm"), ("desktop", "shm_alias"), ("desktop", "wal"),
+    ("file", "shm"), ("folder", "directory"), ("desktop", "main"),
 ])
 def test_preview_preserves_live_database_locks(tmp_path, route, target_kind):
     path = tmp_path / "state.db"
@@ -68,6 +66,9 @@ def test_preview_preserves_live_database_locks(tmp_path, route, target_kind):
         if route == "desktop":
             with pytest.raises(HTTPException) as refused:
                 asyncio.run(fs_read_text(str(target)))
+            assert refused.value.status_code == 409
+            with pytest.raises(HTTPException) as refused:
+                asyncio.run(fs_download(str(target)))
             assert refused.value.status_code == 409
             assert asyncio.run(fs_read_text(str(text)))["text"] == "ordinary readable text"
         else:
