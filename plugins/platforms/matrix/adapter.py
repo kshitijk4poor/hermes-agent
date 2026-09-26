@@ -1814,7 +1814,7 @@ class MatrixAdapter(BasePlatformAdapter):
         else:
             msg_content["url"] = str(mxc_url)
         if is_voice:  # MSC3245 native voice flag + MSC1767 audio metadata
-            msg_content["org.matrix.msc3245.voice"] = {}
+            msg_content[_MSC3245_VOICE_KEY] = {}
             audio_metadata = {
                 k: v for k in ("duration", "waveform") if (v := (voice_metadata or {}).get(k)) is not None}
             if "duration" in audio_metadata:
