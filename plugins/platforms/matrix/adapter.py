@@ -2923,8 +2923,7 @@ class MatrixAdapter(BasePlatformAdapter):
         rest = self._strip_mention(body)
         formatted = unquote(source_content.get("formatted_body") or "")
         pill_href = f"matrix.to/#/{self._user_id}"
-        confirmed = self._user_id and (
-            self._user_id in (_mention_user_ids(source_content) or []) or pill_href in formatted)
+        confirmed = self._user_id in (_mention_user_ids(source_content) or []) or self._links_to_bot(formatted)
         if rest.strip(_BARE_MENTION_FILLER) and confirmed:
             names = {await self._get_display_name(room_id, self._user_id)}
             names.update(
@@ -2947,7 +2946,11 @@ class MatrixAdapter(BasePlatformAdapter):
         localpart = self._user_localpart()
         if localpart and re.search(r"\b" + re.escape(localpart) + r"\b", body, re.IGNORECASE):
             return True
-        return bool(formatted_body and self._user_id and f"matrix.to/#/{self._user_id}" in formatted_body)
+        return self._links_to_bot(formatted_body)
+
+    def _links_to_bot(self, formatted_body: Optional[str]) -> bool:
+        """True if formatted_body carries a matrix.to pill for the bot, percent-encoded or not."""
+        return bool(formatted_body and self._user_id and f"matrix.to/#/{self._user_id}" in unquote(formatted_body))
 
     def _user_localpart(self) -> str:
         """``@bot:server`` -> ``bot``; empty when the user ID has no server part."""
