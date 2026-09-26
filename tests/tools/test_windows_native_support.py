@@ -695,7 +695,7 @@ class TestCronSchedulerBashResolution:
         monkeypatch.setattr(scheduler_script.shutil, "which",
                             lambda name: found if name == "bash" else None)
 
-        argv, _overlay, error = scheduler_script._script_argv(script)
+        argv, _overlay, _pin, error = scheduler_script._script_argv(script)
 
         assert error is None
         assert argv == [found, str(script)]
@@ -710,7 +710,7 @@ class TestCronSchedulerBashResolution:
         monkeypatch.setattr(scheduler_script.os.path, "isfile",
                             lambda p: False if p == "/bin/bash" else real_isfile(p))
 
-        argv, _overlay, error = scheduler_script._script_argv(script)
+        argv, _overlay, _pin, error = scheduler_script._script_argv(script)
 
         assert argv is None
         assert "bash not found" in error

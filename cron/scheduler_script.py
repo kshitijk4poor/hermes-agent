@@ -349,8 +349,10 @@ def _committed_env_python(repo_root: Path) -> Optional[Path]:
     return python
 
 
-def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optional[str]]:
-    """``(argv, env_overlay, error)`` for a validated script. Interpreter by extension — the
+def _script_argv(
+    path: Path,
+) -> tuple[Optional[list[str]], dict[str, str], Optional[Path], Optional[str]]:
+    """``(argv, env_overlay, pin_repo, error)`` for a validated script. Interpreter by extension — the
     shebang is deliberately NOT honoured (small, auditable surface): ``.sh``/``.bash`` → bash,
     else ``sys.executable`` (Windows uv-venv overlay gets the .pth bootstrap; a POSIX
     managed install runs the committed environment's interpreter)."""
@@ -358,22 +360,22 @@ def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optio
         # which() finds Git Bash on Windows; None there → clear error instead of a "[WinError 2]".
         _bash = shutil.which("bash") or ("/bin/bash" if os.path.isfile("/bin/bash") else None)
         if _bash is None:
-            return None, {}, (
+            return None, {}, None, (
                 f"Cannot run .sh/.bash script {path.name!r}: bash not found on PATH. "
                 "On Windows, install Git for Windows (which ships Git Bash) "
                 "or rewrite the script as Python (.py)."
             )
-        return [_bash, str(path)], {}, None
+        return [_bash, str(path)], {}, None, None
     python_exe, env_overlay = _windows_cron_python_invocation(sys.executable)
     if env_overlay:
-        return _windows_cron_bootstrap_argv(python_exe, env_overlay, str(path)), env_overlay, None
+        return _windows_cron_bootstrap_argv(python_exe, env_overlay, str(path)), env_overlay, None, None
     repo = Path(__file__).resolve().parents[1]
     managed = _committed_env_python(repo)
     if managed is not None:
-        # The repo pin is the worker's own #112729 remedy: a stale editable mapping
-        # must not leave ``import cron`` dead on the venv interpreter either.
-        return [str(managed), str(path)], {"PYTHONPATH": str(repo)}, None
-    return [python_exe, str(path)], env_overlay, None
+        # *pin_repo*: the worker's own #112729 remedy, applied to the built env by the
+        # caller so a stale editable mapping cannot leave ``import cron`` dead here either.
+        return [str(managed), str(path)], {}, repo, None
+    return [python_exe, str(path)], env_overlay, None, None
 
 
 def _run_job_script(
@@ -394,7 +396,7 @@ def _run_job_script(
     if path is None:
         return False, err
     script_timeout = _get_script_timeout()
-    argv, env_overlay, err = _script_argv(path)
+    argv, env_overlay, pin_repo, err = _script_argv(path)
     if argv is None:
         return False, err
 
@@ -426,6 +428,12 @@ def _run_job_script(
         # process env itself — no raw copy at the spawn site (test_subprocess_env_guard).
         env = build_subprocess_env(strip_launch_profile=True)
         env.update(env_overlay)
+        if pin_repo is not None:
+            # Prepend (never replace) so a PYTHONPATH the job env already carries survives;
+            # skipped when the tree is the interpreter's own purelib (wheel installs).
+            from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
+
+            pin_hermes_tree_on_pythonpath(env, pin_repo)
         # Subprocess cwd only (default: scripts-dir parent). NEVER os.chdir() the process.
         # Use the job's workdir as the subprocess cwd when configured, otherwise default to the scripts-dir
         # parent (back-compat). NEVER mutate the Python process cwd — that would leak into concurrent

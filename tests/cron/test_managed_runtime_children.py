@@ -27,8 +27,8 @@ def test_py_script_runs_on_committed_environment_interpreter(tmp_path, monkeypat
     repo = Path(pe.__file__).resolve().parents[1]
 
     monkeypatch.setattr(pe, "committed_venv", lambda root: venv)
-    assert _script_argv(script) == ([str(python), str(script)], {"PYTHONPATH": str(repo)}, None)
+    assert _script_argv(script) == ([str(python), str(script)], {}, repo, None)
 
     # No committed generation (source checkout, pre-PM venv): unchanged launch.
     monkeypatch.setattr(pe, "committed_venv", lambda root: None)
-    assert _script_argv(script) == ([sys.executable, str(script)], {}, None)
+    assert _script_argv(script) == ([sys.executable, str(script)], {}, None, None)
