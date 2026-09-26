@@ -653,7 +653,7 @@ class EmailAdapter(BasePlatformAdapter):
                 return False
             if self._open_access() and not self._auth_required_under_open_access:
                 return True
-            logger.warning("[Email] Dropping sender with unauthenticated From: %s (%s). If your mail server does not "
+            (logger.debug if self._open_access() else logger.warning)("[Email] Dropping sender with unauthenticated From: %s (%s). If your mail server does not "
                            "stamp Authentication-Results, set platforms.email.require_authenticated_sender: false "
                            "(or EMAIL_TRUST_FROM_HEADER=true) to accept the risk.",
                            sender_addr, msg_data.get("auth_reason", "no verdict"))
