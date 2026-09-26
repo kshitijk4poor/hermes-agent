@@ -320,9 +320,9 @@ class TestDispatchMessage(unittest.TestCase):
             self.assertEqual(len(captured), 1)
 
     def test_unauthenticated_denied_with_allow_all_when_auth_required(self):
-        """An explicit require_authenticated_sender: true (bool or quoted string) holds under allow-all; authenticated mail still passes."""
+        """An explicit require_authenticated_sender: true (bool, quoted string, or unrecognized garbage) holds under allow-all; authenticated mail still passes."""
         import asyncio
-        for value in (True, "true"):
+        for value in (True, "true", "ture"):
             with self.subTest(value=value), patch.dict(os.environ, {"EMAIL_ALLOW_ALL_USERS": "true"}):
                 os.environ.pop("EMAIL_ALLOWED_USERS", None)
                 os.environ.pop("GATEWAY_ALLOWED_USERS", None)

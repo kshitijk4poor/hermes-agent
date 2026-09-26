@@ -27,7 +27,7 @@ from gateway.platforms.base import (
 )
 from gateway.platforms.helpers import cancel_task
 from gateway.platforms.event import MessageEvent, MessageType
-from gateway.config import Platform, PlatformConfig
+from gateway.config import Platform, PlatformConfig, _bool_token
 from utils import is_truthy_value
 from gateway.platforms._shared import get_scoped_secret as _get_secret, coerce_port, decode_json_list_literal, send_error
 
@@ -356,8 +356,9 @@ class EmailAdapter(BasePlatformAdapter):
         self._skip_attachments = extra.get("skip_attachments", False)  # platforms.email.skip_attachments
         # Require an authenticated From: domain (SPF/DKIM/DMARC) before trusting it for authorization
         # (GHSA-rxqh-5572-8m77). Default ON; opt out via require_authenticated_sender: false / EMAIL_TRUST_FROM_HEADER=true.
+        # Fail closed: only an explicit false token disables it; unrecognized strings ("ture", "enabled") keep it on.
         if "require_authenticated_sender" in extra:
-            self._require_authenticated_sender = is_truthy_value(extra["require_authenticated_sender"])
+            self._require_authenticated_sender = _bool_token(extra["require_authenticated_sender"]) is not False
         else:
             self._require_authenticated_sender = not _esecret_bool("EMAIL_TRUST_FROM_HEADER", False)
         # Open access skips the check unless the operator explicitly asked for it: a public inbox that keys sessions
