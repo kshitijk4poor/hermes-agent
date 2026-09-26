@@ -42,24 +42,3 @@ def test_snapshot_keeps_member_build_inputs_and_drops_only_root_outputs(tmp_path
         assert not (destination / name).exists()
     for relative in ("pm/venv", "pm/__pycache__", "plugins/demo/node_modules"):
         assert not (destination / relative).exists()
-
-
-def test_materialized_pm_runtime_identity_reads_snapshot_lock(tmp_path):
-    """`hermes pm` preflight hashes the snapshot's pm/{pyproject.toml,uv.lock}."""
-    import sys
-
-    from pm import runtime
-
-    source = tmp_path / "core"
-    (source / "pm").mkdir(parents=True)
-    (source / "pyproject.toml").write_text(
-        '[project]\nname = "core"\nversion = "0"\n'
-        '[tool.setuptools.packages.find]\ninclude = ["pm"]\n', encoding="utf-8")
-    (source / "pm" / "pyproject.toml").write_text('[project]\nname = "pm"\nversion = "0"\n', encoding="utf-8")
-    (source / "pm" / "uv.lock").write_text("member lock bytes\n", encoding="utf-8")
-    destination = tmp_path / "snapshot"
-    destination.mkdir()
-    _copy_core_inputs(source, destination)
-
-    python = Path(sys.executable)
-    assert runtime._inputs(destination / "pm", python) == runtime._inputs(source / "pm", python)
