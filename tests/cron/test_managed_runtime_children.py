@@ -5,6 +5,7 @@ sanitizer strips PYTHONPATH, so a script spawned on it cannot import Hermes modu
 or managed dependencies. The committed environment's own interpreter carries its
 site-packages via ``pyvenv.cfg``.
 """
+import os
 import sys
 from pathlib import Path
 
@@ -21,7 +22,8 @@ def test_py_script_runs_on_committed_environment_interpreter(tmp_path, monkeypat
     venv = tmp_path / "gen1" / "venv"
     python = pe.venv_python(venv, windows=False)
     python.parent.mkdir(parents=True)
-    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    # uv's relocatable venv layout: bin/python is a symlink to the store interpreter.
+    os.symlink(sys.executable, python)
     repo = Path(pe.__file__).resolve().parents[1]
 
     monkeypatch.setattr(pe, "committed_venv", lambda root: venv)

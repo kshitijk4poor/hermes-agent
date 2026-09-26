@@ -334,7 +334,10 @@ def _posix_managed_python_invocation(python_exe: str) -> tuple[str, dict[str, st
 
     repo = Path(__file__).resolve().parents[1]
     managed = scheduler_worker_env.managed_runtime_python(repo)
-    if managed is None or Path(managed).resolve() == Path(python_exe).resolve():
+    # Never compare resolved paths: a relocatable uv venv's bin/python is a symlink
+    # to the store interpreter (== sys.executable), and Python only honours
+    # pyvenv.cfg when launched through the unresolved venv path.
+    if managed is None:
         return python_exe, {}
     # The repo pin is the worker's own #112729 remedy: a stale editable mapping
     # must not leave ``import cron`` dead on the venv interpreter either.
