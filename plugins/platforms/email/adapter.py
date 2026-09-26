@@ -360,6 +360,9 @@ class EmailAdapter(BasePlatformAdapter):
             self._require_authenticated_sender = bool(extra["require_authenticated_sender"])
         else:
             self._require_authenticated_sender = not _esecret_bool("EMAIL_TRUST_FROM_HEADER", False)
+        # Open access skips the check unless the operator explicitly asked for it: a public inbox that keys sessions
+        # or downstream authorization on the sender address still needs the From: to be genuine.
+        self._auth_required_under_open_access = extra.get("require_authenticated_sender") is True
         # Optional authserv-id pinning Authentication-Results to the operator's own server (defeats an injected header sorting first).
         self._authserv_id = (extra.get("authserv_id", "") or _get_secret("EMAIL_AUTHSERV_ID", "")).strip().lower()
         self._seen_uids: set = set()
@@ -648,7 +651,7 @@ class EmailAdapter(BasePlatformAdapter):
                 logger.debug("[Email] Not answering unknown sender with unauthenticated From: %s (%s)",
                              sender_addr, msg_data.get("auth_reason", "no verdict"))
                 return False
-            if self._open_access():
+            if self._open_access() and not self._auth_required_under_open_access:
                 return True
             logger.warning("[Email] Dropping sender with unauthenticated From: %s (%s). If your mail server does not "
                            "stamp Authentication-Results, set platforms.email.require_authenticated_sender: false "

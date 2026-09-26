@@ -122,7 +122,7 @@ class TestDispatchMessage(unittest.TestCase):
         else:
             os.environ["EMAIL_ALLOW_ALL_USERS"] = self._prev_allow_all
 
-    def _make_adapter(self):
+    def _make_adapter(self, extra=None):
         """Create an EmailAdapter with mocked env vars."""
         from gateway.config import PlatformConfig
         with patch.dict(os.environ, {
@@ -135,7 +135,7 @@ class TestDispatchMessage(unittest.TestCase):
             "EMAIL_POLL_INTERVAL": "15",
         }):
             from plugins.platforms.email.adapter import EmailAdapter
-            adapter = EmailAdapter(PlatformConfig(enabled=True))
+            adapter = EmailAdapter(PlatformConfig(enabled=True, extra=extra or {}))
         return adapter
 
     def test_self_message_filtered(self):
@@ -316,6 +316,31 @@ class TestDispatchMessage(unittest.TestCase):
                 "auth_reason": "no Authentication-Results header",
             }
 
+            asyncio.run(adapter._dispatch_message(msg_data))
+            self.assertEqual(len(captured), 1)
+
+    def test_unauthenticated_denied_with_allow_all_when_auth_required(self):
+        """An explicit require_authenticated_sender: true holds under allow-all; authenticated mail still passes."""
+        import asyncio
+        with patch.dict(os.environ, {"EMAIL_ALLOW_ALL_USERS": "true"}):
+            os.environ.pop("EMAIL_ALLOWED_USERS", None)
+            os.environ.pop("GATEWAY_ALLOWED_USERS", None)
+            adapter = self._make_adapter(extra={"require_authenticated_sender": True})
+            captured = []
+
+            async def capture_handle(event):
+                captured.append(event)
+
+            adapter.handle_message = capture_handle
+            msg_data = {
+                "uid": b"204", "sender_addr": "ceo@victim.com", "sender_name": "CEO", "subject": "Re: offer",
+                "message_id": "<forged@victim.com>", "in_reply_to": "", "body": "ACCEPT", "attachments": [],
+                "date": "", "sender_authenticated": False, "auth_reason": "no Authentication-Results header",
+            }
+            asyncio.run(adapter._dispatch_message(msg_data))
+            self.assertEqual(len(captured), 0)
+
+            msg_data.update(uid=b"205", message_id="<real@victim.com>", sender_authenticated=True, auth_reason="dkim pass")
             asyncio.run(adapter._dispatch_message(msg_data))
             self.assertEqual(len(captured), 1)
 
