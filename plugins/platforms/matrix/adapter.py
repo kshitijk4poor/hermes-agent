@@ -400,6 +400,7 @@ def _resolve_max_message_length(config) -> int:
 from hermes_constants import get_hermes_dir as _get_hermes_dir
 
 _STARTUP_GRACE_SECONDS = 5  # ignore messages older than this many seconds before startup
+_VOICE_CLAIM_WINDOW_SECONDS = 120.0  # a parked unmentioned voice waits this long for a bare @mention
 
 _OUTBOUND_MENTION_RE = re.compile(r"(?<![\w/])(@[0-9A-Za-z._=/-]+:[0-9A-Za-z.-]+(?::\d+)?)")
 
@@ -871,6 +872,10 @@ class MatrixAdapter(BasePlatformAdapter):
         self._processed_events: deque = deque(maxlen=1000)  # event dedup, newest kept
         self._processed_events_set: set = set()
         self._threads = ThreadParticipationTracker("matrix")  # require_mention bypass
+        # (room_id, sender) -> (event_id, parked_at, source_content, relates_to): unmentioned voices
+        # waiting for the bare @mention Element sends as a separate event; claimed ids pass the gate once.
+        self._pending_voice: Dict[tuple, tuple] = {}
+        self._claimed_voice_events: Set[str] = set()
         self._require_mention: bool = self._parse_require_mention(config)
         self._thread_require_mention: bool = self._parse_thread_require_mention(config)
         self._free_rooms: Set[str] = _extra_csv_set(config, "free_response_rooms", "MATRIX_FREE_RESPONSE_ROOMS")
@@ -2037,6 +2042,9 @@ class MatrixAdapter(BasePlatformAdapter):
         mentions_block = source_content.get("m.mentions") or {}  # MSC3952: authoritative signal
         mention_user_ids = mentions_block.get("user_ids") if isinstance(mentions_block, dict) else None
         is_mentioned = self._is_bot_mentioned(body, formatted_body, mention_user_ids)
+        # MSC3245 voice always carries m.mentions:{}; a mention typed while recording arrives as a
+        # SEPARATE m.text event, so an unmentioned voice is parked instead of dropped.
+        is_voice_event = source_content.get("msgtype") == "m.audio" and "org.matrix.msc3245.voice" in source_content
         if not is_dm:
             # Whitelist first: non-listed rooms are dropped even when @mentioned (DMs exempt).
             if self._allowed_rooms and room_id not in self._allowed_rooms:
@@ -2046,7 +2054,18 @@ class MatrixAdapter(BasePlatformAdapter):
             is_free_room = room_id in self._free_rooms
             in_bot_thread = bool(thread_id and thread_id in self._threads)
             if self._require_mention and not is_free_room and not in_bot_thread:
-                if not is_mentioned and not body.startswith("/"):
+                if is_voice_event and not is_mentioned:
+                    if event_id in self._claimed_voice_events:
+                        self._claimed_voice_events.discard(event_id)
+                    else:
+                        now = time.time()
+                        self._pending_voice = {
+                            k: v for k, v in self._pending_voice.items()
+                            if now - v[1] <= _VOICE_CLAIM_WINDOW_SECONDS}
+                        self._pending_voice[(room_id, sender)] = (event_id, now, source_content, relates_to)
+                        logger.debug("Matrix: parked unmentioned voice %s in %s", event_id, room_id)
+                        return None
+                elif not is_mentioned and not body.startswith("/"):
                     logger.debug(
                         "Matrix: ignoring message %s in %s — no @mention "
                         "(set MATRIX_REQUIRE_MENTION=false to disable)", event_id, room_id)
@@ -2139,6 +2158,25 @@ class MatrixAdapter(BasePlatformAdapter):
         body = source_content.get("body", "") or ""
         if not body:
             return
+        # A bare @mention from the same sender in the same room claims that sender's parked voice,
+        # so the reply answers the voice rather than the empty mention text.
+        parked = self._pending_voice.get((room_id, sender))
+        mentions_block = source_content.get("m.mentions") or {}
+        mention_user_ids = mentions_block.get("user_ids") if isinstance(mentions_block, dict) else None
+        if (
+            parked
+            and not body.startswith("/")
+            and self._is_bot_mentioned(body, source_content.get("formatted_body"), mention_user_ids)
+            and not self._strip_mention(body).strip()
+        ):
+            del self._pending_voice[(room_id, sender)]
+            voice_event_id, parked_at, voice_content, voice_relates = parked
+            if time.time() - parked_at <= _VOICE_CLAIM_WINDOW_SECONDS:
+                self._claimed_voice_events.add(voice_event_id)
+                await self._handle_media_message(
+                    room_id, sender, voice_event_id, time.time(), voice_content, voice_relates,
+                    voice_content.get("msgtype", "m.audio"))
+                return
         msg_event = await self._build_inbound_event(
             room_id, sender, event_id, _normalize_matrix_bang_command(body), source_content, relates_to)
         if msg_event is None:
