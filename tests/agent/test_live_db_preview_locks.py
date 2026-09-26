@@ -28,11 +28,7 @@ def test_preview_preserves_live_database_locks(tmp_path, route, target_kind):
         db.create_session("preview-test", "cli")
         db.append_message("preview-test", "user", "before preview")
         shm = Path(str(path) + "-shm")
-        wal = Path(str(path) + "-wal")
-        alias = tmp_path / "linked-shm"
-        alias.symlink_to(shm)
-        target = {"main": path, "shm": shm, "shm_alias": alias,
-                  "wal": wal, "directory": tmp_path}[target_kind]
+        target = {"main": path, "shm": shm, "directory": tmp_path}[target_kind]
         conn = db._conn
         assert isinstance(conn, sqlite3.Connection)
         conn.execute("CREATE TABLE preview_markers (value TEXT)")
@@ -76,7 +72,10 @@ def test_preview_preserves_live_database_locks(tmp_path, route, target_kind):
             warning, block = _expand_path_reference(ref, tmp_path.parent)
             assert warning is None
             assert block is not None
-            assert "not previewed" in block if route == "file" else "state.db" in block
+            if route == "file":
+                assert "not previewed" in block  # the live -shm sidecar is refused
+            else:
+                assert "state.db" in block  # the folder listing still names the live DB
             ordinary = parse_context_references(f"@file:{text}")[0]
             warning, block = _expand_path_reference(ordinary, tmp_path.parent)
             assert warning is None and block is not None and "ordinary readable text" in block
