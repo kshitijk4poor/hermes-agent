@@ -48,6 +48,10 @@ def _voice_event(room_id="!a:example.org", event_id="$voice1"):
 # Element's pill: body is the bot's display name, the link lives only in formatted_body.
 _PILL = {"body": "Hermes: ", "format": "org.matrix.custom.html",
          "formatted_body": '<a href="https://matrix.to/#/@hermes:example.org">Hermes</a>: '}
+# Spec-encoded pill with no m.mentions, and a display name that doesn't contain the localpart:
+# only the percent-decoded link can mark it as a mention.
+_ENCODED_PILL = {"body": "Botty: ", "format": "org.matrix.custom.html", "m.mentions": {},
+                 "formatted_body": '<a href="https://matrix.to/#/%40hermes%3Aexample.org">Botty</a>: '}
 
 
 def _bare_mention(room_id="!a:example.org", event_id="$text1", body="@hermes:example.org", **extra):
@@ -63,11 +67,12 @@ def _dispatched(adapter):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mention", [{}, _PILL], ids=["mxid", "pill"])
+@pytest.mark.parametrize("mention", [{}, _PILL, _ENCODED_PILL], ids=["mxid", "pill", "encoded_pill"])
 async def test_bare_mention_claims_parked_voice(monkeypatch, mention):
     """Only a bare mention (typed MXID or Element pill) in the voice's own room claims it; another
     room's mention and a mention with a question are plain text."""
     adapter = _make_adapter(monkeypatch)
+    adapter._get_display_name = AsyncMock(return_value="Botty")
 
     await adapter._on_room_message(_voice_event())
     await adapter._on_room_message(_bare_mention(room_id="!b:example.org", event_id="$textB", **mention))
