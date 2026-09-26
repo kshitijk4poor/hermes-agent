@@ -20,11 +20,12 @@ from pm import paths
 from pm.package import InstallError
 from pm.plugin_declarations import read_python_declaration, manifest_version_error
 
-# _JUNK is excluded at every depth. Root outputs and its lock are excluded by
-# the curated source.iterdir()/files selection; below the root, output-like
-# names such as pm/uv.lock and dashboard/dist are build inputs.
+# _JUNK is excluded at every depth. _ROOT_OUTPUTS only filters top-level
+# directories; the root uv.lock stays out because root files come from a fixed
+# list. Below the root, output-like names such as pm/uv.lock and dashboard/dist
+# are build inputs.
 _JUNK = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"})
-_ROOT_OUTPUTS = frozenset({"build", "dist", "release", "uv.lock"})
+_ROOT_OUTPUTS = frozenset({"build", "dist", "release"})
 
 
 def _member_ignored(directory, names):
