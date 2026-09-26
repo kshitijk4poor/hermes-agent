@@ -90,8 +90,9 @@ def _copy_core_inputs(source: Path, destination: Path) -> None:
     root_excluded = _JUNK | _ROOT_OUTPUTS
 
     def ignore(directory, names):
-        return [name for name in names if name in _JUNK or name.startswith(".")
-                or name.endswith(".egg-info") or (Path(directory) / name).is_symlink()]
+        return _member_ignored(directory, names) + [
+            name for name in names
+            if name.startswith(".") or (Path(directory) / name).is_symlink()]
 
     for entry in source.iterdir():
         if (entry.is_dir() and not entry.is_symlink() and entry.name not in root_excluded
