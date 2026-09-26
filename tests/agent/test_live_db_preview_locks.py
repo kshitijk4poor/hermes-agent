@@ -14,7 +14,7 @@ from hermes_state import SessionDB
 from hermes_cli.web_routers.files import fs_download, fs_read_text
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("route,target_kind", [
     ("file", "shm"), ("folder", "directory"), ("desktop", "main"),
 ])
