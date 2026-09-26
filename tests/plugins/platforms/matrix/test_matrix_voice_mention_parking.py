@@ -72,13 +72,13 @@ async def test_bare_mention_claims_parked_voice(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_expired_parked_voice_is_not_dispatched(monkeypatch):
-    """Past the claim window the parked voice is dropped and never dispatched."""
+    """Past the claim window the parked voice is dropped; the mention is handled as plain text."""
+    import plugins.platforms.matrix.adapter as adapter_mod
+
     adapter = _make_adapter(monkeypatch)
     await adapter._on_room_message(_voice_event())
-    key = ("!a:example.org", "@alice:example.org")
-    event_id, _parked_at, content, relates = adapter._pending_voice[key]
-    adapter._pending_voice[key] = (event_id, time.time() - 121, content, relates)
+    monkeypatch.setattr(adapter_mod, "_VOICE_CLAIM_WINDOW_SECONDS", -1)
 
     await adapter._on_room_message(_bare_mention())
 
-    assert ("!a:example.org", "$voice1") not in _dispatched(adapter)
+    assert _dispatched(adapter) == [("!a:example.org", "$text1")]

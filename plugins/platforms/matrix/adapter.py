@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from html import escape as _html_escape
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, NamedTuple, Optional, Set
 
 from agent.secret_scope import get_secret
 from gateway.platforms._shared import (
@@ -401,6 +401,26 @@ from hermes_constants import get_hermes_dir as _get_hermes_dir
 
 _STARTUP_GRACE_SECONDS = 5  # ignore messages older than this many seconds before startup
 _VOICE_CLAIM_WINDOW_SECONDS = 120.0  # a parked unmentioned voice waits this long for a bare @mention
+_MSC3245_VOICE_KEY = "org.matrix.msc3245.voice"
+
+
+class _ParkedVoice(NamedTuple):
+    """An unmentioned voice waiting for the bare @mention Element sends as a separate event."""
+    event_id: str
+    parked_at: float
+    content: dict
+    relates_to: dict
+
+
+def _is_msc3245_voice(msgtype: str, content: dict) -> bool:
+    """An ``m.audio`` event is a voice message when it carries a non-null MSC3245 marker."""
+    return msgtype == "m.audio" and content.get(_MSC3245_VOICE_KEY) is not None
+
+
+def _mention_user_ids(content: dict) -> Optional[list]:
+    """``m.mentions.user_ids`` (MSC3952), or None when the block is absent/malformed."""
+    mentions_block = content.get("m.mentions") or {}
+    return mentions_block.get("user_ids") if isinstance(mentions_block, dict) else None
 
 _OUTBOUND_MENTION_RE = re.compile(r"(?<![\w/])(@[0-9A-Za-z._=/-]+:[0-9A-Za-z.-]+(?::\d+)?)")
 
@@ -872,10 +892,7 @@ class MatrixAdapter(BasePlatformAdapter):
         self._processed_events: deque = deque(maxlen=1000)  # event dedup, newest kept
         self._processed_events_set: set = set()
         self._threads = ThreadParticipationTracker("matrix")  # require_mention bypass
-        # (room_id, sender) -> (event_id, parked_at, source_content, relates_to): unmentioned voices
-        # waiting for the bare @mention Element sends as a separate event; claimed ids pass the gate once.
-        self._pending_voice: Dict[tuple, tuple] = {}
-        self._claimed_voice_events: Set[str] = set()
+        self._pending_voice: Dict[tuple, _ParkedVoice] = {}  # (room_id, sender) -> parked voice
         self._require_mention: bool = self._parse_require_mention(config)
         self._thread_require_mention: bool = self._parse_thread_require_mention(config)
         self._free_rooms: Set[str] = _extra_csv_set(config, "free_response_rooms", "MATRIX_FREE_RESPONSE_ROOMS")
@@ -2031,20 +2048,15 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _resolve_message_context(
         self, room_id: str, sender: str, event_id: str, body: str, source_content: dict,
-        relates_to: dict) -> Optional[tuple]:
+        relates_to: dict, mentioned: bool = False) -> Optional[tuple]:
         """Shared mention/thread/DM gating. Returns (body, is_dm, chat_type, thread_id,
-        display_name, source) or None when the message should be dropped."""
+        display_name, source) or None when the message should be dropped. ``mentioned`` marks a
+        voice claimed by a separate bare @mention; it still passes the room/thread gates below."""
         identity = await self._resolve_room_identity(room_id)
         is_dm = await self._is_dm_room(room_id)
         chat_type = "dm" if is_dm else "group"
         thread_id = relates_to.get("event_id") if relates_to.get("rel_type") == "m.thread" else None
-        formatted_body = source_content.get("formatted_body")
-        mentions_block = source_content.get("m.mentions") or {}  # MSC3952: authoritative signal
-        mention_user_ids = mentions_block.get("user_ids") if isinstance(mentions_block, dict) else None
-        is_mentioned = self._is_bot_mentioned(body, formatted_body, mention_user_ids)
-        # MSC3245 voice always carries m.mentions:{}; a mention typed while recording arrives as a
-        # SEPARATE m.text event, so an unmentioned voice is parked instead of dropped.
-        is_voice_event = source_content.get("msgtype") == "m.audio" and "org.matrix.msc3245.voice" in source_content
+        is_mentioned = mentioned or self._content_mentions_bot(body, source_content)
         if not is_dm:
             # Whitelist first: non-listed rooms are dropped even when @mentioned (DMs exempt).
             if self._allowed_rooms and room_id not in self._allowed_rooms:
@@ -2054,18 +2066,17 @@ class MatrixAdapter(BasePlatformAdapter):
             is_free_room = room_id in self._free_rooms
             in_bot_thread = bool(thread_id and thread_id in self._threads)
             if self._require_mention and not is_free_room and not in_bot_thread:
-                if is_voice_event and not is_mentioned:
-                    if event_id in self._claimed_voice_events:
-                        self._claimed_voice_events.discard(event_id)
-                    else:
-                        now = time.time()
-                        self._pending_voice = {
-                            k: v for k, v in self._pending_voice.items()
-                            if now - v[1] <= _VOICE_CLAIM_WINDOW_SECONDS}
-                        self._pending_voice[(room_id, sender)] = (event_id, now, source_content, relates_to)
-                        logger.debug("Matrix: parked unmentioned voice %s in %s", event_id, room_id)
-                        return None
-                elif not is_mentioned and not body.startswith("/"):
+                # MSC3245 voice always carries m.mentions:{}; a mention typed while recording arrives
+                # as a SEPARATE m.text event, so an unmentioned voice is parked instead of dropped.
+                if not is_mentioned and _is_msc3245_voice(source_content.get("msgtype", ""), source_content):
+                    now = time.time()
+                    self._pending_voice = {
+                        k: v for k, v in self._pending_voice.items()
+                        if now - v.parked_at <= _VOICE_CLAIM_WINDOW_SECONDS}
+                    self._pending_voice[(room_id, sender)] = _ParkedVoice(event_id, now, source_content, relates_to)
+                    logger.debug("Matrix: parked unmentioned voice %s in %s", event_id, room_id)
+                    return None
+                if not is_mentioned and not body.startswith("/"):
                     logger.debug(
                         "Matrix: ignoring message %s in %s — no @mention "
                         "(set MATRIX_REQUIRE_MENTION=false to disable)", event_id, room_id)
@@ -2160,22 +2171,14 @@ class MatrixAdapter(BasePlatformAdapter):
             return
         # A bare @mention from the same sender in the same room claims that sender's parked voice,
         # so the reply answers the voice rather than the empty mention text.
+        # (_strip_mention only removes @mention tokens, so a /command never strips to empty.)
         parked = self._pending_voice.get((room_id, sender))
-        mentions_block = source_content.get("m.mentions") or {}
-        mention_user_ids = mentions_block.get("user_ids") if isinstance(mentions_block, dict) else None
-        if (
-            parked
-            and not body.startswith("/")
-            and self._is_bot_mentioned(body, source_content.get("formatted_body"), mention_user_ids)
-            and not self._strip_mention(body).strip()
-        ):
+        if parked and self._content_mentions_bot(body, source_content) and not self._strip_mention(body).strip():
             del self._pending_voice[(room_id, sender)]
-            voice_event_id, parked_at, voice_content, voice_relates = parked
-            if time.time() - parked_at <= _VOICE_CLAIM_WINDOW_SECONDS:
-                self._claimed_voice_events.add(voice_event_id)
+            if time.time() - parked.parked_at <= _VOICE_CLAIM_WINDOW_SECONDS:
                 await self._handle_media_message(
-                    room_id, sender, voice_event_id, time.time(), voice_content, voice_relates,
-                    voice_content.get("msgtype", "m.audio"))
+                    room_id, sender, parked.event_id, time.time(), parked.content, parked.relates_to,
+                    "m.audio", mentioned=True)
                 return
         msg_event = await self._build_inbound_event(
             room_id, sender, event_id, _normalize_matrix_bang_command(body), source_content, relates_to)
@@ -2188,7 +2191,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _handle_media_message(
         self, room_id: str, sender: str, event_id: str, event_ts: float, source_content: dict,
-        relates_to: dict, msgtype: str) -> None:
+        relates_to: dict, msgtype: str, mentioned: bool = False) -> None:
         body = source_content.get("body", "") or ""
         url = source_content.get("url", "")
         if url and not str(url).startswith("mxc://"):
@@ -2217,7 +2220,8 @@ class MatrixAdapter(BasePlatformAdapter):
         msg_type, media_type, is_voice_message = self._classify_inbound_media(msgtype, event_mimetype, source_content)
         # Gate (require_mention / allowed rooms) BEFORE the download: an unmentioned or
         # non-allowlisted room must not pull media onto the host only to drop it.
-        ctx = await self._resolve_message_context(room_id, sender, event_id, body, source_content, relates_to)
+        ctx = await self._resolve_message_context(
+            room_id, sender, event_id, body, source_content, relates_to, mentioned=mentioned)
         if ctx is None:
             return
         # Cache locally so downstream tools get a real file path.
@@ -2245,7 +2249,7 @@ class MatrixAdapter(BasePlatformAdapter):
         if msgtype == "m.image":
             return MessageType.PHOTO, event_mimetype or "image/png", False
         if msgtype == "m.audio":
-            is_voice = source_content.get("org.matrix.msc3245.voice") is not None
+            is_voice = _is_msc3245_voice(msgtype, source_content)
             return (MessageType.VOICE if is_voice else MessageType.AUDIO), event_mimetype or "audio/ogg", is_voice
         if msgtype == "m.video":
             return MessageType.VIDEO, event_mimetype or "video/mp4", False
@@ -2903,6 +2907,10 @@ class MatrixAdapter(BasePlatformAdapter):
         for pattern in (r"```[\s\S]*?```", r"`[^`\n]+`", r"\[[^\]]+\]\([^)]+\)"):
             protected = re.sub(pattern, lambda match: _protect(match.group(0)), protected)
         return protected, placeholders
+
+    def _content_mentions_bot(self, body: str, source_content: dict) -> bool:
+        """``_is_bot_mentioned`` over an event's body, formatted_body and ``m.mentions``."""
+        return self._is_bot_mentioned(body, source_content.get("formatted_body"), _mention_user_ids(source_content))
 
     def _is_bot_mentioned(
         self, body: str, formatted_body: Optional[str] = None, mention_user_ids: Optional[list] = None) -> bool:
