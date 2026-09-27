@@ -216,12 +216,8 @@ def main(argv: list[str] | None = None) -> None:
     except Exception:
         logger.exception("ACP agent crashed")
         sys.exit(1)
-    finally:
-        # The stdio client that drove these conversations is gone. Without an
-        # ended_at writer here, source='acp' rows stay open forever and the
-        # ended-session guard keeps prune/archive away from them (#118216). A
-        # later load/resume reopens the row (acp_adapter.session._restore).
-        agent.session_manager.end_all_sessions()
+    # No ended_at stamp here (#118216 is the in-process adapter's): sessions are daemon-owned and
+    # may have other viewers or background work, so the daemon's reset lifecycle ends them.
 
 
 if __name__ == "__main__":
