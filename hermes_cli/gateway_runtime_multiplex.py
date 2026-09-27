@@ -23,6 +23,23 @@ def multiplexer_root_for(home: Path) -> Path | None:
     return root if root != home else None
 
 
+def implied_host_root(home: Path) -> Path | None:
+    """The root whose gateway must serve named profile *home* when nothing records a verdict.
+
+    ``hermes gateway run`` refuses a ``profiles/<name>`` home a gateway of its own unless it authored
+    ``gateway.standalone: true`` (or passes ``--force``); only an explicit multiplex ``false`` on the
+    root leaves the profile to its own daemon.
+    """
+    root = multiplexer_root_for(home)
+    if root is None:
+        return None
+    from hermes_cli.gateway_multiplex_mode import explicit_multiplex_flag
+    from hermes_cli.profiles import profile_is_standalone
+    if explicit_multiplex_flag(root) is False or profile_is_standalone(home):
+        return None
+    return root
+
+
 def multiplexer_serves_home(home: Path) -> Path | None:
     """The root whose (possibly stopped) multiplexer serves *home*, else None.
 

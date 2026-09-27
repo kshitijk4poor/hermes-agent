@@ -219,9 +219,14 @@ def ensure_gateway_runtime(profile_home: str | Path, *, timeout: float = DEFAULT
                 # A named profile the default multiplexer serves has no daemon of its own: start
                 # (or await) the MULTIPLEXER. A per-profile spawn here would become a second owner
                 # that blocks the multiplexer's next all-or-nothing reserve.
-                from hermes_cli.gateway_runtime_multiplex import multiplexer_serves_home
+                from hermes_cli.gateway_runtime_multiplex import implied_host_root, multiplexer_serves_home
                 target = multiplexer_serves_home(home) or home
                 service = discover_existing_gateway_service(target, deadline=deadline)
+                if service is None and target == home and (host := implied_host_root(home)) is not None:
+                    # Main's guard refuses a named profile a gateway of its own unless it is standalone
+                    # or already installed; with no multiplexer evidence yet, the host is still its owner.
+                    target = host
+                    service = discover_existing_gateway_service(target, deadline=deadline)
                 # Runtime locks settle races remaining after this second probe.
                 observed = discover_gateway_endpoint(home, timeout=remaining(deadline))
                 if observed.state != "absent":

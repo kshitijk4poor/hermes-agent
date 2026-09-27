@@ -256,7 +256,8 @@ export function SessionPanel({ info, maxWidth, sid, t }: SessionPanelProps) {
   // The canonical authority intentionally returns a narrow metadata snapshot.
   // Do not invent tool/skill inventories or crash while rendering that session.
   if (!info.skills || !info.tools) {
-    return <Box flexDirection="column"><Text color={t.color.muted}>Gateway session {sid}</Text>
+    return <Box flexDirection="column">
+      <Text><Text color={t.color.sessionLabel}>Session: </Text><Text color={t.color.sessionBorder}>{sid}</Text></Text>
       <Text color={t.color.muted}>Tool and skill inventory is not exposed by this runtime.</Text></Box>
   }
 

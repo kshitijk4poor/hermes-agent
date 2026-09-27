@@ -311,3 +311,24 @@ def test_unmanaged_root_home_child_ignores_sticky_active_profile(tmp_path, monke
     resolved = json.loads(witness.read_text())
     assert resolved["home"] == str(root), resolved
     assert resolved["argv"] == ["hermes", "gateway", "run", "--quiet"], resolved
+
+
+@pytest.mark.parametrize("standalone", [False, True])
+def test_named_profile_without_multiplex_evidence_starts_the_host_gateway(tmp_path, monkeypatch, standalone):
+    """`gateway run` refuses a profiles/<name> home a gateway of its own, so ensure must start the host."""
+    from hermes_cli import gateway_runtime as runtime, gateway_runtime_service as service, gateway_runtime_start as start
+
+    root = tmp_path / ".hermes"
+    home = root / "profiles" / "alpha"
+    home.mkdir(parents=True, mode=0o700)
+    if standalone:
+        (home / "config.yaml").write_text("gateway:\n  standalone: true\n", encoding="utf-8")
+    spawned = []
+    monkeypatch.setattr(runtime, "discover_gateway_endpoint", lambda *a, **k: runtime.GatewayDiscovery("absent"))
+    monkeypatch.setattr(service, "discover_existing_gateway_service", lambda *a, **k: None)
+    monkeypatch.setattr(start, "spawn_unmanaged_gateway", lambda target, **k: spawned.append(Path(target)))
+
+    runtime.ensure_gateway_runtime(home, timeout=0.3)
+
+    assert spawned == [(home if standalone else root).resolve()]
+
