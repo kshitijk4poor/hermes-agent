@@ -131,7 +131,11 @@ async def connect_gateway():
         url = endpoint.api_origin.replace("https:", "wss:").replace("http:", "ws:") + "/api/ws"
         protocols = ["hermes-gateway-v1", "hermes-gateway-ticket." + ticket]
     try:
-        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024) as ws:
+        # The gateway is a loopback (or explicitly named) peer, never something to route through the
+        # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
+        # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
+        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024,
+                           proxy=None) as ws:
             if protocols and ws.subprotocol != "hermes-gateway-v1":
                 raise GatewayClientError("Gateway protocol mismatch; update/restart required")
             async with GatewayClient(ws) as client:

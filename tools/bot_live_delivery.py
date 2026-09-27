@@ -77,8 +77,9 @@ def authority_delivery(home, params):
         endpoint = discovery.endpoint
         ticket = await asyncio.to_thread(_session_ticket, home, endpoint)
         url = endpoint.api_origin.replace('http:', 'ws:').replace('https:', 'wss:') + '/api/ws'
+        # Loopback authority dial: never through HTTP(S)_PROXY (websockets>=14 honours it by default).
         async with connect(url, subprotocols=['hermes-gateway-v1', 'hermes-gateway-ticket.' + ticket],
-                           open_timeout=10) as ws:
+                           open_timeout=10, proxy=None) as ws:
             if ws.subprotocol != 'hermes-gateway-v1':
                 raise ValueError('authority protocol mismatch')
             async with GatewayClient(ws) as client:

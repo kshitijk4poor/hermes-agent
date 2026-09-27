@@ -114,7 +114,9 @@ async def forward_to_owner(home, *, agent, tenant, peer, context_id, input_id, t
         ticket = await asyncio.to_thread(_session_ticket, home, ready.endpoint)
         url = ready.endpoint.api_origin.replace('https:', 'wss:').replace('http:', 'ws:') + '/api/ws'
         protocols = ['hermes-gateway-v1', 'hermes-gateway-ticket.' + ticket]
-        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024) as ws:
+        # Loopback authority dial: never through HTTP(S)_PROXY (websockets>=14 honours it by default).
+        async with connect(url, subprotocols=protocols, open_timeout=10, max_size=8 * 1024 * 1024,
+                           proxy=None) as ws:
             if ws.subprotocol != protocols[0]:
                 raise GatewayClientError('gateway_protocol_mismatch')
             async with GatewayClient(ws) as client:

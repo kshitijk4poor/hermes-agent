@@ -4341,6 +4341,11 @@ def _guard_supervised_gateway_conflict(force: bool = False) -> None:
     """
     if force or _running_under_gateway_supervisor():
         return
+    # Every entrypoint now ensures a detached gateway, so this runs on hosts with no service at
+    # all (headless runners with no user bus). Without an installed unit/plist/task there is
+    # nothing to conflict with; probing the manager anyway is the only systemctl call left.
+    if not _is_service_installed():
+        return
     try:
         snapshot = get_gateway_runtime_snapshot()
     except Exception:
@@ -4574,6 +4579,9 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         except Exception:
             pass  # best-effort; don't block gateway startup
 
+    if _gateway_detached_env():
+        from hermes_logging import redact_detached_stdio
+        redact_detached_stdio()
     from gateway.run import start_gateway
     print("┌─────────────────────────────────────────────────────────┐")
     print("│           ☤ Hermes Gateway Starting...                 │")

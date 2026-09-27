@@ -970,7 +970,18 @@ def _warm_turn_machinery_sync() -> int:
     import run_agent  # noqa: F401  # heavy import graph, cached in sys.modules
     import model_tools
 
-    tool_defs = model_tools.get_tool_definitions(quiet_mode=True)
+    # Warm the schemas the turn will actually build: the profile's own toolsets (`video`, `image_gen`
+    # and friends rebuild their schema from a vendor catalog over the network; ``None`` = every
+    # registered tool, which dials OpenRouter/DeepInfra for profiles that never enabled them).
+    enabled_toolsets = None
+    try:
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.tools_config import _get_platform_tools
+
+        enabled_toolsets = sorted(_get_platform_tools(load_config_readonly(), "cli"))
+    except Exception:
+        logger.debug("platform toolset resolution failed; warming the full tool surface", exc_info=True)
+    tool_defs = model_tools.get_tool_definitions(enabled_toolsets=enabled_toolsets, quiet_mode=True)
     from hermes_cli.config import load_config_readonly
 
     agent_cfg = load_config_readonly().get("agent")
