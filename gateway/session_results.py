@@ -8,9 +8,23 @@ execution_result: ContextVar[dict | None] = ContextVar("execution_result", defau
 from hermes_state_terminal import RESULT_PREFIX as _RESULT_PREFIX
 
 
+def _redacted(value):
+    """The stored result is a state.db copy of the model's answer and history: redacted at this
+    storage boundary like every transcript row (``security.redact_secrets``). The live viewer
+    prints the completion event, never this copy."""
+    if isinstance(value, str):
+        from agent.redact import redact_sensitive_text
+        return redact_sensitive_text(value)
+    if isinstance(value, dict):
+        return {k: _redacted(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redacted(v) for v in value]
+    return value
+
+
 def retain_result(db, *, epoch, row, result):
     return settle_session_input(db, epoch=epoch, admission_id=row['admission_id'],
-                                generation=row['generation'], outcome='completed', result=result)
+                                generation=row['generation'], outcome='completed', result=_redacted(result))
 
 
 def finish_result(db, *, epoch, row, response, outcome, result=None):
@@ -42,7 +56,7 @@ def finish_result(db, *, epoch, row, response, outcome, result=None):
         value['failed' if outcome == 'failed' else 'interrupted'] = True
         value['completed'] = False
     settled = settle_session_input(db, epoch=epoch, admission_id=row['admission_id'],
-        generation=row['generation'], outcome=outcome, result=result)
+        generation=row['generation'], outcome=outcome, result=_redacted(result))
     return settled, response
 
 

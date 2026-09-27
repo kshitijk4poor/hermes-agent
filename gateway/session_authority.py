@@ -397,10 +397,10 @@ class SessionAuthority:
                 self.check_approval_generation(session_id, generation)
             except RuntimeStoreError:
                 return False
-            live.event_stream.publish(session_id, payload, event_type=event_type)
+            delivered = live.event_stream.publish(session_id, payload, event_type=event_type)
             from gateway.session_api_turn import publish_api_event
-            publish_api_event(self, session_id, event_type, payload)
-            return True
+            observed = publish_api_event(self, session_id, event_type, payload)
+            return bool(delivered or observed)
 
     def register_approval(self, session_id, generation, route, data):
         live = self.sessions[session_id]

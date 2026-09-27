@@ -281,20 +281,25 @@ def _api_observers(authority, session_id):
 
 def _notify_observers(authority, session_id, key, *args):
     """Observer callbacks are request-owned sinks; one that raises (closed socket, torn-down
-    loop) must not abort canonical execution or starve the other observers."""
+    loop) must not abort canonical execution or starve the other observers. Returns whether
+    any observer accepted the event."""
     import logging
+    accepted = False
     for observer in _api_observers(authority, session_id):
         callback = observer.get(key)
         if callback:
             try:
                 callback(*args)
+                accepted = True
             except Exception:
                 logging.getLogger(__name__).warning('API observer %s failed for %s', key, session_id, exc_info=True)
+    return accepted
 
 
 def publish_api_event(authority, session_id, event_type, payload):
     if event_type == 'message.delta':
-        _notify_observers(authority, session_id, 'stream_delta_callback', payload['text'])
+        return _notify_observers(authority, session_id, 'stream_delta_callback', payload['text'])
+    return False
 
 
 def publish_api_tool_event(authority, session_id, generation, event_type, call_id, tool_name, args, result=None):

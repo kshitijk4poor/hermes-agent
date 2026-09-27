@@ -52,14 +52,18 @@ class RuntimeSessionCompressionMixin:
         return self._apply('compression.watermark', {})['value']
 
     def archive_and_compact(self, session_id, compacted_messages, model_config_patch=None,
-                            watermark=None, lock_holder=None, tail_count=0, carried_messages=None):
+                            watermark=None, lock_holder=None, tail_count=0, carried_messages=None,
+                            covered_ids=None, unresolved_held=None):
         self._session(session_id)
         # A carried message names an exact durable original (its _row_id) to rewind rather than
-        # archive (#118900); the owner resolves identities against its own store.
+        # archive (#118900); the owner resolves identities against its own store. Held-row
+        # coverage travels the same way: the owner proves it inside the commit transaction.
         carried = [dict(m) for m in carried_messages or [] if isinstance(m, dict)]
+        unresolved = None if unresolved_held is None else [dict(m) for m in unresolved_held if isinstance(m, dict)]
         result = self._apply('compression.archive', dict(messages=compacted_messages,
             model_config_patch=model_config_patch, watermark=watermark, lock_holder=lock_holder,
-            tail_count=tail_count, carried_messages=carried))
+            tail_count=tail_count, carried_messages=carried, covered_ids=covered_ids,
+            unresolved_held=unresolved))
         for message, row_id in zip(compacted_messages, result['row_ids'], strict=True):
             message['_row_id'] = row_id
         return result['value']

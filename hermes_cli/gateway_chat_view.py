@@ -8,7 +8,8 @@ from hermes_cli.gateway_client import GatewayClientError
 
 
 class GatewayChatView:
-    def __init__(self, client, snapshot, *, quiet=False, emitter=None):
+    def __init__(self, client, snapshot, *, quiet=False, emitter=None, usage_file=None):
+        self.usage_file = usage_file
         self.client = client
         self.session_id = snapshot["stored_session_id"]
         self.generation = snapshot.get("execution_generation", 0)
@@ -195,6 +196,21 @@ class GatewayChatView:
             return self.emitter.emit_result({"failed": True, "error": message}, session_id=self.session_id, exit_code=3)
         return 3
 
+    async def _write_usage_file(self, admission, outcome):
+        """``-z --usage-file``: the same JSON ledger the in-process one-shot wrote, read from the
+        result the owner committed with this admission's settlement (best-effort, never raises)."""
+        from hermes_cli.oneshot import _write_usage_file
+        result = {}
+        try:
+            receipt = await self.client.rpc("prompt.receipt", session_id=self.session_id,
+                                            admission_id=admission, include_result=True)
+            result = dict(receipt.get("result") or {})
+        except Exception:
+            pass
+        result.setdefault("session_id", self.session_id)
+        failure = None if outcome in ("completed", "cancelled") else (result.get("error") or outcome or "failed")
+        _write_usage_file(self.usage_file, result, failure=failure)
+
     async def run(self, query=None, *, oneshot=False):
         self.quiet = self.quiet or oneshot
         self.finite = oneshot
@@ -223,6 +239,8 @@ class GatewayChatView:
                     await self.changed.wait()
                 terminal = self.completions[admission]
                 outcome = terminal.get("outcome")
+                if self.usage_file:
+                    await self._write_usage_file(admission, outcome)
                 if self.emitter is not None:
                     return self.emitter.emit_result(
                         {"final_response": terminal.get("text") or terminal.get("content") or "",

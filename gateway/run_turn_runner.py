@@ -61,8 +61,23 @@ def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
 
 # Rendered on a native clarify card whose wait ended without a click (mirrors the notice the
 # Slack click handler shows on a dead entry).
-def _clarify_expired_notice() -> str:
-    return t("gateway.clarify.expired")
+_CLARIFY_EXPIRED_NOTICE = "⏳ This prompt expired — please send a new request."
+# run_conversation result keys the gateway projection carries verbatim so a finite viewer's
+# `-z --usage-file` ledger (hermes_cli/oneshot._USAGE_KEYS) reads what the in-process path did.
+_LEDGER_PASSTHROUGH_KEYS = (
+    "estimated_cost_usd", "cost_status", "cost_source", "cache_read_tokens", "cache_write_tokens",
+    "reasoning_tokens", "total_tokens", "provider", "turn_exit_reason", "service_tier",
+)
+
+
+def _finite_viewer_turn() -> bool:
+    from gateway.session_finite import finite_turn_required
+    return finite_turn_required() is True
+
+
+class _NoStreamConsumer(RuntimeError):
+    """Raised by the delta callback when nothing consumed the text; ``_call_quietly`` turns it into
+    'not delivered' so the agent's partial-delivery accounting matches what the user saw."""
 
 
 class _ExecApprovalDeclined(RuntimeError):
@@ -177,11 +192,19 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         stream_delta_cb = None
         if delta_sinks or self._approval_owner is not None:
             def stream_delta_cb(text: Optional[str]) -> None:
-                if ctx._run_still_current():
-                    if text is not None:  # None closes only the native stream segment.
-                        self._publish_execution("message.delta", {"text": text})
-                    for sink in delta_sinks:
-                        sink.on_delta(text)
+                if not ctx._run_still_current():
+                    return
+                delivered = bool(delta_sinks)
+                if text is not None:  # None closes only the native stream segment.
+                    delivered = self._publish_execution("message.delta", {"text": text}) or delivered
+                for sink in delta_sinks:
+                    sink.on_delta(text)
+                if text is not None and (not delivered or _finite_viewer_turn()):
+                    # Nobody the user is looking at saw this text: no live viewer/observer/adapter
+                    # sink, or a finite (`-z`, `chat -q`) viewer, which prints the terminal reply
+                    # only. The agent must treat it as undelivered, else a stream that dies here is
+                    # stitched as a "partial delivery" nobody received (classic -q parity).
+                    raise _NoStreamConsumer()
 
         def interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
             if not ctx._run_still_current():
@@ -1030,7 +1053,9 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             runner._pre_agent_fallback_notice = None
             from gateway.session_api_turn import prepare_api_runtime
             model, runtime_kwargs = prepare_api_runtime(model, runtime_kwargs)
-            if policy and policy.model:
+            if policy and policy.model and not pending_fallback_notice:
+                # The frozen route's model, unless resolution just fell back: the fallback entry's
+                # model is the one this agent must send (#112600).
                 model = policy.model
             logger.debug(
                 "run_agent resolved: model=%s provider=%s session=%s",
@@ -1111,6 +1136,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             "output_tokens": getattr(agent, "session_completion_tokens", 0) if has_comp else 0,
             "model": getattr(agent, "model", None) if agent else None,
             "context_length": (getattr(comp, "context_length", 0) or 0) if has_comp else 0,
+            # The rest of the `-z --usage-file` ledger (hermes_cli/oneshot._USAGE_KEYS): a finite
+            # viewer reads the committed result over `prompt.receipt`, so the projection must keep
+            # what the in-process one-shot took straight from `run_conversation`.
+            **{key: result.get(key) for key in _LEDGER_PASSTHROUGH_KEYS if key in result},
         }
         compacted_in_place, effective_session_id, history_offset = self._sync_session_after_run(agent_history)
         # failure_reason must survive the empty-response path too (TUI billing, transient-failure

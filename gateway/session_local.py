@@ -50,6 +50,11 @@ class LocalSessionAdapter(BasePlatformAdapter):
     async def edit_message(self, chat_id, message_id, content, *, finalize=False):
         return SendResult(success=True, message_id=message_id)
 
+    async def _record_delivery_obligation(self, *args, **kwargs):
+        # No platform ACK to lose: viewers replay the durable transcript. A ledger row would only
+        # park a raw copy of the reply in state.db that no redelivery can ever use.
+        return None
+
     async def send_typing(self, chat_id, metadata=None):
         return None
 
@@ -169,7 +174,13 @@ def local_session_info(authority, ref):
     agent = authority.agent(ref)
     from gateway.session_policy import policy_for_source
     policy = policy_for_source(authority.runner, live.source)
-    return {'source': policy.source if policy else live.source.platform.value,
+    info = {'source': policy.source if policy else live.source.platform.value,
             'model': getattr(agent, 'model', policy.model if policy else None), 'lazy': agent is None,
             'profile_id': authority.profile_id, 'desktop_protocol': CANONICAL_GATEWAY_PROTOCOL,
             **({'cwd': policy.cwd} if policy else {})}
+    if policy:
+        # The creation request the route was frozen with (secrets already extracted), so a
+        # resuming client can tell "same flags again" from a real override attempt.
+        import json
+        info['launch_request'] = json.loads(policy.request_json)
+    return info

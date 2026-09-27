@@ -205,13 +205,19 @@ from hermes_state_errors import CompressionSessionBusyError, SessionCompressionI
 _LOCK_ROW_SQL = _COMPRESSION_LOCK_ROW_SQL
 
 
-def archive_on_connection(db, conn, session_id: str, compacted_messages: List[Dict[str, Any]], model_config_patch: Optional[Dict[str, Any]]=None, watermark: Optional[int]=None, lock_holder: Optional[str]=None, tail_count: int=0, carried_messages: Optional[List[Dict[str, Any]]]=None):
+def archive_on_connection(db, conn, session_id: str, compacted_messages: List[Dict[str, Any]], model_config_patch: Optional[Dict[str, Any]]=None, watermark: Optional[int]=None, lock_holder: Optional[str]=None, tail_count: int=0, carried_messages: Optional[List[Dict[str, Any]]]=None, covered_ids: Optional[List[int]]=None, unresolved_held: Optional[List[Dict[str, Any]]]=None):
     if lock_holder is not None:
         lock_row = conn.execute(_COMPRESSION_LOCK_ROW_SQL, (session_id,)).fetchone()
         if lock_row is None or lock_row['holder'] != lock_holder or float(lock_row['expires_at']) <= time.time():
             raise SessionCompressionInProgressError(f'Compression lease for {session_id!r} lost before commit; refusing to publish a stale compaction')
     patch = model_config_patch is not None
     patched_model_config = db._merge_model_config_json(conn, session_id, model_config_patch, on_missing='raise') if patch else None
+    # Same held-row coverage rule as SessionDB.archive_and_compact: when the compressor named the
+    # rows it held, archive exactly those and clone the rest instead of trusting the watermark.
+    proved = db._proved_coverage(conn, session_id, covered_ids, unresolved_held)
+    if proved is not None:
+        return db._archive_named_rows(conn, session_id, compacted_messages, proved, tail_count=tail_count,
+            carried_messages=carried_messages, patched_model_config=patched_model_config, patch=patch)
     tail_ids, tail_tool_calls = ([], 0) if watermark is None else db._tail_rows_after_watermark(conn, 'SELECT id, tool_calls FROM messages WHERE session_id = ? AND active = 1 AND id > ? ORDER BY id', (session_id, int(watermark)))
     # Same rewind set as SessionDB.archive_and_compact: carried originals (#118900), then the tail.
     rewind_ids: list[int] = db._resolve_carried_row_ids(conn, session_id, carried_messages or [])
@@ -294,10 +300,18 @@ def _watermarks(payload):
 def worker_archive(db, conn, sid, payload):
     from hermes_state_worker_context import SIDECAR_KEYS
     _fields(payload, ('messages', 'model_config_patch', 'watermark', 'lock_holder', 'tail_count'),
-            optional=('carried_messages',))
+            optional=('carried_messages', 'covered_ids', 'unresolved_held'))
     _handoff_messages(conn, sid, payload['messages'])
     carried = payload.get('carried_messages') or []
     if not isinstance(carried, list) or any(not isinstance(m, dict) for m in carried):
+        raise RuntimeStoreError('invalid_params')
+    covered = payload.get('covered_ids')
+    if covered is not None and (not isinstance(covered, list)
+                                or any(type(i) is not int or i <= 0 for i in covered)):
+        raise RuntimeStoreError('invalid_params')
+    unresolved = payload.get('unresolved_held')
+    if unresolved is not None and (not isinstance(unresolved, list)
+                                   or any(not isinstance(m, dict) for m in unresolved)):
         raise RuntimeStoreError('invalid_params')
     _watermarks(payload)
     # Micro-compaction and proactive prune archive in place without a lease, like the owner path.
@@ -310,7 +324,7 @@ def worker_archive(db, conn, sid, payload):
         raise RuntimeStoreError('invalid_params')
     value = archive_on_connection(db, conn, sid, payload['messages'], model_config_patch=patch,
         watermark=payload['watermark'], lock_holder=payload['lock_holder'], tail_count=payload['tail_count'],
-        carried_messages=carried)
+        carried_messages=carried, covered_ids=covered, unresolved_held=unresolved)
     return {'value': value, 'row_ids': [message['_row_id'] for message in payload['messages']]}
 
 

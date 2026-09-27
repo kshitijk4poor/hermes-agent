@@ -388,9 +388,11 @@ class GatewayTurnPersistenceMixin:
         if is_context_overflow_failure:
             pass  # Skip all transcript writes — don't grow a broken session
         else:
-            if not history:
+            if not history and source.platform != Platform.LOCAL:
                 # Fresh session: the tool definitions (as sent in the API request) make the transcript
-                # self-describing.
+                # self-describing. A LOCAL route (one-shot, chat -q, ACP, TUI attach) keeps the classic
+                # in-process CLI's transcript shape: the marker is gateway bookkeeping every local
+                # reader filters out, and the session row already carries model/model_config.
                 await store.append_to_transcript(sid, {
                     "role": "session_meta",
                     "tools": agent_result.get("tools", []) or [],

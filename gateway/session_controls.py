@@ -392,7 +392,18 @@ class AuthorityConnection:
         return result
 
     async def receipt(self, ref, params):
-        return asdict(await self.authority.receipt(self.actor, ref, params.get('admission_id')))
+        receipt = await self.authority.receipt(self.actor, ref, params.get('admission_id'))
+        out = asdict(receipt)
+        if params.get('include_result') is True and receipt.status == 'terminal':
+            # The exact structured result the turn committed with settlement (`finish_result`):
+            # a finite viewer reads its ledger (tokens, cost, model, exit reason) from here, the same
+            # dict the in-process one-shot wrote from `run_conversation`.
+            from gateway.session_results import admission_result
+            saved = admission_result(self.authority.db, receipt.admission_id)
+            if saved is not None:
+                out['result'] = saved['result']
+                out['usage'] = saved.get('usage') or {}
+        return out
 
     async def cancel(self, ref, params):
         return asdict(await self.authority.cancel_queued(self.actor, ref, params.get('admission_id')))

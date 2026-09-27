@@ -53,9 +53,11 @@ class GatewayTurnPrepareMixin:
             _resolve_runtime_agent_kwargs, _resolve_runtime_agent_kwargs_for_provider,
         )
         from gateway.session_policy import policy_for_source
+        # Every exit path starts clean: a stale notice must never attach to another session's next
+        # turn (#74349). Set again below only when THIS resolution fell back.
+        self._pre_agent_fallback_notice = None
         policy = policy_for_source(self, source) if source is not None else None
         if policy is not None:
-            from hermes_cli.runtime_provider import resolve_runtime_provider
             from gateway.run import _runtime_agent_kwargs
             from gateway.session_policy import launch_key
             from hermes_cli.runtime_provider_custom import _resolve_named_custom_runtime
@@ -70,15 +72,25 @@ class GatewayTurnPrepareMixin:
             if runtime is None:
                 if key is None:
                     key = frozen.get('model', {}).get('api_key')
-                runtime = resolve_runtime_provider(requested=policy.provider,
-                    explicit_api_key=key, explicit_base_url=policy.base_url, target_model=policy.model)
+                # Same resolution-time walker the in-process one-shot used (#81209): an AuthError from
+                # the frozen primary (expired token, Portal down, exhausted pool) tries the route's own
+                # ``fallback_providers`` before the turn is refused.
+                from hermes_cli.runtime_provider import resolve_runtime_with_fallback
+                # Only a launch-supplied URL is explicit (classic one-shot parity): config's own
+                # ``model.base_url`` is resolved by the provider chain, which keeps the credential pool
+                # an explicit URL would drop (no pool = no refresh/rotation on a 401).
+                runtime, fallback_entry = resolve_runtime_with_fallback(frozen, requested=policy.provider,
+                    explicit_api_key=key, explicit_base_url=json.loads(policy.request_json).get('base_url'),
+                    target_model=policy.model)
+                if fallback_entry is not None:
+                    from hermes_cli.fallback_config import pre_agent_fallback_notice
+                    self._pre_agent_fallback_notice = pre_agent_fallback_notice(
+                        policy.provider or '', policy.model or '',
+                        runtime.get('provider') or fallback_entry.get('provider') or 'unknown',
+                        fallback_entry.get('model') or 'default')
+                    return fallback_entry['model'], _runtime_agent_kwargs(runtime)
             return policy.model, _runtime_agent_kwargs(runtime)
         skey = self._resolve_session_key_or_none(source, session_key)
-        # Every exit path starts clean: the /model-override fast path returns before the pop below,
-        # and hygiene/inbound callers resolve without a turn runner consuming the stash — a stale
-        # notice must never attach to another session's next turn (#74349).
-        self._pre_agent_fallback_notice = None
-
         model = _resolve_gateway_model(user_config)
         if skey:
             self._rehydrate_session_model_override(skey)
@@ -503,6 +515,11 @@ class GatewayTurnPrepareMixin:
         system prompt: present-on-turn-1/absent-on-turn-2 was a guaranteed prompt diff + rebuild."""
         from gateway.run import _hermes_home, _home_target_env_var, _load_gateway_config
         if history:
+            return
+        # LOCAL sessions (one-shot, chat -q, ACP, TUI attach) are the classic in-process CLI's
+        # surfaces: it never appended this note, and mark_seen would rewrite config.yaml under
+        # an ordinary launch that promises to leave the profile's files untouched.
+        if source.platform == Platform.LOCAL:
             return
         if not await self.async_session_store.has_any_sessions():
             _intro_note = (

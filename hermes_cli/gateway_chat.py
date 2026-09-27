@@ -16,7 +16,7 @@ from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 _UNSUPPORTED = (
     "image", "skills", "worktree", "w", "checkpoints", "pass_session_id",
     "accept_hooks",
-    "no_restore_cwd", "usage_file",
+    "no_restore_cwd",
     "run_budget", "verbose", "compact",
     "list_tools", "list_toolsets",
 )
@@ -32,7 +32,6 @@ _RELOCATED = {
     "pass_session_id": "`hermes --tui --pass-session-id`",
     "accept_hooks": "`hooks_auto_accept: true` in config.yaml, or `hermes --tui --accept-hooks`",
     "no_restore_cwd": "`--in <dir>` (the gateway keeps the session's frozen cwd)",
-    "usage_file": "`hermes sessions stats` / `hermes insights` after the run",
     "run_budget": "`agent.run_budget_seconds` in config.yaml",
     "verbose": "`hermes logs --follow`, or `hermes --tui -v`",
     "compact": "`display.compact: true` in config.yaml",
@@ -70,10 +69,8 @@ def validate_options(args):
         where = "".join(f"\n  --{name.replace('_', '-')}: use {_RELOCATED[name]}" for name in unsupported)
         raise GatewayClientError(
             f"Unsupported gateway CLI options: {flags}. No local fallback or policy changes were made.{where}")
-    resuming = getattr(args, "resume", None) or (continue_title(args) and not getattr(args, "create_if_missing", False))
-    if resuming and (getattr(args, "in_dir", None) or getattr(args, "source", None) or
-            any(getattr(args, name, None) not in (None, False) for name in _POLICY)):
-        raise GatewayClientError("Resume retains gateway session policy; creation overrides are unsupported on resume.")
+    # Creation flags repeated on resume are checked against the frozen route once the snapshot is
+    # back (`check_resume_policy`): the same flags again are fine, a different value is refused.
     if bypass_launch(args) and not getattr(args, "model", None):
         raise GatewayClientError("--safe-mode / --ignore-user-config read no profile default: pass --model explicitly."
                                  f"\n  Example: {_SAFE_MODE_EXAMPLE}")
@@ -101,6 +98,7 @@ async def run_gateway_chat(args, emitter=None):
                     raise GatewayClientError(
                         f"No session found matching '{name}'. Use 'hermes sessions list' to see available "
                         "sessions, or pass -c <name> --create-if-missing to start a new session with that title.")
+            check_resume_policy(args, snapshot)
         else:
             contract = description.get("session_create", {})
             source = getattr(args, "source", None) or "cli"
@@ -133,12 +131,44 @@ async def run_gateway_chat(args, emitter=None):
         quiet = bool(getattr(args, "quiet", False) or oneshot_prompt or emitter is not None)
         oneshot = bool(oneshot_prompt or getattr(args, "oneshot_exit", False) or quiet or
                        (query and not (sys.stdin.isatty() and sys.stdout.isatty())))
-        view = GatewayChatView(client, snapshot, quiet=quiet, emitter=emitter)
+        view = GatewayChatView(client, snapshot, quiet=quiet, emitter=emitter,
+                               usage_file=getattr(args, "usage_file", None))
         if (getattr(args, "resume", None) or title) and not quiet:
             for row in snapshot.get("messages", []):
                 if row.get("role") in {"user", "assistant"} and isinstance(row.get("content"), str):
                     print(f"{row['role']}: {row['content']}")
         return await view.run(query, oneshot=oneshot)
+
+
+_RESUME_POLICY_MISMATCH = "Resume retains gateway session policy; creation overrides are unsupported on resume."
+
+
+def _requested_policy(args):
+    policy = {key: getattr(args, key) for key in _POLICY if getattr(args, key, None) not in (None, False)}
+    if isinstance(policy.get("toolsets"), str):
+        policy["toolsets"] = [name.strip() for name in policy["toolsets"].split(",") if name.strip()]
+    if getattr(args, "source", None):
+        policy["source"] = args.source
+    return policy
+
+
+def check_resume_policy(args, snapshot):
+    """A resume may repeat the flags the session was created with (scripts re-run one command
+    line); anything that would CHANGE the frozen route is refused, as before."""
+    requested = _requested_policy(args)
+    if getattr(args, "in_dir", None):
+        requested["cwd"] = str(Path(args.in_dir).expanduser().resolve())
+    if not requested:
+        return
+    info = snapshot.get("info") if isinstance(snapshot, dict) else None
+    frozen = dict((info or {}).get("launch_request") or {})
+    if info and "cwd" in info:
+        frozen["cwd"] = info["cwd"]
+    for key, value in requested.items():
+        if key == "api_key":
+            continue  # never durable; a repeated key is not a policy change
+        if frozen.get(key) != value:
+            raise GatewayClientError(_RESUME_POLICY_MISMATCH)
 
 
 def launch_from_args(args) -> int:

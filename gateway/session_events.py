@@ -57,9 +57,12 @@ class SessionEvents:
                 return {'jsonrpc': '2.0', 'method': 'event', 'params': {
                     'type': 'session.replay_gap', 'session_id': session_id,
                     'payload': {'replay_epoch': self.epoch, 'latest_seq': self.sequence}}}
-            self.fanout.write(frame, overflow=overflow)
+            delivered = self.fanout.write(frame, overflow=overflow)
             for observer in tuple(self.observers):
                 observer(frame)
+            # True when a live viewer or observer took the frame; the replay ring alone is not
+            # delivery (a detached finite viewer reads nothing until it reattaches).
+            return delivered or bool(self.observers)
 
     def since(self, epoch, sequence):
         with self.lock:
