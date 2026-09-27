@@ -510,9 +510,13 @@ class SessionAuthority:
                     from gateway.session_ingress_media import release_admission_media
                     release_admission_media(self.db, admission_id)
                     self._publish_pending(ref)
+                    # ``status`` is the message.complete contract's TurnStatus: the Desktop
+                    # extends a Stopped bubble to the persisted partial only on 'interrupted'.
                     live.event_stream.publish(ref.session_id, {
                         'text': response, 'content': response, 'admission_id': admission_id,
-                        'outcome': 'cancelled' if settled['outcome'] == 'interrupted' else settled['outcome']})
+                        'outcome': 'cancelled' if settled['outcome'] == 'interrupted' else settled['outcome'],
+                        'status': {'completed': 'complete', 'interrupted': 'interrupted'}.get(
+                            settled['outcome'], 'error')})
             except Exception:
                 # The settle fence lost (a reset/compression moved runtime_generation under
                 # the turn). The row stays `started` for recovery -> `unknown`; re-settling
