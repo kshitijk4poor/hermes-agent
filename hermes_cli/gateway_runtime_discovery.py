@@ -17,24 +17,38 @@ class DiscoveryError(ValueError):
         self.reason = reason
 
 
-# The profile home keeps the operator's mode (main's home policy: symlinked homes, HERMES_HOME_MODE
-# 0701/0750, shared setups). Only group/other WRITE lets another user swap the socket; read/search
-# bits grant nothing against our 0600 socket. Everything we create ourselves stays owner-only.
-HOME_UNSAFE_BITS = 0o022
+def home_mode_unsafe(node: os.stat_result) -> bool:
+    """The profile home keeps the operator's mode (main's home policy: symlinked homes,
+    HERMES_HOME_MODE 0701/0750). Only write by another user lets them swap the socket; read/search
+    bits grant nothing against our 0600 socket, and group-write is harmless when the group is the
+    owner's private group (the umask-002 user-private-group default). What we create stays 0700."""
+    mode = stat.S_IMODE(node.st_mode)
+    if mode & 0o002:
+        return True
+    if not mode & 0o020:
+        return False
+    try:
+        import grp
+        import pwd
+        user, group = pwd.getpwuid(node.st_uid), grp.getgrgid(node.st_gid)
+    except (ImportError, KeyError):
+        return True
+    return not (group.gr_gid == user.pw_gid and group.gr_name == user.pw_name
+                and set(group.gr_mem) <= {user.pw_name})
 
 
-def _private_node(path: Path, *, kind: str, unsafe_bits: int = 0o077) -> os.stat_result:
+def _private_node(path: Path, *, kind: str, home: bool = False) -> os.stat_result:
     node = path.lstat()
     predicates = {"socket": stat.S_ISSOCK, "file": stat.S_ISREG, "directory": stat.S_ISDIR}
     if not predicates[kind](node.st_mode) or node.st_uid != os.getuid():  # windows-footgun: ok — POSIX socket path only
         raise DiscoveryError("unsafe_control_path")
-    if stat.S_IMODE(node.st_mode) & unsafe_bits:
+    if home_mode_unsafe(node) if home else stat.S_IMODE(node.st_mode) & 0o077:
         raise DiscoveryError("unsafe_control_permissions")
     return node
 
 
 def _socket_path(home: Path) -> Path:
-    _private_node(home, kind="directory", unsafe_bits=HOME_UNSAFE_BITS)
+    _private_node(home, kind="directory", home=True)
     direct = home / "gateway.sock"
     if os.path.lexists(direct):
         _private_node(direct, kind="socket")

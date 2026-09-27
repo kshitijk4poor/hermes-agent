@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from gateway.control_socket import _home_hash
-from hermes_cli.gateway_runtime_discovery import DiscoveryError, query_identify
+from hermes_cli.gateway_runtime_discovery import DiscoveryError, home_mode_unsafe, query_identify
 
 
 @pytest.mark.platforms("linux")
@@ -53,3 +53,20 @@ def test_fallback_pointer_uses_owner_location_and_keeps_identity_checks(tmp_path
             directory.chmod(0o755)
             with pytest.raises(DiscoveryError, match='unsafe_control_permissions'):
                 query_identify(home, timeout=2)
+
+
+@pytest.mark.platforms("linux", "macos")
+def test_home_mode_refuses_only_writes_another_user_can_make(tmp_path, monkeypatch):
+    import grp
+    import os
+    import pwd
+    home = tmp_path / 'home'
+    home.mkdir()
+    user = pwd.getpwuid(os.getuid())
+    private = grp.struct_group((user.pw_name, 'x', user.pw_gid, []))
+    shared = grp.struct_group(('staff', 'x', user.pw_gid, [user.pw_name, 'someone-else']))
+    for mode, group, unsafe in ((0o700, private, False), (0o755, shared, False), (0o757, private, True),
+                                (0o775, private, False), (0o775, shared, True)):
+        home.chmod(mode)
+        monkeypatch.setattr(grp, 'getgrgid', lambda _gid, g=group: g)
+        assert home_mode_unsafe(home.lstat()) is unsafe, (oct(mode), group.gr_name)
