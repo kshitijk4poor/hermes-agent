@@ -67,6 +67,11 @@ async def prepare_compress(authority, live, payload, prepared):
                                                focus_topic=request.focus_topic)
             if not any(m.get('_compressed_summary') for m in compressed):
                 raise RuntimeStoreError('nothing_to_compress')
-            return rejoin_compressed_head_and_tail(compressed, tail)
-    compressed = await asyncio.to_thread(summarize)
-    return dict(prepared, messages=compressed, in_place=is_truthy_value(options.get('in_place'), default=True))
+            return rejoin_compressed_head_and_tail(compressed, tail), compressor
+    compressed, compressor = await asyncio.to_thread(summarize)
+    # The same report every native /compress prints ("Compressed: N → M messages").
+    from agent.manual_compression_feedback import summarize_manual_compression
+    summary = summarize_manual_compression(messages, compressed, estimate_request_tokens_rough(messages),
+                                           estimate_request_tokens_rough(compressed), compression_state=compressor)
+    return dict(prepared, messages=compressed, summary=summary,
+                in_place=is_truthy_value(options.get('in_place'), default=True))

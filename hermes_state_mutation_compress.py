@@ -23,4 +23,5 @@ def compress_in_transaction(db, conn, session_id, payload, prepared):
     conn.execute('UPDATE sessions SET runtime_generation=runtime_generation+1 WHERE id=?', (session_id,))
     generation = conn.execute('SELECT runtime_generation FROM sessions WHERE id=?', (session_id,)).fetchone()[0]
     return affected, {'target_session_id': child, 'previous_target_session_id': target,
-                   'execution_generation': generation, 'message_count': len(prepared['messages'])}
+                   'execution_generation': generation, 'message_count': len(prepared['messages']),
+                   'summary': prepared.get('summary')}

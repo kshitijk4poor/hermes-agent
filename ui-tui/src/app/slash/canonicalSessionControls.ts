@@ -190,7 +190,16 @@ export async function runCanonicalSessionControl(
 
       ctx.transcript.setHistoryItems([introMsg(info), ...toTranscriptMessages(snapshot.messages)])
       patchUiState({ info })
-      ctx.transcript.sys('✓ transcript compressed')
+      // The authority's report (headline, token line, note), as the native /compress prints it.
+      const summary = result.summary as { headline?: string; noop?: boolean; note?: string; token_line?: string } | null
+
+      ctx.transcript.sys(summary?.headline ? `${summary.noop ? '' : '✓ '}${summary.headline}` : '✓ transcript compressed')
+
+      for (const line of [summary?.token_line, summary?.note]) {
+        if (line) {
+          ctx.transcript.sys(`  ${line}`)
+        }
+      }
     }
   } catch (error) {
     ctx.guardedErr(error)
