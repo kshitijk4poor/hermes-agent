@@ -411,9 +411,12 @@ def _modification_allowed(rel: str) -> bool:
     The cron ticker stamps its own liveness on a schedule of its own, inside the
     verified window or not: they are never user state. On a cold home they show up
     as ordinary additions (tolerated); once the ticker exists, the same file moves.
+    gateway_state.json is the running gateway's own record (pid, start time,
+    code_sha): the first chat turn starts the gateway and the update restarts it,
+    so its bytes must move. It stays judged -- losing it still fails.
     """
     name = rel.rsplit("/", 1)[-1]
-    if name in ("config.yaml", "state.db") or name.endswith(".db"):
+    if name in ("config.yaml", "state.db") or name.endswith(".db") or rel == "gateway_state.json":
         return True
     parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
     is_cron = parent == "cron" or parent.endswith("/cron")
