@@ -748,17 +748,6 @@ function windowRouteSessionId(): string | null {
   return routeSessionId(window.location.hash.replace(/^#/, ''))
 }
 
-/** The routed stored session a send should honor RIGHT NOW. navigate()
- *  rewrites location.hash synchronously, but a render-time copy of the route
- *  only catches up on the next render; a send inside that gap (branch, then
- *  an immediate Enter on a slow machine) would trust the stale copy and
- *  deliver into the previous chat. Any hash is authoritative (including a
- *  new-chat hash, which names no session); with no hash at all (unit tests,
- *  first paint) the render-time copy is all there is. */
-export function liveRoutedSessionId(renderTimeRoute: string | null): string | null {
-  return typeof window !== 'undefined' && window.location.hash ? windowRouteSessionId() : renderTimeRoute
-}
-
 /** Whether the user is still focused on a session that belongs to the same
  *  durable lineage as the given stored id. Used to decide whether a
  *  backgrounded session's delayed id-rotation may follow the route/selection
