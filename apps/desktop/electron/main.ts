@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process'
+import { type ChildProcess, execFileSync, spawn } from 'node:child_process'
 
 import type { GatewayEndpoint } from './local-gateway'
 import { configureWindowsGatewayTicketClient, createLocalGatewayDials, ensureLocalGateway, mintLocalGatewayTicket, nativeGatewayHttpHeaders, redialLocalGateway, routedGatewayEndpoint, runGatewayEnsure } from './local-gateway'
@@ -80,16 +80,11 @@ import {
   processStartMarker,
   REAP_PROBE_TIMEOUT_MS
 } from './backend-claim'
-import { dashboardFallbackArgs, serveBackendArgs } from './backend-command'
+import { dashboardFallbackArgs } from './backend-command'
 import { createBackendConnectionState } from './backend-connection-state'
 import { assertDescriptorStillOwned, forgetFailedDescriptor } from './backend-descriptor-cache'
 import { BackendDialClaims } from './backend-dial-claim'
-import {
-  buildDesktopBackendEnv,
-  hermesManagedNodePathEntries,
-  normalizeHermesHomeRoot,
-  profileBackendParentEnv
-} from './backend-env'
+import { buildDesktopBackendEnv, profileBackendParentEnv } from './backend-env'
 import { isReauthRequiredError, waitForHermesReady } from './backend-health'
 import {
   backendCommandMatches,
@@ -222,6 +217,7 @@ import type { RosterProfileMetadata } from './connection-registry'
 import { liveWindowState, overlayWindowState } from './connection-window-state'
 import { describeCrashReason, installCrashForensics } from './crash-forensics'
 import { adoptServedDashboardToken } from './dashboard-token'
+import { resolveDesktopHermesHome, resolveDesktopUserData } from './data-paths'
 import { loadOrCreateInstallationId, sshOwnershipId } from './desktop-installation'
 import { formatDesktopLogLine, formatLogStamp } from './desktop-log-line'
 import {
@@ -268,15 +264,26 @@ import {
 } from './find-in-page'
 import { createFirstRunSetupGate } from './first-run-setup-gate'
 import { registerFsIpc } from './fs-ipc'
-import { downloadViaTokenToFile } from './gateway-download-transport'
+import { downloadViaTokenToFile as downloadViaNativeGatewayToFile } from './gateway-download-transport'
+import type {
+  GatewayFileSaveContext,
+  GatewayFileSaveDeps,
+  GatewayFileSaveResult,
+  GatewaySaveDialogOptions,
+  GatewaySaveDialogResult
+} from './gateway-file-download'
 import {
+  finalizeGatewayDownload,
   gatewayFilePath,
   gatewayFileRequestPaths,
   resolveGatewayFileBackend,
   saveGatewayDownload
 } from './gateway-file-download'
-import { startGatewaysAfterUpdateAbort, stopGatewayBeforeUpdate } from './gateway-stop-before-update'
+import { downloadViaOauthSessionToFile, downloadViaTokenToFile } from './gateway-file-download-transport'
+import { stopGatewayBeforeUpdate } from './gateway-stop-before-update'
+import { resolveGatewayVersion } from './gateway-version'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
+import { windowsGitCandidates } from './git-binary-candidates'
 import { registerGitIpc } from './git-ipc'
 import { desktopBackendSpawnEnv, guestOnboardingEnabled } from './guest-onboarding'
 import { readAndConsumeHandoffResult } from './handoff-result'
@@ -364,7 +371,11 @@ import { isMediaCapturePermission } from './media-capture-permission'
 import { createMediaProtocolHandler, MEDIA_PROTOCOL } from './media-protocol'
 import { fetchLocalMedia } from './media-range'
 import { createMinimizeToTray } from './minimize-to-tray'
-import { createNativeAccessTokenCoordinator, NativeAuthChangedError } from './native-access-token'
+import {
+  createNativeAccessTokenCoordinator,
+  type NativeAccessTokenOptions,
+  NativeAuthChangedError
+} from './native-access-token'
 import { oauthSessionIsLive, resolveJsonBody, resolveOauthRestAuth, resolveReadinessProbeAuth } from './native-auth-decisions'
 import {
   nativeRefreshUrl,
@@ -388,7 +399,9 @@ import {
   withoutInteractiveOauthLogin
 } from './oauth-rest-request'
 import { wireOauthSessionResponse } from './oauth-session-response'
+import { listWindowsProcesses, reapPackageRootedProcesses } from './package-process-reap'
 import { createParentStartMarkerResolver } from './parent-process-identity'
+import { bundledPayload, installIdForRoot, type PayloadInfo } from './payload-backend'
 import { petOverlayClickThrough } from './pet-overlay'
 import { placePetOverlay, registerPetOverlayIpc } from './pet-overlay-ipc'
 import {
@@ -4295,10 +4308,7 @@ async function releaseBackendLock(updateRoot: string, tag: string): Promise<{ un
     initialPids.push(hermesProcess.pid)
   }
 
-  stopBackendTreesForUpdate(hermesProcess, {
-    forceKillProcessTree,
-    stopAllPoolBackends
-  })
+  await Promise.all([teardownPrimaryBackendAndWait(), stopAllPoolBackends()])
 
   // Uninstall deletes the whole runtime. Drain separately-running gateways
   // through the CLI, rather than targeting a gateway worker by PID.
@@ -5352,7 +5362,6 @@ function fetchJson(url, token, options: any = {}) {
     { method: options.method || 'GET' }
   )
 }
-
 
 function fetchPublicJson(url, options: any = {}) {
   // Credential-free JSON GET/POST for public gateway endpoints
@@ -8020,25 +8029,42 @@ async function saveGatewayFile(payload: GatewayFileSavePayload = {}): Promise<Ga
       dialog.showSaveDialog(mainWindow, options)
   }
 
-  try {
-    if (connection.authMode === 'oauth') {
-      return await requestWithOauthFallback(connection.baseUrl, {
-        ensureNativeAccessToken,
-        requestWithBearer: bearer => downloadViaTokenToFile(url, null, ctx, finalizeGatewayDownload, { bearer }),
-        requestWithCookie: () => downloadViaOauthSessionToFile(url, ctx)
-      })
-    }
+  return saveGatewayDownload(requestPaths, ctx, {
+    ...deps,
+    download: async (requestPath: string, context: GatewayFileSaveContext): Promise<GatewayFileSaveResult> => {
+      const url: string = `${connection.baseUrl}${requestPath}`
 
-    return await downloadViaTokenToFile(url, connection.token, ctx, finalizeGatewayDownload, {
-      gatewayDescriptor: connection.gatewayEndpoint ? connection : undefined
-    })
-  } catch (error) {
-    // Desktop and the remote gateway update independently. A gateway predating
-    // /api/fs/download 404s here; fall back (ONLY on 404) to the older capped
-    // data-URL route so downloads keep working against older backends.
-    if (isNotFoundError(error)) {
-      return await saveGatewayFileViaDataUrl(connection, requestPaths.dataUrl, ctx)
-    }
+      if (connection.authMode === 'oauth') {
+        return requestWithOauthFallback(connection.baseUrl, {
+          ensureNativeAccessToken,
+          requestWithBearer: (bearer: string): Promise<GatewayFileSaveResult> =>
+            downloadViaTokenToFile(url, null, context, deps, { bearer }),
+          requestWithCookie: (): Promise<GatewayFileSaveResult> =>
+            downloadViaOauthSessionToFile<Session>(url, context, {
+              ...deps,
+              getSession: getOauthSessionForUrl,
+              request: electronNet.request
+            })
+        })
+      }
+
+      // A canonical local gateway authenticates with its native descriptor
+      // headers; that transport also retries the connection phase and refuses
+      // redirects so a one-use grant never reaches a new target.
+      if (connection.gatewayEndpoint) {
+        return downloadViaNativeGatewayToFile(
+          url,
+          connection.token ?? null,
+          context,
+          (
+            response: http.IncomingMessage,
+            _statusCode: number,
+            _headers: http.IncomingHttpHeaders,
+            transport: { abort: () => void }
+          ): Promise<GatewayFileSaveResult> => finalizeGatewayDownload(response, context, transport.abort, deps),
+          { gatewayDescriptor: connection }
+        )
+      }
 
       return downloadViaTokenToFile(url, connection.token ?? null, context, deps)
     },
@@ -12054,9 +12080,29 @@ function reapInstallRootedStragglers(excludePids: number[]): void {
   }
 }
 
-  stopBackendChild(primary)
+// Closing Desktop never stops the detached gateway: only processes this app
+// still owns are torn down, and the straggler reap protects every live Hermes
+// runtime tree (package-process-reap.ts).
+const backendShutdown = createBackendShutdownCoordinator(async (): Promise<void> => {
+  const ownedChildren = IS_WINDOWS ? collectOwnedBackendChildren() : []
+  const localShutdown = localBackendLifecycle.shutdown()
+  const primary = backendConnectionState.getProcess()
+  const primaryStop = teardownPrimaryBackendAndWait(backendTeardownOptions('quit'))
+  const pooledStops = stopAllPoolBackends()
+
   // Bounded: a backend that ignores SIGTERM must not wedge app quit (main's 7 s teardown budget).
-  await waitForTeardown([localShutdown, waitForBackendExit(primary), stopAllPoolBackends()], 7_000)
+  await waitForTeardown([localShutdown, primaryStop, pooledStops], 7_000)
+
+  reapInstallRootedStragglers(Number.isInteger(primary?.pid) ? [primary.pid] : [])
+
+  // Verify last, so a surviving child cannot skip the teardown above.
+  const closeStopFailure = windowsCloseStopOwnedBackends(ownedChildren)
+
+  if (closeStopFailure) {
+    rememberLog(`[close-stop] ${closeStopFailure.message}`)
+
+    throw closeStopFailure
+  }
 })
 
 const quitTeardown = createQuitTeardownCoordinator(() => app.quit())
@@ -12145,6 +12191,12 @@ async function prepareProfileRenameRequest(request) {
   })
 }
 
+// A quit or update handoff kills renderers while their windows can still report
+// live; the renderer lifecycle must treat that as teardown, not a crash to reload.
+function rendererTeardownInProgress(): boolean {
+  return isQuittingForHandoff || backendShutdown.hasStarted()
+}
+
 /**
  * The terminal boot failure currently latched in this process, if any. These
  * latches are cleared only by an explicit recovery path (reset, repair,
@@ -12214,7 +12266,15 @@ async function startHermes(requestedProfile?: string) {
   migrateActiveProfileIfMissing()
 
   const connectionAttempt = backendConnectionState.startAttempt()
-  const primaryProfile = requestedProfile || primaryProfileKey()
+
+  // ONE launch-profile decision for this attempt (#108417): routing identity,
+  // the --profile argv and the child env all derive from the same read, so a
+  // hermes:profile:remember landing mid-startup becomes the NEXT boot's
+  // preference instead of splitting routing identity from the launch
+  // argument. An explicit profile-scoped caller names both.
+  const { argvProfile: activeProfile, routingProfile: primaryProfile } = requestedProfile
+    ? { argvProfile: requestedProfile, routingProfile: requestedProfile }
+    : resolveLaunchProfile(readActiveDesktopProfile)
 
   // Legacy path callers without an explicit profile belong to the primary
   // window backend. Profile-scoped callers still pass their key directly.
@@ -12270,13 +12330,15 @@ async function startHermes(requestedProfile?: string) {
     }
 
     const backendArgs = ['gateway', 'ensure', '--json']
+
     // Pin the desktop's chosen profile via the global --profile flag. This is
     // deterministic (it wins over the sticky ~/.hermes/active_profile file) and
-    // resolves HERMES_HOME the same way `hermes -p <name>` does on the CLI. An
-    // unset preference keeps the legacy launch so existing installs are
-    // unaffected.
-    const activeProfile = requestedProfile || readActiveDesktopProfile()
-
+    // resolves HERMES_HOME the same way `hermes -p <name>` does on the CLI. A
+    // launch override is persisted into active-profile.json before startHermes,
+    // so Hermes.exe --profile <name> and hermes -p <name> desktop both land
+    // here. `activeProfile` is the SAME decision that named routing above —
+    // never re-read here (#108417). An unset preference keeps the legacy
+    // launch so existing installs are unaffected.
     if (activeProfile) {
       backendArgs.unshift('--profile', activeProfile)
     }
@@ -12342,6 +12404,7 @@ async function startHermes(requestedProfile?: string) {
       HERMES_HOME,
       profileBackendParentEnv({ hermesHome: HERMES_HOME, profile: primaryProfile })
     ))
+
     void showPluginCompatNoticeOnce()
 
     backendConnectionState.assertCurrentAttempt(connectionAttempt)
@@ -12353,7 +12416,7 @@ async function startHermes(requestedProfile?: string) {
     // The primary descriptor names its own profile: a profile-less descriptor
     // reads as "default" downstream and breaks per-source profile memory when
     // the primary actually booted as another profile (#825324fd).
-    return { ...connection, profile: primaryProfileKey(), logs: hermesLog.slice(-80), ...getWindowState() }
+    return { ...connection, profile: primaryProfile, logs: hermesLog.slice(-80), ...getWindowState() }
   })().catch(async error => {
     if (!backendConnectionState.clearPromiseForAttempt(connectionAttempt)) {
       throw error
@@ -14310,10 +14373,10 @@ ipcMain.handle('hermes:connection', async (event, profile) => {
     primaryProfileKey()
   )
 
-  return connectDesktopProfileRoute(route)
+  return connectDesktopProfileRoute(route, event.sender)
 })
 
-async function connectDesktopProfileRoute(route: DesktopProfileRoute) {
+async function connectDesktopProfileRoute(route: DesktopProfileRoute, sender?: Electron.WebContents) {
   // Coalesce concurrent renderer dials for one profile scope (#90812): the
   // renderer-side reconnect lock is per-window, so two windows waking at once
   // both land here. The claim key mirrors ensureBackend()'s own profile
@@ -14349,16 +14412,18 @@ async function connectDesktopProfileRoute(route: DesktopProfileRoute) {
 }
 
 // Registry-scoped variant: resolve a backend for (connectionId, profile).
-// connectionId '' / 'local' / the registry primary all behave sensibly; the
-// local kind delegates to ensureBackend when the v1 route is local, and
-// forces a genuinely-local child when the v1 global mode is remote (the
-// registry 'local' entry always means this machine).
-ipcMain.handle('hermes:connection:for', async (_event, payload) => {
+// An empty connection id is not registry.primary — that substitution dials
+// another SSH host when a scoped caller drops the id. 'local' and an explicit
+// primary id still resolve to those sources. The local kind delegates to
+// ensureBackend when the v1 route is local, and attaches to this machine's
+// canonical gateway when the v1 global mode is remote (the registry 'local'
+// entry always means this machine) unless the profile is remote-only.
+ipcMain.handle('hermes:connection:for', async (event, payload) => {
   const { connectionId, profile } = payload && typeof payload === 'object' ? (payload as any) : ({} as any)
   const registry = readDesktopConnectionsRegistry()
-  const id = String(connectionId || '').trim() || registry.primary
+  const id = registryDialConnectionId(connectionId, registry.primary)
 
-  return connectDesktopProfileRoute({ connectionId: id, profile: String(profile ?? '').trim() || 'default' })
+  return connectDesktopProfileRoute({ connectionId: id, profile: String(profile ?? '').trim() || 'default' }, event.sender)
 })
 
 const windowConnectionRoutes = new WindowConnectionRouteRegistry()

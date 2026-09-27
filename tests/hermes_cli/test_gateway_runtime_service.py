@@ -9,7 +9,7 @@ import time
 import pytest
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("case,reason", [
     ("custom", "deadline"), ("named", "deadline"), ("alias", "deadline"),
     ("default", "deadline"),
@@ -185,7 +185,7 @@ def test_task_xml_binds_actual_action_and_principal(case, reason, tmp_path):
         verify_windows_task(xml, home, user, 'S-1-5-21-123')
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 @pytest.mark.parametrize("case,reason", [("loaded_good_disk_wrong", None), ("loaded_wrong_disk_good", "profile_mismatch"), ("bootstrap", None)])
 def test_native_launchd_checks_loaded_job_before_disk(case, reason, tmp_path, monkeypatch):
     import plistlib
@@ -228,7 +228,7 @@ def test_native_launchd_checks_loaded_job_before_disk(case, reason, tmp_path, mo
     assert plist.read_bytes() == original
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 @pytest.mark.parametrize("wrong", [False, True])
 def test_native_task_query_uses_installed_xml_and_vendor_launcher(wrong, tmp_path, monkeypatch):
     from hermes_cli import gateway_runtime_service as service
@@ -275,7 +275,7 @@ def test_native_task_query_uses_installed_xml_and_vendor_launcher(wrong, tmp_pat
     assert script.read_bytes() == original
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_service_definition_reads_reject_fifo_without_waiting(tmp_path):
     from hermes_cli.gateway_runtime_service_identity import read_definition
     regular = tmp_path / 'regular'

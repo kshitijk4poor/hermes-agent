@@ -8,7 +8,7 @@ from tests.gateway.fixtures.local_recovery_probe import rpc, websocket
 from tests.gateway.test_session_busy_controls import owner, settled
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_canonical_desktop_metadata_survives_create_info_and_reattach(tmp_path):
     """The native protocol, not the legacy contract number, identifies this route."""
     with owner(tmp_path) as (home, _peer, desc):

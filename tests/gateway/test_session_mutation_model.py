@@ -21,7 +21,7 @@ class CatalogModel(Model):
         self.wfile.write(payload)
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_model_receipt_changes_next_wire_and_branch_keeps_independent_history(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

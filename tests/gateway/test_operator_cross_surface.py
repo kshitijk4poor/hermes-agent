@@ -8,7 +8,7 @@ import sys
 import pytest
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize('creator', ['native', 'dashboard'])
 def test_operator_cross_surface_real_auth_fifo_and_attribution(tmp_path, creator):
     root = Path(__file__).resolve().parents[2]

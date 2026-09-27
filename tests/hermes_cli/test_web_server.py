@@ -489,7 +489,9 @@ class TestWebServerEndpoints:
         payload = response.json()
         assert payload["errors"]
         assert "schema" in payload["errors"][0]["error"]
-        assert payload["recents"]["sessions"] == []
+        # A failed read is a retryable failed load, never an empty list.
+        assert "sessions" not in payload["recents"]
+        assert payload["recents"]["failed"] is True
 
     def test_startup_eager_reconcile_heals_stale_store(self):
         """The OWNER's startup open brings a stale store current; the dashboard only reads.
@@ -4276,21 +4278,20 @@ class TestDeleteSessionEndpoint:
         assert retry.status_code == 200, retry.text
         assert retry.json() == first.json()
 
-    def test_delete_existing_session_scrubs_row_and_disk(self):
-        # The CLI delete path threads the sessions dir so transcript
-        # artifacts are removed with the row; the endpoint historically
-        # didn't, leaving secret-bearing session_<id>.json snapshots and
-        # request dumps orphaned on disk after a UI delete.
+    def _canonical_delete(self, owner, sid, **query):
+        from gateway.session_authority import LiveSession
+        owner.sessions[sid] = LiveSession(None, 'route')
+        row = owner.db.get_session(sid)
+        params = dict(request_id=f'scrub-{sid}', expected_revision=row['runtime_revision'],
+                      expected_generation=row['runtime_generation'], **query)
+        return self.auth_client.delete(f"/api/sessions/{sid}", params=params)
+
+    def test_delete_existing_session_scrubs_row_and_disk(self, mutation_owner):
+        # The canonical delete retires rows; the endpoint must also remove the secret-bearing
+        # session_<id>.json snapshots and request dumps the CLI delete path removes (#60207).
         from hermes_constants import get_hermes_home
-        from hermes_state import SessionDB
 
-        db_path = get_hermes_home() / "state.db"
-        db = SessionDB(db_path=db_path)
-        try:
-            db.create_session("disk-scrub", source="cli")
-        finally:
-            db.close()
-
+        self._seed(["disk-scrub"])
         sessions_dir = get_hermes_home() / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
         for name, body in (
@@ -4302,49 +4303,48 @@ class TestDeleteSessionEndpoint:
         # Another session's artifacts must survive.
         (sessions_dir / "session_disk-scrub-neighbour.json").write_text("{}", encoding="utf-8")
 
-        resp = self.auth_client.delete("/api/sessions/disk-scrub")
+        resp = self._canonical_delete(mutation_owner, "disk-scrub")
 
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         assert resp.json().get("ok") is True
-        db = SessionDB(db_path=db_path)
-        try:
-            assert db.get_session("disk-scrub") is None
-        finally:
-            db.close()
+        assert not self._exists("disk-scrub")
         assert not (sessions_dir / "session_disk-scrub.json").exists()
         assert not (sessions_dir / "disk-scrub.jsonl").exists()
         assert not (sessions_dir / "request_dump_disk-scrub_001.json").exists()
         assert (sessions_dir / "session_disk-scrub-neighbour.json").exists()
 
-    def test_delete_named_profile_session_scrubs_profile_disk(self):
+    def test_delete_named_profile_session_scrubs_profile_disk(self, monkeypatch):
+        from types import SimpleNamespace
+        from gateway.session_authority import SessionAuthority
         from hermes_cli import profiles as profiles_mod
+        from hermes_cli.web_server import app
         from hermes_state import SessionDB
+        from hermes_state_runtime import begin_runtime_epoch
 
         profile_home = profiles_mod.get_profile_dir("worker")
         profile_home.mkdir(parents=True)
         (profile_home / "config.yaml").touch()  # identity marker: bare dirs are not profiles
         sessions_dir = profile_home / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
-        db_path = profile_home / "state.db"
-        db = SessionDB(db_path=db_path)
+        db = SessionDB(db_path=profile_home / "state.db")
+        # ?profile= is served by that home's own authority.
+        owner = SessionAuthority(SimpleNamespace(_draining=False), profile_id=str(profile_home),
+            instance_id='worker-owner', db=db, epoch=begin_runtime_epoch(db, instance_id='worker-owner'))
+        monkeypatch.setattr(app.state, 'session_authority', owner, raising=False)
         try:
             db.create_session("profile-scrub", source="cli")
-        finally:
-            db.close()
-        (sessions_dir / "session_profile-scrub.json").write_text(
-            '{"messages": [{"content": "secret-token"}]}', encoding="utf-8"
-        )
+            (sessions_dir / "session_profile-scrub.json").write_text(
+                '{"messages": [{"content": "secret-token"}]}', encoding="utf-8"
+            )
 
-        resp = self.auth_client.delete("/api/sessions/profile-scrub?profile=worker")
+            resp = self._canonical_delete(owner, "profile-scrub", profile="worker")
 
-        assert resp.status_code == 200
-        assert resp.json().get("ok") is True
-        db = SessionDB(db_path=db_path)
-        try:
+            assert resp.status_code == 200, resp.text
+            assert resp.json().get("ok") is True
             assert db.get_session("profile-scrub") is None
+            assert not (sessions_dir / "session_profile-scrub.json").exists()
         finally:
             db.close()
-        assert not (sessions_dir / "session_profile-scrub.json").exists()
 
 
 class TestBulkDeleteSessionsEndpoint:

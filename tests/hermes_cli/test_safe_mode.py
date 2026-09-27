@@ -77,7 +77,7 @@ def _pty_cli(argv, cwd, env, timeout=90):
     return code, output.decode('utf-8', 'replace')
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_canonical_safe_launch_is_frozen_policy_executed_in_isolated_worker(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user, work = tmp_path / 'state', tmp_path / 'user', tmp_path / 'work'

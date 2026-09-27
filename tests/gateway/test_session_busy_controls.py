@@ -95,7 +95,7 @@ async def settled(home):
             await asyncio.sleep(.05)
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_busy_policy_is_authorized_session_scoped_and_not_inference(tmp_path):
     with owner(tmp_path) as (home, peer, desc):
         async def probe():
@@ -134,7 +134,7 @@ def test_busy_policy_is_authorized_session_scoped_and_not_inference(tmp_path):
         asyncio.run(probe())
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_corrections_are_generation_fenced_and_consumed_by_same_provider_loop(tmp_path):
     with owner(tmp_path) as (home, peer, desc):
         async def probe():

@@ -83,7 +83,7 @@ async def reject_ws(origin, token):
             pass
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
     with daemon(tmp_path) as (home, descriptor), httpx.Client(
             base_url=descriptor['api_origin'], trust_env=False) as client:
@@ -136,7 +136,7 @@ def test_native_http_grants_are_single_use_and_bound_to_daemon(tmp_path):
             'display': {'skin': 'ares'}}}, headers=headers(ticket(home, descriptor)))
         assert updated.status_code == 200, updated.text
         assert client.get('/api/config', headers=headers(ticket(home, descriptor))).json()['display']['skin'] == 'ares'
-        import yaml
+        import hermes_yaml as yaml
         assert yaml.safe_load((home / 'config.yaml').read_text())['display']['skin'] == 'ares'
         query_ticket = ticket(home, descriptor)
         assert client.get('/api/config', params={'ticket': query_ticket}).status_code == 401
@@ -235,7 +235,7 @@ async def test_native_http_preserves_gated_auth_and_actual_socket_boundary(tmp_p
                       'native_gated_auth_raw_peer_readiness': 'passed'}))
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_native_http_principal_satisfies_route_local_token_policy(tmp_path):
     """Routes that call ``_require_token`` honor the verified native owner (F16).
 

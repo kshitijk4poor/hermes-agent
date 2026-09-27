@@ -69,7 +69,7 @@ async def test_verdict_precedes_replacing_a_running_gateway(tmp_path, monkeypatc
 
 
 def test_cloned_profile_does_not_inherit_the_multiplex_flag(tmp_path, monkeypatch):
-    import yaml
+    import hermes_yaml as yaml
     from hermes_cli.profiles import _strip_multiplex_flag
 
     nested = tmp_path / 'nested.yaml'

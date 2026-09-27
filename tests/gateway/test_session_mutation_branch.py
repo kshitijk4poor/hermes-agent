@@ -46,7 +46,7 @@ async def branch_round(home, descriptor, previous=None):
         return params, receipt
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_branch_route_and_frozen_policy_survive_owner_restart(tmp_path):
     with daemon(tmp_path) as (home, descriptor):
         previous = asyncio.run(branch_round(home, descriptor))

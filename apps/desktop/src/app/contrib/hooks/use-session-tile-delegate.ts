@@ -470,7 +470,7 @@ export function useSessionTileDelegate({
                 ? overlayConcurrentMessageChanges(
                     mergeTileTranscript(
                       resumeRequestBaselineMessages,
-                      resumed.messages,
+                      toChatMessages(resumed.messages),
                       cached?.streamId
                     ),
                     resumeRequestBaselineMessages,

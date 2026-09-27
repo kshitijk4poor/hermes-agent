@@ -71,6 +71,8 @@ def _run_owned_job(job, tmp_path, db=None):
     finally:
         if owns_db:
             release(db)
+
+
 def test_cron_cleanup_worker_inherits_caller_contextvars():
     """Profile-scoped secrets must remain visible during threaded cleanup."""
     profile_scope = contextvars.ContextVar("test_cron_cleanup_profile_scope")

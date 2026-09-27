@@ -22,7 +22,7 @@ def test_requested_service_name_does_not_borrow_callers_home(tmp_path, monkeypat
     assert service_suffix(requested) == installed
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_service_start_does_not_decode_irrelevant_supervisor_output():
     from hermes_cli.gateway_runtime_service import ExistingService, start_existing_gateway_service
     service = ExistingService('systemd', (sys.executable, '-c', 'import sys; sys.stdout.buffer.write(bytes([255]))'))

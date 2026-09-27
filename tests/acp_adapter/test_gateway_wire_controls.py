@@ -11,7 +11,7 @@ from hermes_cli.gateway_client import GatewayClientError
 from tests.acp_adapter.test_gateway_sessions import daemon, editor, viewer, model_peer  # noqa: F401
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_profile_mismatch_refuses_before_creation(daemon, tmp_path, monkeypatch):
     import acp_adapter.gateway_server as server
@@ -26,7 +26,7 @@ async def test_profile_mismatch_refuses_before_creation(daemon, tmp_path, monkey
         assert (await ws.rpc("session.list"))["sessions"] == []
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_real_acp_answer_resolves_the_exact_pending_control(daemon, tmp_path, model_peer):
     from tests.gateway.fixtures.authority_controls_peer import ModelPeer as ApprovalPeer

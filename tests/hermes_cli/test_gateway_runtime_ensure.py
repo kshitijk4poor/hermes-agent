@@ -10,7 +10,7 @@ import time
 import pytest
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_ensure_waits_for_real_control_owner_without_claiming_pending_is_ready(tmp_path):
     from gateway.control_socket import GatewayControlServer
     from hermes_cli import gateway_runtime as runtime
@@ -49,7 +49,7 @@ def test_ensure_waits_for_real_control_owner_without_claiming_pending_is_ready(t
     asyncio.run(probe())
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_installed_service_start_is_nonmutating_and_failed_manager_never_spawns(tmp_path, monkeypatch):
     from hermes_cli import gateway as gw, gateway_runtime as runtime
 
@@ -109,7 +109,7 @@ def test_installed_service_start_is_nonmutating_and_failed_manager_never_spawns(
     assert sum("start" in json.loads(line) for line in calls.read_text().splitlines()) == 1
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_public_ensure_json_deadline_and_invalid_invocation(tmp_path):
     from hermes_cli import gateway_runtime as runtime
     assert callable(getattr(runtime, "ensure_gateway_runtime", None))
@@ -134,7 +134,7 @@ def test_public_ensure_json_deadline_and_invalid_invocation(tmp_path):
     assert "private-value" not in result.stdout
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_unmanaged_child_uses_explicit_home_and_survives_launcher_exit(tmp_path, monkeypatch):
     from hermes_cli import gateway_runtime_start as start
     assert callable(getattr(start, "spawn_unmanaged_gateway", None))
@@ -173,7 +173,7 @@ def test_unmanaged_child_uses_explicit_home_and_survives_launcher_exit(tmp_path,
         gate.touch()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.spawns_gateway_lookalike  # stub interpreter records env then exits; reaped below
 def test_unmanaged_runtime_does_not_inherit_client_yolo(tmp_path, monkeypatch):
     from hermes_cli import gateway_runtime_start as start
@@ -206,7 +206,7 @@ def test_unmanaged_runtime_does_not_inherit_client_yolo(tmp_path, monkeypatch):
     assert os.environ['HERMES_YOLO_MODE'] == '1'
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_reserved_profile_without_pid_or_control_is_never_absent(tmp_path):
     from gateway.runtime_ownership import ProfileOwnership
     from hermes_cli.gateway_runtime import discover_gateway_endpoint
@@ -225,7 +225,7 @@ def test_reserved_profile_without_pid_or_control_is_never_absent(tmp_path):
     assert discover_gateway_endpoint(home).state == "absent"
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_native_windows_discovery_uses_same_user_pipe(tmp_path):
     from gateway.runtime_bootstrap_windows import NativeControlServer
     from hermes_cli.gateway_runtime import discover_gateway_endpoint
@@ -246,7 +246,7 @@ def test_native_windows_discovery_uses_same_user_pipe(tmp_path):
         server.close()
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_native_windows_spawn_never_retries_without_breakaway(tmp_path, monkeypatch):
     from hermes_cli import gateway_runtime_start as start
     from hermes_cli.gateway_runtime_service import RuntimeStartError
@@ -262,7 +262,7 @@ def test_native_windows_spawn_never_retries_without_breakaway(tmp_path, monkeypa
     assert calls[0]["creationflags"] == windows_detach_flags()
 
 
-@pytest.mark.macos_only
+@pytest.mark.platforms("macos")
 def test_native_launchd_ambiguous_domains_cannot_start(tmp_path, monkeypatch):
     from hermes_cli.gateway_runtime_service import discover_existing_gateway_service, RuntimeStartError
     peer = tmp_path / "inert_launchd.py"
@@ -279,7 +279,7 @@ def test_native_launchd_ambiguous_domains_cannot_start(tmp_path, monkeypatch):
     assert len(calls) == 2 and all(argv[1] == "print" for argv in calls)
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.spawns_gateway_lookalike  # stub interpreter records the resolved home then exits; reaped below
 def test_unmanaged_root_home_child_ignores_sticky_active_profile(tmp_path, monkeypatch):
     """Explicit default selection survives the CLI child's own profile bootstrap (F15): with

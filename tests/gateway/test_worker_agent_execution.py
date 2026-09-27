@@ -41,7 +41,7 @@ class Model(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize('probe_constructors', [False, True])
 def test_real_agent_worker_persists_context_usage_and_releases_lease(tmp_path, probe_constructors):
     root = Path(__file__).resolve().parents[2]

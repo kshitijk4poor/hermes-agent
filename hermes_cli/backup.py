@@ -35,6 +35,7 @@ from hermes_cli.backup_restore import (
     _detect_prefix,
     _extract_member_atomically,
     _import_db_member,
+    _restore_destination_epoch,
     _safe_restore_db,
     _validate_backup_zip,
 )
@@ -451,141 +452,8 @@ def verify_sqlite_integrity(
     return _done("header check passed", valid=True, size=size)
 
 
-def _foreign_db_holder_pids(db_path: Path) -> Optional[List[int]]:
-    """PIDs of OTHER processes holding *db_path* or its WAL/SHM open (Linux ``/proc`` scan).
-
-    An already-unlinked ``(deleted)`` sidecar — the #90950 split-brain fingerprint — still
-    counts as held. None off-Linux or when /proc fails.
-    """
-    if not sys.platform.startswith("linux"):
-        return None
-
-    def _canonical(path: str) -> str:
-        return os.path.normcase(os.path.abspath(path.removesuffix(" (deleted)")))
-
-    def _holds_watched(fds: List[str], fd_dir: str) -> bool:
-        for fd in fds:
-            try:
-                target = os.readlink(f"{fd_dir}/{fd}")
-            except OSError:
-                continue
-            if _canonical(target) in watched:
-                return True
-        return False
-
-    canonical_db = _canonical(os.fspath(db_path))
-    watched = {canonical_db, canonical_db + "-wal", canonical_db + "-shm"}
-    pids: List[int] = []
-    try:
-        own_pid = os.getpid()
-        for pid_str in os.listdir("/proc"):
-            if not pid_str.isdigit() or int(pid_str) == own_pid:
-                continue
-            fd_dir = f"/proc/{pid_str}/fd"
-            try:
-                fds = os.listdir(fd_dir)
-            except OSError:
-                continue
-            if _holds_watched(fds, fd_dir):
-                pids.append(int(pid_str))
-    except OSError:
-        return None
-    return pids
-
-
-def _safe_restore_db(src: Path, dst: Path) -> bool:
-    """Restore only while holding the destination authority's maintenance reservation."""
-    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
-    try:
-        with exclusive_maintenance([dst.absolute().parent, dst.resolve().parent]):
-            with _restore_epoch_source(src, dst) as prepared:
-                return _restore_db_pages(prepared, dst)
-    except (OwnershipConflict, OSError, sqlite3.Error) as exc:
-        logger.error("%s", exc)
-        return False
-
-
-def _restore_epoch(path: Path) -> int:
-    if not path.exists():
-        return 0
-    with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
-        if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='runtime_epoch'").fetchone():
-            return 0
-        row = conn.execute("SELECT epoch FROM runtime_epoch WHERE singleton=1").fetchone()
-        return int(row[0]) if row else 0
-
-
-def _restore_destination_epoch(dst: Path) -> int:
-    try:
-        return _restore_epoch(dst)
-    except (OSError, sqlite3.Error, ValueError) as exc:
-        raise OSError(
-            f"Cannot read the canonical runtime epoch at {dst}; refusing in-place restore. "
-            "Use `hermes sessions recover --source <snapshot> --output <separate-path>` "
-            "to salvage transcripts into a separate output."
-        ) from exc
-
-
-@contextmanager
-def _restore_epoch_source(src: Path, dst: Path):
-    """Stage an epoch floor into the image BEFORE publishing it atomically.
-
-    Updating the destination after backup() would leave a crash window that
-    reuses an older worker epoch. Never modify the user's source snapshot.
-    Full restores retain all admissions/worker receipts; normal startup advances
-    this floor and reconciles started work to unknown, not replayable queued work.
-    An unreadable destination cannot prove its epoch floor: use transcript salvage
-    into a separate output rather than silently restoring with a recycled epoch.
-    """
-    if dst.name != 'state.db' and dst.resolve().name != 'state.db':
-        yield src
-        return
-    floor = _restore_destination_epoch(dst)
-    if floor <= _restore_epoch(src):
-        yield src
-        return
-    with tempfile.TemporaryDirectory(prefix='.restore-epoch-', dir=dst.parent) as work:
-        prepared = Path(work) / 'state.db'
-        if not _safe_copy_db(src, prepared):
-            raise OSError('Unable to stage a restore with a safe runtime epoch')
-        with closing(sqlite3.connect(prepared)) as conn:
-            conn.execute("""CREATE TABLE IF NOT EXISTS runtime_epoch (
-                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-                epoch INTEGER NOT NULL CHECK (epoch > 0), instance_id TEXT NOT NULL)""")
-            conn.execute("""INSERT INTO runtime_epoch VALUES(1,?, 'offline-restore')
-                ON CONFLICT(singleton) DO UPDATE SET epoch=excluded.epoch,
-                instance_id=excluded.instance_id""", (floor,))
-            conn.commit()
-        prepared.chmod(src.stat().st_mode)
-        yield prepared
-
-
-def _restore_db_pages(src: Path, dst: Path) -> bool:
-    """Restore snapshot *src* into live *dst* through the backup() API; unlink+move fallback.
-
-    Writing pages into the live file preserves its inode and WAL state, so other holders (gateway,
-    dashboard, another CLI) see the restored data instead of stale pages from a replaced inode.
-    The fallback runs ONLY when no other process or in-process connection holds the file
-    (replacing the inode under a live holder is the #90950 split-brain); otherwise it fails closed
-    (``False``) and the caller reports the file as skipped.
-    """
-    try:
-        with closing(sqlite3.connect(str(dst))) as dst_conn:
-            # Checkpoint first so the backup starts clean rather than writing on top of a deep WAL.
-            with suppress(Exception):
-                dst_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            with closing(sqlite3.connect(f"file:{src}?mode=ro", uri=True)) as src_conn:
-                src_conn.backup(dst_conn)
-        with suppress(Exception):
-            dst.chmod(src.stat().st_mode)
-        return True
-    except Exception as exc:
-        logger.warning("SQLite safe restore failed for %s -> %s: %s", src, dst, exc)
-        return _unlink_move_restore_db(src, dst)
-
-
-def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
-    """Fallback restore: unlink+move. Only safe when no process holds the DB open.
+def _discard_failed_zip_members(zf: zipfile.ZipFile, filelist_len: int) -> None:
+    """Drop the member(s) created by a failed write, both from the central directory and the file.
 
     ZipFile.write finalizes its destination member while unwinding a source-read
     failure, so the partial bytes can otherwise become a CRC-valid archive member.
@@ -894,19 +762,9 @@ def run_import(args) -> Optional[int]:
         if prefix:
             print(f"Detected archive prefix: {prefix!r} (will be stripped)")
 
-def _import_db_member(
-    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
-    from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
-    try:
-        with exclusive_maintenance([target.absolute().parent, target.resolve().parent]):
-            _import_db_member_exclusive(zf, member, target, new_file_mode)
-    except OwnershipConflict as exc:
-        raise OSError(str(exc)) from exc
-
-
-def _import_db_member_exclusive(
-    zf: zipfile.ZipFile, member: str, target: Path, new_file_mode: Optional[int] = None) -> None:
-    """Publish a SQLite ``.db`` member onto *target* without replacing its inode.
+        # Check for existing installation
+        has_config = (hermes_root / "config.yaml").exists()
+        has_env = (hermes_root / ".env").exists()
 
         if (has_config or has_env) and not args.force:
             print()
@@ -935,187 +793,6 @@ def _import_db_member_exclusive(
         print(f"\nImporting {file_count} files ...")
         hermes_root.mkdir(parents=True, exist_ok=True)
 
-        errors = []
-        restored = 0
-        restored_external = 0
-        skipped_runtime: list[str] = []
-        # (rel, live_counts, imported_counts) for every session database the
-        # import replaced with one holding fewer rows. A restore is allowed to
-        # do that — it just must not do it silently (issue #100960).
-        db_shrunk: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
-        home_dir = Path.home().resolve()
-        # Resolved once: every member is published via a temp file, and mkstemp
-        # would otherwise create newly restored files as 0600.
-        new_file_mode = _default_new_file_mode()
-        t0 = time.monotonic()
-
-        for member in members:
-            # External memory-provider state captured under the reserved
-            # ``_external/`` arc prefix restores to its original home-relative
-            # location (e.g. ~/.honcho/config.json), NOT under HERMES_HOME.
-            if member.startswith(_EXTERNAL_PREFIX):
-                ext_rel = member[len(_EXTERNAL_PREFIX):]
-                if not ext_rel:
-                    continue
-                target = home_dir / ext_rel
-                # Security: the resolved target must stay under the home dir.
-                try:
-                    target.resolve().relative_to(home_dir)
-                except ValueError:
-                    errors.append(f"  {member}: path traversal blocked")
-                    continue
-                try:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    _extract_member_atomically(zf, member, target, new_file_mode)
-                    # External provider configs commonly hold credentials.
-                    if target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES:
-                        try:
-                            os.chmod(target, 0o600)
-                        except OSError:
-                            pass
-                    restored += 1
-                    restored_external += 1
-                except (OSError, *_ZIP_MEMBER_READ_ERRORS) as exc:
-                    errors.append(f"  {member}: {exc}")
-                if restored % 500 == 0:
-                    print(f"  {restored}/{file_count} files ...")
-                continue
-
-def _import_members(
-    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
-) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
-    """Reserve all affected profiles before publishing even the first config file."""
-    from gateway.runtime_ownership import exclusive_maintenance
-    homes = {hermes_root}
-    for member in members:
-        rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
-        parts = Path(rel).parts
-        if len(parts) >= 3 and parts[0] == 'profiles':
-            home = hermes_root / parts[0] / parts[1]
-            if _is_within(home, hermes_root.resolve()):
-                homes.add(home)
-        target = hermes_root / rel
-        if target.suffix == '.db' and _is_within(target, hermes_root.resolve()):
-            homes.update([target.absolute().parent, target.resolve().parent])
-    with exclusive_maintenance(homes):
-        return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
-
-
-def _import_members_exclusive(
-    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
-) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
-    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
-
-            if not rel:
-                continue
-
-            try:
-                parts = tuple(normalize_archive_parts(rel))
-            except ValueError:
-                errors.append(f"  {rel}: path traversal blocked")
-                continue
-
-            # Never overwrite volatile gateway/process runtime state. These are
-            # namespaced to the machine/container the backup was taken on;
-            # clobbering them (especially gateway_state.json) breaks the gateway
-            # reconciler on the target and disconnects hosted instances from the
-            # Nous portal. Matched by basename so both the root profile and
-            # named profiles (profiles/<name>/gateway_state.json) are covered.
-            if parts[-1] in _IMPORT_SKIP_NAMES:
-                skipped_runtime.append(rel)
-                continue
-
-            # Older archives may contain PM selections pointing at another machine.
-            # Match their home-root paths; a plugin's own facts.json is user data.
-            if profile_root_entry(parts) in PM_RUNTIME_ROOT_DIRS:
-                skipped_runtime.append(rel)
-                continue
-
-            # A ``.db`` member is page-restored into the live file below; a
-            # WAL/SHM/journal member from the archive describes a different
-            # database image, and installing it beside the restored file (over
-            # a live sidecar, via os.replace) would replay a foreign WAL on
-            # the next open. Current backups never ship these
-            # (_EXCLUDED_SUFFIXES); older or hand-built archives might.
-            if rel.endswith(_SQLITE_SIDECAR_SUFFIXES):
-                skipped_runtime.append(rel)
-                continue
-
-            target = hermes_root.joinpath(*parts)
-
-            # Security: reject absolute paths and traversals
-            try:
-                target.resolve().relative_to(hermes_root.resolve())
-            except ValueError:
-                errors.append(f"  {rel}: path traversal blocked")
-                continue
-
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if target.suffix == ".db":
-                    # Count before the write: afterwards the rows this import
-                    # drops are gone and there is nothing left to compare.
-                    before = _count_session_rows(target)
-                    _import_db_member(zf, member, target, new_file_mode)
-                    after = _count_session_rows(target)
-                    if before and after and after[1] < before[1]:
-                        db_shrunk.append((rel, before, after))
-                else:
-                    _extract_member_atomically(zf, member, target, new_file_mode)
-                if target.name in _SECRET_FILE_NAMES:
-                    os.chmod(target, 0o600)
-                restored += 1
-            except (OSError, *_ZIP_MEMBER_READ_ERRORS) as exc:
-                errors.append(f"  {rel}: {exc}")
-
-            if restored % 500 == 0:
-                print(f"  {restored}/{file_count} files ...")
-
-        elapsed = time.monotonic() - t0
-
-        # Summary
-        print()
-        print(f"Import {'incomplete' if errors else 'complete'}: {restored} files restored in {elapsed:.1f}s")
-        print(f"  Target: {display_hermes_home()}")
-
-    Return 1 when the archive is damaged (refused before anything is written) or the restore is
-    incomplete (some members were not written); None on success or when the overwrite prompt is
-    declined. A missing, non-zip or invalid archive exits 1 via ``sys.exit``.
-    """
-    zip_path = Path(args.zipfile).expanduser().resolve()
-    if not zip_path.is_file():
-        print(f"Error: File not found: {zip_path}")
-        sys.exit(1)
-    if not zipfile.is_zipfile(zip_path):
-        print(f"Error: Not a valid zip file: {zip_path}")
-        sys.exit(1)
-    # The restore target is the home the command operates under (the printed "Target:");
-    # ``get_default_hermes_root()`` would silently retarget a profile restore at the live root.
-    hermes_root = get_hermes_home()
-    with zipfile.ZipFile(zip_path, "r") as zf:
-        ok, reason = _validate_backup_zip(zf)
-        if not ok:
-            print(f"Error: {reason}")
-            sys.exit(1)
-        prefix = _detect_prefix(zf)
-        members = [n for n in zf.namelist() if not n.endswith("/")]
-        file_count = len(members)
-        print(f"Backup contains {file_count} files\nTarget: {display_hermes_home()}")
-        if prefix:
-            print(f"Detected archive prefix: {prefix!r} (will be stripped)")
-        if not args.force and not _confirm_import_overwrite(hermes_root):
-            return
-        # Every member is decompressed once here and once again below: a damaged archive
-        # must be refused while the home is still untouched, not half-way through the restore.
-        print("\nChecking archive integrity ...")
-        # Members the restore skips anyway (gateway.pid, WAL sidecars) cannot block it.
-        corrupt = _find_corrupt_members(zf, [m for m in members if not _import_member_rel(m, prefix)[1]])
-        if corrupt:
-            _print_capped(f"Error: backup archive is damaged ({len(corrupt)} member(s) fail to "
-                          f"decompress or fail their CRC); nothing was restored:", corrupt, "  ")
-            return 1
-        print(f"\nImporting {file_count} files ...")
-        hermes_root.mkdir(parents=True, exist_ok=True)
         t0 = time.monotonic()
         from gateway.runtime_ownership import OwnershipConflict
         try:
@@ -1125,8 +802,12 @@ def _import_members_exclusive(
             print(f"\nImport refused; no files restored: {exc}")
             sys.exit(1)
         elapsed = time.monotonic() - t0
-        print(f"\nImport {'incomplete' if errors else 'complete'}: {restored} files restored in {elapsed:.1f}s\n"
-              f"  Target: {display_hermes_home()}")
+
+        # Summary
+        print()
+        print(f"Import {'incomplete' if errors else 'complete'}: {restored} files restored in {elapsed:.1f}s")
+        print(f"  Target: {display_hermes_home()}")
+
         if restored_external:
             print(
                 f"\n  Restored {restored_external} memory-provider file(s) to "
@@ -1218,39 +899,7 @@ def _import_members_exclusive(
             for pname in gw_profiles:
                 print(f"  hermes -p {pname} gateway install")
 
-        # Bring the restored install to life: the backup may contain bot
-        # tokens and registered cron jobs, but they're inert without a
-        # gateway process. Install/start the service automatically (a
-        # platform-less gateway is a supported mode, so this is safe even
-        # for backups with no messaging config). Best-effort and prompt-free;
-        # failures print a manual fallback and never fail the import.
-        native_default = _get_platform_default_hermes_home()
-        default_has_install = any(
-            (native_default / marker).exists()
-            for marker in ("config.yaml", ".env", "state.db")
-        )
-        # A restore into a sandbox or profile home must not silently install
-        # a second gateway pointed at it — on the default service name that
-        # would shadow or hijack the machine's primary install. Only revive
-        # the service automatically when the restore landed in the default
-        # home, or when no other install exists on this machine.
-        if hermes_root != native_default and default_has_install:
-            print(
-                "\nRestored into a non-default home; leaving the gateway service "
-                "alone to avoid clashing with the install at "
-                f"{native_default}."
-            )
-            print("To start a gateway for this home, run:  hermes gateway install")
-        else:
-            try:
-                from hermes_cli.gateway import ensure_gateway_service, _is_service_running
-
-                if not _is_service_running():
-                    print()
-                    ensure_gateway_service(context="import")
-            except Exception:
-                print("\nStart the gateway to activate cron jobs and messaging:")
-                print("  hermes gateway install")
+        _revive_gateway_after_import(hermes_root)
 
         if errors:
             print(f"Import incomplete: {len(errors)} file(s) were not restored (see Warnings above). "
@@ -1259,44 +908,155 @@ def _import_members_exclusive(
         print("Done. Your Hermes configuration has been restored.")
 
 
-def _restore_profile_wrappers(hermes_root: Path) -> List[str]:
-    """Re-create shell wrapper scripts for restored named profiles; return the profile names seen."""
-    profiles_dir = hermes_root / "profiles"
-    restored_profiles: list[tuple[str, bool]] = []
-    if not profiles_dir.is_dir():
-        return []
-    try:
-        from hermes_cli.profiles import (
-            create_wrapper_script, check_alias_collision, _is_wrapper_dir_in_path, _get_wrapper_dir)
-        for entry in sorted(profiles_dir.iterdir()):
-            if not entry.is_dir() or not any((entry / m).exists() for m in ("config.yaml", ".env")):
-                continue  # only profiles with config get wrappers
-            profile_name = entry.name
-            collision = check_alias_collision(profile_name)
-            if collision:
-                print(f"  Skipped alias '{profile_name}': {collision}")
-            restored_profiles.append(
-                (profile_name, not collision and create_wrapper_script(profile_name) is not None))
-        if restored_profiles:
-            created = [n for n, ok in restored_profiles if ok]
-            skipped = [n for n, ok in restored_profiles if not ok]
-            if created:
-                print(f"\n  Profile aliases restored: {', '.join(created)}")
-            if skipped:
-                print(f"  Profile aliases skipped:  {', '.join(skipped)}")
-            if not _is_wrapper_dir_in_path():
-                print(f"\n  Note: {_get_wrapper_dir()} is not in your PATH.\n"
-                      "  Add to your shell config (~/.bashrc or ~/.zshrc):\n"
-                      '    export PATH="$HOME/.local/bin:$PATH"')
-    except ImportError:  # hermes_cli.profiles unavailable (fresh install)
-        if any(profiles_dir.iterdir()):
-            print("\n  Profiles detected but aliases could not be created.\n"
-                  "  Run: hermes profile list  (after installing hermes)")
-    return [n for n, _ in restored_profiles]
+def _import_members(
+    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Reserve all affected profiles before publishing even the first config file."""
+    from gateway.runtime_ownership import exclusive_maintenance
+    root_res = hermes_root.resolve()
+    homes = {hermes_root}
+    for member in members:
+        if member.startswith(_EXTERNAL_PREFIX):
+            continue  # restored under $HOME, outside every runtime authority
+        rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
+        parts = Path(rel).parts
+        if len(parts) >= 3 and parts[0] == "profiles":
+            home = hermes_root / parts[0] / parts[1]
+            if home.resolve().is_relative_to(root_res):
+                homes.add(home)
+        target = hermes_root / rel
+        if target.suffix == ".db" and target.resolve().is_relative_to(root_res):
+            homes.update([target.absolute().parent, target.resolve().parent])
+    with exclusive_maintenance(homes):
+        return _import_members_exclusive(zf, members, prefix, hermes_root, file_count)
+
+
+def _import_members_exclusive(
+    zf: zipfile.ZipFile, members: List[str], prefix: str, hermes_root: Path, file_count: int
+) -> tuple[int, int, list[str], list[str], list[tuple[str, tuple[int, int], tuple[int, int]]]]:
+    """Publish every member; return ``(restored, restored_external, errors, skipped_runtime, db_shrunk)``.
+
+    ``db_shrunk`` holds ``(rel, live_counts, imported_counts)`` for every session database the
+    import replaced with one holding fewer rows — allowed, but never silently (#100960).
+    """
+    errors = []
+    restored = 0
+    restored_external = 0
+    skipped_runtime: list[str] = []
+    db_shrunk: list[tuple[str, tuple[int, int], tuple[int, int]]] = []
+    home_dir = Path.home().resolve()
+    # Resolved once: every member is published via a temp file, and mkstemp
+    # would otherwise create newly restored files as 0600.
+    new_file_mode = _default_new_file_mode()
+
+    for member in members:
+        # External memory-provider state captured under the reserved
+        # ``_external/`` arc prefix restores to its original home-relative
+        # location (e.g. ~/.honcho/config.json), NOT under HERMES_HOME.
+        if member.startswith(_EXTERNAL_PREFIX):
+            ext_rel = member[len(_EXTERNAL_PREFIX):]
+            if not ext_rel:
+                continue
+            target = home_dir / ext_rel
+            # Security: the resolved target must stay under the home dir.
+            try:
+                target.resolve().relative_to(home_dir)
+            except ValueError:
+                errors.append(f"  {member}: path traversal blocked")
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _extract_member_atomically(zf, member, target, new_file_mode)
+                # External provider configs commonly hold credentials.
+                if target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES:
+                    try:
+                        os.chmod(target, 0o600)
+                    except OSError:
+                        pass
+                restored += 1
+                restored_external += 1
+            except (OSError, *_ZIP_MEMBER_READ_ERRORS) as exc:
+                errors.append(f"  {member}: {exc}")
+            if restored % 500 == 0:
+                print(f"  {restored}/{file_count} files ...")
+            continue
+
+        # Strip prefix if detected
+        if prefix and member.startswith(prefix):
+            rel = member[len(prefix):]
+        else:
+            rel = member
+
+        if not rel:
+            continue
+
+        try:
+            parts = tuple(normalize_archive_parts(rel))
+        except ValueError:
+            errors.append(f"  {rel}: path traversal blocked")
+            continue
+
+        # Never overwrite volatile gateway/process runtime state. These are
+        # namespaced to the machine/container the backup was taken on;
+        # clobbering them (especially gateway_state.json) breaks the gateway
+        # reconciler on the target and disconnects hosted instances from the
+        # Nous portal. Matched by basename so both the root profile and
+        # named profiles (profiles/<name>/gateway_state.json) are covered.
+        if parts[-1] in _IMPORT_SKIP_NAMES:
+            skipped_runtime.append(rel)
+            continue
+
+        # Older archives may contain PM selections pointing at another machine.
+        # Match their home-root paths; a plugin's own facts.json is user data.
+        if profile_root_entry(parts) in PM_RUNTIME_ROOT_DIRS:
+            skipped_runtime.append(rel)
+            continue
+
+        # A ``.db`` member is page-restored into the live file below; a
+        # WAL/SHM/journal member from the archive describes a different
+        # database image, and installing it beside the restored file (over
+        # a live sidecar, via os.replace) would replay a foreign WAL on
+        # the next open. Current backups never ship these
+        # (_EXCLUDED_SUFFIXES); older or hand-built archives might.
+        if rel.endswith(_SQLITE_SIDECAR_SUFFIXES):
+            skipped_runtime.append(rel)
+            continue
+
+        target = hermes_root.joinpath(*parts)
+
+        # Security: reject absolute paths and traversals
+        try:
+            target.resolve().relative_to(hermes_root.resolve())
+        except ValueError:
+            errors.append(f"  {rel}: path traversal blocked")
+            continue
+
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if target.suffix == ".db":
+                # Count before the write: afterwards the rows this import
+                # drops are gone and there is nothing left to compare.
+                before = _count_session_rows(target)
+                _import_db_member(zf, member, target, new_file_mode)
+                after = _count_session_rows(target)
+                if before and after and after[1] < before[1]:
+                    db_shrunk.append((rel, before, after))
+            else:
+                _extract_member_atomically(zf, member, target, new_file_mode)
+            if target.name in _SECRET_FILE_NAMES:
+                os.chmod(target, 0o600)
+            restored += 1
+        except (OSError, *_ZIP_MEMBER_READ_ERRORS) as exc:
+            errors.append(f"  {rel}: {exc}")
+
+        if restored % 500 == 0:
+            print(f"  {restored}/{file_count} files ...")
+
+    return restored, restored_external, errors, skipped_runtime, db_shrunk
 
 
 def _revive_gateway_after_import(hermes_root: Path) -> None:
-    """Install/start the gateway service after a restore, best-effort and prompt-free.
+    """Start an installed gateway service after a restore, best-effort and prompt-free.
 
     Bot tokens and cron jobs are inert without a gateway (a platform-less gateway is supported, so
     this is safe for any backup); failures print a manual fallback, never fail the import. Only
@@ -1748,8 +1508,15 @@ def list_quick_snapshots(
     return results
 
 
-def restore_quick_snapshot(snapshot_id: str, hermes_home: Optional[Path] = None) -> bool:
-    """Restore the whole snapshot offline, or refuse before changing any file."""
+def restore_quick_snapshot(
+    snapshot_id: str,
+    hermes_home: Optional[Path] = None,
+) -> bool:
+    """Restore the whole snapshot offline, or refuse before changing any file.
+
+    Overwrites current state files with the snapshot's copies.
+    Returns True if at least one file was restored.
+    """
     from gateway.runtime_ownership import OwnershipConflict, exclusive_maintenance
     home = hermes_home or get_hermes_home()
     try:
@@ -1761,7 +1528,8 @@ def restore_quick_snapshot(snapshot_id: str, hermes_home: Optional[Path] = None)
 
 
 def _restore_quick_snapshot_exclusive(snapshot_id: str, home: Path) -> bool:
-    """Restore state from a quick snapshot."""
+    """Restore state from a quick snapshot while ``home`` is reserved."""
+    from gateway.runtime_ownership import exclusive_maintenance
     root = _quick_snapshot_root(home)
 
     # Security: reject snapshot_id values that contain path separators or
@@ -1788,48 +1556,62 @@ def _restore_quick_snapshot_exclusive(snapshot_id: str, home: Path) -> bool:
 
     with open(manifest_path, encoding="utf-8-sig") as f:
         meta = json.load(f)
+
     snap_res, home_res = snap_dir.resolve(), home.resolve()
-    from gateway.runtime_ownership import exclusive_maintenance
+
+    def _entry_paths(rel: str) -> Optional[Tuple[Path, Path]]:
+        # Security: reject absolute paths and traversals in manifest entries
+        src, dst = snap_dir / rel, home / rel
+        if not (src.resolve().is_relative_to(snap_res) and dst.resolve().is_relative_to(home_res)):
+            return None
+        return src, dst
+
     homes = {home}
     for rel in meta.get("files", {}):
-        dst = home / rel
-        if dst.suffix == '.db' and _is_within(dst, home_res):
-            homes.update([dst.absolute().parent, dst.resolve().parent])
+        entry = _entry_paths(rel)
+        if entry and entry[1].suffix == ".db":
+            homes.update([entry[1].absolute().parent, entry[1].resolve().parent])
     with exclusive_maintenance(homes):
         # Epoch safety is a whole-profile preflight: copying config first would
         # both partially roll back the profile and report a refused DB as success.
         for rel in meta.get("files", {}):
-            src, dst = snap_dir / rel, home / rel
-            if (src.exists() and _is_within(src, snap_res) and _is_within(dst, home_res)
-                    and (dst.name == "state.db" or dst.resolve().name == "state.db")):
+            entry = _entry_paths(rel)
+            if entry and entry[0].exists() and "state.db" in (entry[1].name, entry[1].resolve().name):
                 try:
-                    _restore_destination_epoch(dst)
+                    _restore_destination_epoch(entry[1])
                 except OSError as exc:
                     logger.error("%s", exc)
                     return False
+
         restored = 0
         for rel in meta.get("files", {}):
-            src = snap_dir / rel
-            dst = home / rel
-            if not (_is_within(src, snap_res) and _is_within(dst, home_res)):
+            entry = _entry_paths(rel)
+            if entry is None:
                 logger.error("Manifest path traversal blocked: %s", rel)
                 continue
+            src, dst = entry
             if not src.exists():
                 continue
+
             dst.parent.mkdir(parents=True, exist_ok=True)
+
             try:
                 if dst.suffix == ".db":
-                    # Through the backup API so live connections see the restored data instead of
-                    # stale pages from a replaced inode (#65942).
+                    # Restore through SQLite backup API so live connections
+                    # (gateway, dashboard, another CLI session) see the
+                    # restored data instead of continuing to serve stale
+                    # cached pages from a replaced inode (issue #65942).
                     if not _safe_restore_db(src, dst):
-                        # Refused (live holder) or failed: destination untouched — a failure, not a restore.
-                        logger.error("Failed to restore %s: live-safe restore refused", rel)
+                        # Refused, failed, or source failed its integrity check:
+                        # dst left as it was. Count as a failure, not a restore.
+                        logger.error("Failed to restore %s: refused or source integrity check failed (see previous log)", rel)
                         continue
                 else:
                     shutil.copy2(src, dst)
                 restored += 1
             except (OSError, PermissionError) as exc:
                 logger.error("Failed to restore %s: %s", rel, exc)
+
     logger.info("Restored %d files from snapshot %s", restored, snapshot_id)
     return restored > 0
 

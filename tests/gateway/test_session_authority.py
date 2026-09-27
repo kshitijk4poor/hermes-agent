@@ -34,7 +34,7 @@ def test_messaging_then_authenticated_ws_reuses_live_agent(tmp_path):
     assert receipt["same_agent"], receipt
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_native_queue_survives_owner_kill_without_replaying_unknown(tmp_path):
     repo = Path(__file__).resolve().parents[2]
     home, state = tmp_path / 'home', tmp_path / 'state'

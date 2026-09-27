@@ -140,7 +140,7 @@ async def handshake(home, descriptor):
             pass
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_normal_entrypoint_earns_authenticated_authority_readiness(tmp_path, model_peer):
     home = tmp_path / 'state'
     home.mkdir(mode=0o700)

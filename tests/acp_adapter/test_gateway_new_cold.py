@@ -13,7 +13,7 @@ import pytest
 from tests.acp_adapter.test_gateway_sessions import daemon, editor, viewer, model_peer, control  # noqa: F401
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 @pytest.mark.parametrize('daemon', ['proposed-acp-descriptor'], indirect=True)
 async def test_native_new_with_proposed_advert_executes_canonical_acp(daemon, tmp_path):
@@ -35,7 +35,7 @@ async def test_native_new_with_proposed_advert_executes_canonical_acp(daemon, tm
         'only_injected_boundary': 'AuthorityConnection.describe acp source/capability advertisement'}))
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_cold_acp_load_retains_policy_and_executes_after_daemon_restart(daemon, tmp_path, model_peer):
     home, descriptor, env, root = daemon
@@ -52,7 +52,7 @@ async def test_cold_acp_load_retains_policy_and_executes_after_daemon_restart(da
     owned = psutil.Process(original_pid)
     os.kill(original_pid, signal.SIGINT)
     await asyncio.to_thread(owned.wait, 20)
-    import yaml
+    import hermes_yaml as yaml
     config = yaml.safe_load((home / 'config.yaml').read_text())
     config['platform_toolsets'] = {'acp': ['terminal']}
     (home / 'config.yaml').write_text(json.dumps(config))

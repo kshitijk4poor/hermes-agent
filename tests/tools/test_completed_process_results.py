@@ -15,6 +15,31 @@ import time
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def _new_background_notifications(messages, seen_counts):
+    """Count new history occurrences, not positions shifted by request assembly."""
+    counts = Counter(
+        m["content"] for m in messages
+        if m["role"] == "user"
+        and isinstance(m.get("content"), str)
+        and m["content"].startswith("[IMPORTANT: Background process ")
+    )
+    new = []
+    for content, count in counts.items():
+        new.extend([content] * max(0, count - seen_counts[content]))
+        seen_counts[content] = max(seen_counts[content], count)
+    return new
+
+
+def test_background_notification_history_replay_is_not_new_delivery():
+    notice = "[IMPORTANT: Background process proc_a exited (exit code 7).]"
+    seen_counts = Counter()
+    first = [{"role": "system", "content": "first"}, {"role": "user", "content": notice}]
+    shifted = [{"role": "system", "content": "second"}, {"role": "user", "content": "query"}, *first[1:]]
+    assert _new_background_notifications(first, seen_counts) == [notice]
+    assert _new_background_notifications(shifted, seen_counts) == []
+    assert _new_background_notifications([*shifted, first[1]], seen_counts) == [notice]
+
+
 def test_retained_result_lookup_does_not_initialize_session_store(tmp_path, monkeypatch):
     import hermes_state
     from gateway.session_context import scoped_current_session_id
@@ -169,7 +194,9 @@ def test_headless_terminal_result_survives_cli_exit(tmp_path, request):
     process_id = observed[0]["session_id"]
     assert observed[0].get("notify_on_complete") is True, observed
     # The owned notify_on_complete completion resumes as ONE follow-up turn on the owning
-    # daemon session, carrying the child's real output and exit code to the model.
+    # daemon session, carrying the child's real output and exit code to the model. It is an
+    # [IMPORTANT: Background process ...] event, not an [ASYNC DELEGATION ...] event, and the
+    # same history entry can appear in several provider requests without being delivered twice.
     assert len(follow_ups) == 1, follow_ups
     assert follow_ups[0].startswith(f"[IMPORTANT: Background process {process_id} exited (exit code 7).")
     assert "SYNTHETIC_REVIEW_COMPLETE" in follow_ups[0]

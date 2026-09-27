@@ -27,7 +27,7 @@ import { isPaintableHex, setTerminalBackground, setTerminalForeground } from '..
 import { formatAbandonedClarify, formatToolCall } from '../lib/text.js'
 import { bootSeededPin, invalidateBootBackground, writeBootTheme } from '../lib/themeBoot.js'
 import { defaultThemeForCurrentBackground, fromSkin, skinIsLight, type Theme, themeToneHex } from '../theme.js'
-import type { Msg, SessionInfo, SubagentProgress } from '../types.js'
+import type { ClarifyQuestion, Msg, SessionInfo, SubagentProgress } from '../types.js'
 
 import { applyConnectionRequest, applyConnectionUpdate } from './connectionOperationStore.js'
 import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
@@ -37,6 +37,7 @@ import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { markBubbleShown, newlyStartedRows } from './pendingBubbles.js'
 import { flashGoodVibes, flashPet } from './petFlashStore.js'
 import { forgetServerRequest } from './serverRequestStore.js'
+import { reportStartupLatency } from './startupLatency.js'
 import { captureDestination, isCurrentDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
 import { getTurnState } from './turnStore.js'
@@ -669,7 +670,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             await rpc('image.attach', { path: STARTUP_IMAGE, session_id: sid })
           }
         } catch (e) {
-          return sys(`startup image attach failed: ${rpcErrorMessage(e)}`)
+          return sys(t('gatewayMsg.startup.imageAttachFailed', rpcErrorMessage(e)))
         }
       }
 
@@ -1476,7 +1477,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
 
         const sharedControl = { session_id: ev.session_id, execution_generation: shared.execution_generation, prompt_id: shared.prompt_id }
 
-        const batch = (shared.questions ?? [])
+        const questions: ClarifyQuestion[] = (shared.questions ?? [])
           .filter(q => typeof q?.qid === 'string' && q.qid && typeof q?.question === 'string' && q.question.trim())
           .map(q => ({
             choices: q.choices && q.choices.length > 0 ? q.choices : null,
@@ -1485,12 +1486,24 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             question: q.question.trim()
           }))
 
+        // A single canonical prompt carries its question inline; it answers as a whole by prompt id.
+        if (!questions.length && shared.question?.trim()) {
+          questions.push({
+            choices: shared.choices && shared.choices.length > 0 ? shared.choices : null,
+            multiSelect: shared.multi_select === true,
+            qid: shared.prompt_id,
+            question: shared.question.trim()
+          })
+        }
+
+        if (!questions.length) {
+          return
+        }
+
         patchOverlayState({
-          clarify: batch.length
-            ? { answers: shared.answers ?? {}, choices: null, question: '', questions: batch, requestId: shared.prompt_id, sharedControl }
-            : { choices: shared.choices ?? null, question: shared.question ?? '', requestId: shared.prompt_id, sharedControl }
+          clarify: { answers: shared.answers ?? {}, questions, requestId: shared.prompt_id, sharedControl }
         })
-        setStatus('waiting for input…')
+        setStatus(t('session.status.waitingForInput'))
         ringPromptBell()
 
         return
@@ -1511,13 +1524,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
             allowPermanent: shared.allow_permanent !== false,
             choices: shared.choices,
             command: String(shared.command ?? ''),
-            description: String(shared.description ?? 'dangerous command'),
+            description: String(shared.description ?? t('session.request.dangerousCommand')),
             requestId: shared.prompt_id,
             sharedControl,
             smartDenied: shared.smart_denied === true
           }
         })
-        setStatus('approval needed')
+        setStatus(t('session.status.approvalNeeded'))
         ringPromptBell()
 
         return
@@ -1797,7 +1810,7 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
       case 'error':
         // Build/RPC failures are not authority to settle a versioned turn.
         if (genericError && current?.execution_generation !== undefined) {
-          sys(`error: ${String(ev.payload?.message || 'unknown error')}`)
+          sys(`error: ${String(ev.payload?.message || t('gatewayMsg.error.unknown'))}`)
 
           return
         }

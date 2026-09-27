@@ -16,7 +16,7 @@ from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
 from tests.gateway.test_worker_agent_execution import Model
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_rotated_agent_survives_owner_kill_and_explicit_adoption(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

@@ -1,5 +1,6 @@
 """Canonical delivery invariants: stable envelope IDs, authority-only admission,
 immutable receipts. The mailbox is receipt storage, never an execution queue."""
+import json
 import os
 from pathlib import Path
 
@@ -40,10 +41,15 @@ def test_same_envelope_id_admits_once_and_conflicts_on_changed_payload(tmp_path,
     authority = _FakeAuthority()
     monkeypatch.setattr(mailbox, "authority_delivery", authority)
     delivery_id = "a" * 32
-    queued = mailbox.deliver_to_live_owner(tmp_path, _owner(tmp_path), "hello", delivery_id=delivery_id)
+    queued = mailbox.deliver_to_live_owner(tmp_path, _owner(tmp_path), "héllo 世界", delivery_id=delivery_id)
     assert queued["status"] == "queued" and queued["delivery_id"] == delivery_id
+    # Receipts are written as plain UTF-8 and read back BOM-tolerantly (main 61dc26cd7d9).
+    path = tmp_path / "runtime" / mailbox.DELIVERY_DIR_NAME / f"{delivery_id}.json"
+    raw = path.read_bytes()
+    assert not raw.startswith(b"\xef\xbb\xbf")
+    path.write_bytes(b"\xef\xbb\xbf" + raw)
     # Exact retry inspects the same admission; it never mints a second envelope.
-    assert mailbox.deliver_to_live_owner(tmp_path, _owner(tmp_path), "hello", delivery_id=delivery_id) == queued
+    assert mailbox.deliver_to_live_owner(tmp_path, _owner(tmp_path), "héllo 世界", delivery_id=delivery_id) == queued
     assert [params["id"] for _home, params in authority.calls] == [delivery_id, delivery_id]
     assert len(authority.records) == 1
     with pytest.raises(ValueError):
@@ -55,6 +61,59 @@ def test_same_envelope_id_admits_once_and_conflicts_on_changed_payload(tmp_path,
     if os.name != "nt":
         for path in (tmp_path / "runtime" / mailbox.DELIVERY_DIR_NAME).iterdir():
             assert path.stat().st_mode & 0o077 == 0
+
+
+@pytest.mark.parametrize("intent_state", ["new", "existing", "raced"])
+def test_live_dm_bom_readers_preserve_pinned_intent(tmp_path, monkeypatch, intent_state):
+    """Main 61dc26cd7d9 on the canonical door: a BOM-prefixed DM payload and a BOM-prefixed pinned
+    intent read back intact, a pinned intent is never replaced by a rewritten payload, and a
+    damaged intent retains its evidence instead of retrying a transport."""
+    import hermes_cli.gateway_runtime as runtime
+    from hermes_state import SessionDB
+    from tools import bot_mode_dm
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.create_session(session_id="chat", source="cli")
+    db.set_session_title("chat", "Bot Chat")
+    monkeypatch.setattr(runtime, "discover_gateway_endpoint", _ready("authority-1"))
+    authority = _FakeAuthority()
+    monkeypatch.setattr(mailbox, "authority_delivery", authority)
+    try:
+        owner = mailbox.find_canonical_live_owner(tmp_path)
+        assert owner is not None
+        payload = tmp_path / "message.txt"
+        payload.write_bytes("héllo 世界".encode("utf-8-sig"))
+        intent_path = Path(str(payload) + ".live.json")
+        author = {"id": "bot:coder", "name": "Renée", "is_bot": True}
+        intent = dict(owner=owner, message="pinned 世界", delivery_id="d" * 32, author=author)
+        encoded = json.dumps(intent, ensure_ascii=False).encode("utf-8-sig")
+        if intent_state == "existing":
+            intent_path.write_bytes(encoded)
+        elif intent_state == "raced":
+            real_open = os.open
+
+            def competing_intent(path, flags, *args, **kwargs):
+                if Path(path) == intent_path:
+                    intent_path.write_bytes(encoded)
+                return real_open(path, flags, *args, **kwargs)
+
+            monkeypatch.setattr(os, "open", competing_intent)
+        record = bot_mode_dm._admit_live_dm(tmp_path, str(payload), author)
+        assert record is not None and record["status"] == "queued"
+        admitted = authority.records[record["delivery_id"]]
+        assert admitted["message"] == ("héllo 世界" if intent_state == "new" else "pinned 世界")
+        assert admitted["author"] == author
+        if intent_state == "new":
+            assert not intent_path.read_bytes().startswith(b"\xef\xbb\xbf")
+            intent_path.write_bytes(b"\xef\xbb\xbf" + intent_path.read_bytes())
+        payload.write_text("must not replace pinned payload", encoding="utf-8")
+        assert bot_mode_dm._admit_live_dm(None, str(payload)) == record
+        assert len(authority.records) == 1
+        intent_path.write_bytes(b"\xef\xbb\xbf{broken")
+        assert bot_mode_dm._run_delivery([], str(payload), stdin_file=False, profile_home=tmp_path) == 1
+        assert payload.exists()  # Ambiguous admission must retain its evidence, not retry a transport.
+    finally:
+        db.close()
 
 
 def test_owner_from_another_home_or_malformed_id_is_refused_before_admission(tmp_path, monkeypatch):
@@ -87,65 +146,12 @@ def test_terminal_receipt_is_immutable(tmp_path, terminal_status):
                                                           message="hello", created_at=1))
     receipt = mailbox.complete_delivery(tmp_path, delivery_id, status=terminal_status, reply="answer")
     assert mailbox.read_delivery_result(tmp_path, delivery_id) == receipt
-    assert mailbox.complete_delivery(tmp_path, delivery_id, status=terminal_status, reply="réponse 世界") == receipt
+    assert mailbox.complete_delivery(tmp_path, delivery_id, status=terminal_status, reply="answer") == receipt
     with pytest.raises(ValueError):
         mailbox.complete_delivery(tmp_path, delivery_id, status=terminal_status, reply="rewrite")
     with pytest.raises(ValueError):
         mailbox.complete_delivery(tmp_path, "d" * 32, status="not-terminal")
 
-@pytest.mark.parametrize("intent_state", ["new", "existing", "raced"])
-def test_live_dm_bom_readers_preserve_pinned_intent(tmp_path, monkeypatch, intent_state):
-    from pathlib import Path
-
-    from hermes_cli.active_sessions import try_acquire_active_session
-    from hermes_state import SessionDB
-    from tools import bot_live_delivery as mailbox, bot_mode_dm
-
-    db = SessionDB(db_path=tmp_path / "state.db")
-    db.create_session(session_id="chat", source="cli")
-    db.set_session_title("chat", "Bot Chat")
-    lease, refusal = try_acquire_active_session(
-        session_id="chat", surface="desktop", config={}, registry_home=tmp_path,
-        metadata=dict(live_session_id="live", bot_live_delivery_consumer=True))
-    assert refusal is None and lease is not None
-    try:
-        owner = mailbox.find_canonical_live_owner(tmp_path)
-        assert owner is not None
-        payload = tmp_path / "message.txt"
-        payload.write_bytes("héllo 世界".encode("utf-8-sig"))
-        intent_path = Path(str(payload) + ".live.json")
-        author = {"id": "bot:coder", "name": "Renée", "is_bot": True}
-        intent = dict(owner=owner, message="pinned 世界", delivery_id="d" * 32, author=author)
-        encoded = json.dumps(intent, ensure_ascii=False).encode("utf-8-sig")
-        if intent_state == "existing":
-            intent_path.write_bytes(encoded)
-        elif intent_state == "raced":
-            real_open = os.open
-
-            def competing_intent(path, flags, *args, **kwargs):
-                if Path(path) == intent_path:
-                    intent_path.write_bytes(encoded)
-                return real_open(path, flags, *args, **kwargs)
-
-            monkeypatch.setattr(os, "open", competing_intent)
-        record = bot_mode_dm._admit_live_dm(tmp_path, str(payload), author)
-        assert record is not None
-        assert record["message"] == ("héllo 世界" if intent_state == "new" else "pinned 世界")
-        assert record["owner"] == owner and record["author"] == author
-        if intent_state == "new":
-            assert not intent_path.read_bytes().startswith(b"\xef\xbb\xbf")
-            intent_path.write_bytes(b"\xef\xbb\xbf" + intent_path.read_bytes())
-        payload.write_text("must not replace pinned payload", encoding="utf-8")
-        assert bot_mode_dm._admit_live_dm(None, str(payload)) == record
-        claim = mailbox.claim_pending_delivery(tmp_path, owner)
-        assert claim is not None and claim["delivery_id"] == record["delivery_id"]
-        assert mailbox.claim_pending_delivery(tmp_path, owner) is None
-        intent_path.write_bytes(b"\xef\xbb\xbf{broken")
-        assert bot_mode_dm._run_delivery([], str(payload), stdin_file=False, profile_home=tmp_path) == 1
-        assert payload.exists()  # Ambiguous admission must retain its evidence, not retry a transport.
-    finally:
-        lease.release()
-        db.close()
 
 def _ready(instance_id):
     from types import SimpleNamespace

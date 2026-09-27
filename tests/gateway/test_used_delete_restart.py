@@ -15,7 +15,7 @@ from tests.gateway.fixtures.local_recovery_probe import daemon, Model, websocket
 from tests.gateway.test_native_http_auth import ticket, headers as native_headers
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_used_api_and_native_delete_restart_exact_retry(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

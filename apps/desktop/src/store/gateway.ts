@@ -774,7 +774,7 @@ async function openSecondary(entry: Secondary): Promise<void> {
       entry.connectionId && desktop.getConnectionFor
         ? await withTimeout(
             desktop.getConnectionFor({ connectionId: entry.connectionId, profile: entry.profile }),
-            RECONNECT_ATTEMPT_TIMEOUT_MS,
+            SOURCE_SWITCH_DIAL_TIMEOUT_MS,
             `Timed out connecting to profile "${entry.profile}"`
           )
         : await withTimeout(
@@ -944,7 +944,7 @@ async function openSecondaryForRequest(entry: Secondary, spawnPriority: SpawnPri
   }
 
   try {
-    await openSecondary(entry, spawnPriority)
+    await openSecondary(entry)
   } catch (error) {
     recordDialFailure(entry, error)
     throw error
@@ -1178,6 +1178,14 @@ async function gatewayForProfile(
     return { gateway: g.primaryGateway, key, release: noRelease, scopeProfile: false }
   }
 
+  // sharedPrimaryRoute is itself a dial into main (it can start the profile's spawn), so a
+  // cooling-down scope has to be held back before it, not just before openSecondary.
+  const existing = g.secondaries.get(key)
+
+  if (spawnPriority !== 'foreground' && !(existing && isOpen(existing.gateway)) && backgroundDialCoolingDown(key)) {
+    throw new Error(`Backend for "${key}" is reconnecting; retry after it settles.`)
+  }
+
   if (await sharedPrimaryRoute(key)) {
     return { gateway: g.primaryGateway, key, release: noRelease, scopeProfile: true }
   }
@@ -1227,9 +1235,7 @@ async function gatewayForProfile(
   }
 
   try {
-    if (!isOpen(entry.gateway)) {
-      await openSecondary(entry)
-    }
+    await openSecondaryForRequest(entry, spawnPriority)
   } catch (error) {
     release()
     throw error
@@ -1339,9 +1345,7 @@ export async function requestGatewayForAgent<T>(
   entry.activeRequests += 1
 
   try {
-    if (!isOpen(entry.gateway)) {
-      await openSecondary(entry)
-    }
+    await openSecondaryForRequest(entry, spawnPriority)
 
     const result = await (timeoutMs === undefined && signal === undefined
       ? entry.gateway.request<T>(method, params)

@@ -127,7 +127,7 @@ def desktop_sidebar_patch(client, endpoint, profile, sid, payload, request_id):
                         json={**payload, **identity, 'profile': profile}, headers=native_headers(endpoint))
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_cold_profile_archive_unarchive_while_another_profile_is_attached(tmp_path):
     with multiplex_daemon(tmp_path) as (home, descriptor, env), \
             httpx.Client(base_url=descriptor['api_origin'], trust_env=False, timeout=30) as client:

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize('partial_start', [False, True])
 def test_live_runtime_writers_prevent_final_lock_release(tmp_path, monkeypatch, partial_start):
     import gateway.run as run

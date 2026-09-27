@@ -67,7 +67,7 @@ async def test_authenticated_token_can_create_without_identityless_permissions(t
         process_ownership.close()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize('layout', ['normal', 'long', 'unicode', 'long-temp'])
 def test_ordinary_daemon_keeps_control_auth_and_loop_witness(tmp_path, layout):
     from gateway.control_socket import identify_gateway, resolve_client_socket_path

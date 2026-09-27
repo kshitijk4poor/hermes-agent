@@ -1,4 +1,11 @@
-import { type GatewayEvent, type GatewayEventName, JsonRpcGatewayClient, type ServerRequest, type ServerRequestHandler } from '@hermes/shared'
+import {
+  type GatewayEvent,
+  type GatewayEventName,
+  JsonRpcGatewayClient,
+  type ServerRequest,
+  type ServerRequestHandler
+} from '@hermes/shared'
+import { map, type MapStore } from 'nanostores'
 
 import type { HermesApiRequest } from '@/global'
 

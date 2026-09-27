@@ -9,6 +9,8 @@ import threading
 import time
 from urllib.parse import parse_qs
 
+import importlib.machinery
+
 import pytest
 
 from tests.gateway.fixtures.local_recovery_probe import Model, child_env, daemon
@@ -60,7 +62,8 @@ def wait_for(predicate, detail, timeout=30):
     pytest.fail(detail())
 
 
-@pytest.mark.linux_only
+@pytest.mark.skipif(importlib.machinery.PathFinder.find_spec("telegram") is None, reason="python-telegram-bot not installed (on-demand extra)")
+@pytest.mark.platforms("linux")
 def test_telegram_fifo_unknown_and_current_authorization_survive_sigkill(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

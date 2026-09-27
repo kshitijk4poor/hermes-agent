@@ -735,9 +735,13 @@ def test_live_dm_runner_retry_never_reexecutes_failed_admission(tmp_path, monkey
 # ── plaintext tempfile lifecycle (peer stdin transport) ─────────────────────
 
 
-@pytest.mark.parametrize("stdin_file", [False, True])
 @pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
-def test_delivery_runner_keeps_file_for_child_then_unlinks(tmp_path, stdin_file, encoding):
+def test_peer_delivery_runner_keeps_file_for_child_then_unlinks(tmp_path, encoding):
+    # Main 61dc26cd7d9 also ran the local query-file transport here; that lane has no local
+    # child any more (a local delivery without a canonical owner is refused and retained,
+    # see test_local_delivery_runner_surfaces_refusal_and_retains_payload), so only the peer
+    # stdin transport keeps the file for the child.
+    stdin_file = True
     dm_file = tmp_path / "message with spaces.txt"
     dm_file.write_bytes("secret λ $(not shell)".encode(encoding))
     observed = tmp_path / "observed.txt"

@@ -23,7 +23,7 @@ async def control_peer(home: Path, payload: dict):
         await server.stop()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_live_discovery_does_not_treat_an_unusable_owner_as_absent(tmp_path):
     from hermes_cli.gateway_runtime import discover_gateway_endpoint
 
@@ -75,7 +75,7 @@ def test_live_discovery_does_not_treat_an_unusable_owner_as_absent(tmp_path):
     asyncio.run(probe())
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_fifo_control_pointer_is_rejected_without_a_writer(tmp_path):
     import os
     import subprocess

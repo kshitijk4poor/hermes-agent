@@ -333,7 +333,16 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
             # writes the response itself via transport.write (a separate thread, so that is the safe
             # path). Inline handlers return the response dict, written here from the loop.
             try:
-                resp = await asyncio.to_thread(server.dispatch, req, transport)
+                if authority_connection is not None:
+                    resp = await authority_connection.dispatch(req)
+                    if _is_unknown_method(resp) and req_method in server._methods:
+                        # Session verbs live on the authority; everything else the sidecar still
+                        # registers (pet, wake word, active-session list, connectors) keeps its
+                        # legacy handler. A real -32601 reaches the client only for methods
+                        # neither side knows, which is what its version-skew notice keys on.
+                        resp = await asyncio.to_thread(server.dispatch, req, transport)
+                else:
+                    resp = await asyncio.to_thread(server.dispatch, req, transport)
             except Exception:
                 dispatch_crashes += 1
                 _log.exception("ws dispatch crash peer=%s id=%s method=%s", peer, req_id, req_method)
@@ -434,32 +443,24 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                 await _reply({"jsonrpc": "2.0", "result": {"ok": True}, "id": req_id}, "send_failed_after_heartbeat",
                              "ws heartbeat reply send failed peer=%s id=%s", peer, req_id)
                 continue
-            # dispatch() may schedule long handlers on the pool; it returns None then and the worker
-            # writes the response itself via transport.write (a separate thread, so that is the safe
-            # path). Inline handlers return the response dict, written here from the loop.
-            try:
-                if authority_connection is not None:
-                    resp = await authority_connection.dispatch(req)
-                    if _is_unknown_method(resp) and req_method in server._methods:
-                        # Session verbs live on the authority; everything else the sidecar still
-                        # registers (pet, wake word, active-session list, connectors) keeps its
-                        # legacy handler. A real -32601 reaches the client only for methods
-                        # neither side knows, which is what its version-skew notice keys on.
-                        resp = await asyncio.to_thread(server.dispatch, req, transport)
-                else:
-                    resp = await asyncio.to_thread(server.dispatch, req, transport)
-            except Exception:
-                dispatch_crashes += 1
-                _log.exception("ws dispatch crash peer=%s id=%s method=%s", peer, req_id, req_method)
-                await _reply(_error(-32603, "internal error", req_id), "send_failed_after_dispatch_crash",
-                             "ws dispatch-crash reply send failed peer=%s id=%s method=%s", peer, req_id, req_method)
-                continue
-            if resp is not None:
-                await _reply(resp, "send_failed_after_response",
-                             "ws response send failed peer=%s id=%s method=%s", peer, req_id, req_method)
+            await _unless_dispatch_failed(pending.put(req))
     except _SendFailed:
         pass
     finally:
+        if dispatcher is not None:
+            # Finish the in-flight handler and the frames read before the disconnect (as the serial read loop
+            # did) before the teardown below parks this transport's sessions. A cancelled connection (server
+            # shutdown) stops at once instead, as the read loop's cancelled await did.
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                dispatcher.cancel()
+            else:
+                with contextlib.suppress(_SendFailed):
+                    await _unless_dispatch_failed(pending.put(stop))
+            await asyncio.wait({dispatcher})
+            failure = None if dispatcher.cancelled() else dispatcher.exception()
+            if failure is not None and not isinstance(failure, _SendFailed):
+                _log.error("ws dispatcher failed peer=%s", peer, exc_info=failure)
         if authority_connection is not None:
             await authority_connection.close()
         reaped_sessions = detached_sessions = 0

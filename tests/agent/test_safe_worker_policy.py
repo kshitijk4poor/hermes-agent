@@ -289,7 +289,7 @@ def test_direct_secret_hydration_cannot_read_bypassed_yaml(tmp_path, mode):
     assert bool(result["reads"]) == (mode == "ordinary")
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_private_policy_refuses_late_binding_and_fork_inheritance(tmp_path):
     late = run_worker(tmp_path, r"""
         import json

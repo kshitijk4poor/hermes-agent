@@ -146,7 +146,13 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True)
             raise RuntimeStoreError('invalid_params')
     elif source in {'tui', 'gui'}:
         # Same surface toolsets as the native TUI factory, without its env inference.
-        enabled.add('project')
+        # The fold-in lands after _get_platform_tools subtracted agent.disabled_toolsets, so
+        # subtract again or `disabled_toolsets: [project]` is a no-op here (#54433).
+        # desktop_ui is the client's own control surface, not a model toolset.
+        from agent.skill_utils import parse_config_string_list
+        disabled = set(parse_config_string_list((config.get('agent') or {}).get('disabled_toolsets')))
+        if 'project' not in disabled:
+            enabled.add('project')
         if source == 'gui':
             enabled.add('desktop_ui')
     if safe_mode:

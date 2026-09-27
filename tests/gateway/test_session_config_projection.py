@@ -9,14 +9,14 @@ from tests.gateway.test_session_busy_controls import owner, admissions
 from tests.gateway.fixtures.local_recovery_probe import rpc, websocket
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_client_config_projection_keeps_session_policy_and_secrets_private(tmp_path):
     with owner(tmp_path) as (home, peer, desc):
         async def probe():
             async with websocket(home, desc) as ws:
                 sid = (await rpc(ws, 'session.create', request_id='config', source='tui',
                                  toolsets=[], reasoning='low'))['result']['session_id']
-                import yaml
+                import hermes_yaml as yaml
                 config = yaml.safe_load((home / 'config.yaml').read_text())
                 config.update(voice={'record_key': 'ctrl+r', 'submit_mode': 'draft', 'api_key': 'PRIVATE_VOICE'},
                               paste_collapse_threshold=12)
@@ -61,7 +61,7 @@ def test_client_config_projection_keeps_session_policy_and_secrets_private(tmp_p
         asyncio.run(probe())
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_model_options_uses_frozen_selection_without_composer_global_writes(tmp_path):
     with owner(tmp_path) as (home, peer, desc):
         async def probe():

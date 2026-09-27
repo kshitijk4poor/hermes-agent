@@ -6,7 +6,7 @@ import os
 import pytest
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_private_control_peer_mints_profile_bound_ticket(tmp_path):
     from gateway.control_socket import GatewayControlServer, resolve_client_socket_path
@@ -75,7 +75,7 @@ def test_ticket_atomic_single_use_profile_purpose_expiry_and_capacity(monkeypatc
         store.mint(profile_id='a', subject='uid:1', purpose='interactive')
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_old_socket_cleanup_cannot_unlink_replacement(tmp_path):
     from gateway.control_socket import GatewayControlServer, resolve_client_socket_path
@@ -99,7 +99,7 @@ async def test_old_socket_cleanup_cannot_unlink_replacement(tmp_path):
         await new.stop()
 
 
-@pytest.mark.windows_only
+@pytest.mark.platforms("windows")
 def test_native_pipe_authenticated_peer_and_deadline(tmp_path):
     import time
     from gateway.runtime_bootstrap_windows import NativeControlServer, query_runtime_control

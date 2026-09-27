@@ -1,6 +1,7 @@
 import { SLASH_COMMAND_RE } from '@hermes/shared'
 import { atom } from 'nanostores'
 
+import { type ComposerAttachment, revokeAttachmentPreviewUrls, revokeDiscardedAttachmentPreviews } from './composer'
 import { $connection } from './session'
 import { knownOwnerForSession } from './session-states'
 
@@ -16,7 +17,13 @@ export function serverOwnsComposerQueue(sessionId: string | null | undefined): b
   return Boolean(connection?.wsUrl && new URL(connection.wsUrl).searchParams.has('native_dial'))
 }
 
-import type { ComposerAttachment } from './composer'
+export interface RemoveQueuedPromptOptions {
+  /**
+   * When true, leave blob: preview URLs alive because submit/optimistic now
+   * owns the snapshot (drain handoff). Default false = entry discarded.
+   */
+  retainPreviewUrls?: boolean
+}
 
 export interface QueuedPromptEntry {
   id: string
@@ -119,9 +126,21 @@ const setParked = (sid: string, parked: boolean) => {
   $parkedQueueSessions.set(next)
 }
 
-export const writeSessionQueue = (sid: string, queue: QueuedPromptEntry[]) => {
-  const current = $queuedPromptsBySession.get()
-  const next = { ...current }
+const current = (): QueueState => (storageCurrent ? load() : $queuedPromptsBySession.get())
+
+// Apply `op` to the LIVE persisted queue, not to one derived from the in-memory
+// atom: another window may have written since our last storage event, into any
+// session including this one, and saving our stale snapshot would drop its
+// entries (#46732). `op` returns the next queue, or null for no change.
+const mutateSession = (sid: string, op: (queue: QueuedPromptEntry[]) => null | QueuedPromptEntry[]): boolean => {
+  const live = current()
+  const queue = op(live[sid] ?? [])
+
+  if (!queue) {
+    return false
+  }
+
+  const next: QueueState = { ...live }
 
   if (queue.length === 0) {
     delete next[sid]
@@ -139,6 +158,10 @@ export const writeSessionQueue = (sid: string, queue: QueuedPromptEntry[]) => {
   }
 
   return true
+}
+
+export const writeSessionQueue = (sid: string, queue: QueuedPromptEntry[]) => {
+  mutateSession(sid, () => queue)
 }
 
 if (typeof window !== 'undefined') {
@@ -210,7 +233,16 @@ export const enqueueQueuedPrompt = (
     queuedAt: Date.now()
   }
 
-  writeSessionQueue(sid, [...queueFor(sid), entry])
+  // Queueing a fresh prompt is fresh intent to keep the conversation
+  // moving — lift the persisted drain-failure budget off the entries
+  // already waiting there, exactly like the park (#98015). The op runs
+  // against the live persisted queue (mutateSession), so a same-session
+  // write from another window that has not fired its storage event yet
+  // is merged, not clobbered (#123249).
+  mutateSession(
+    sid,
+    queue => [...queue.map(e => (e.drainFailures ? { ...e, drainFailures: undefined } : e)), entry]
+  )
   // Queueing a new prompt is fresh intent to keep the conversation moving —
   // a park from an earlier Stop must not hold this (or the entries ahead of
   // it) back.
@@ -232,7 +264,8 @@ export const dequeueQueuedPrompt = (key: string | null | undefined): null | Queu
   mutateSession(sid, ([first, ...rest]) => {
     head = first ?? null
 
-  writeSessionQueue(sid, rest)
+    return first ? rest : null
+  })
 
   return head
 }
@@ -248,14 +281,22 @@ export const removeQueuedPrompt = (
     return false
   }
 
-  const queue = queueFor(sid)
-  const next = queue.filter(e => e.id !== id || e.serverStatus)
+  let removed: QueuedPromptEntry | undefined
+
+  mutateSession(sid, queue => {
+    // Server-owned (admitted) rows retire through the gateway, never locally.
+    removed = queue.find(e => e.id === id && !e.serverStatus)
+
+    return removed ? queue.filter(e => e.id !== id || e.serverStatus) : null
+  })
 
   if (!removed) {
     return false
   }
 
-  writeSessionQueue(sid, next)
+  if (!options?.retainPreviewUrls) {
+    revokeAttachmentPreviewUrls(removed.attachments)
+  }
 
   return true
 }
@@ -307,8 +348,8 @@ export const promoteQueuedPrompt = (key: string | null | undefined, id: string):
     return false
   }
 
-  const entry = queue[index]!
-  writeSessionQueue(sid, [entry, ...queue.slice(0, index), ...queue.slice(index + 1)])
+  return mutateSession(sid, queue => {
+    const index = queue.findIndex(e => e.id === id)
 
     return index <= 0 ? null : [queue[index]!, ...queue.slice(0, index), ...queue.slice(index + 1)]
   })
@@ -350,11 +391,8 @@ export const updateQueuedPrompt = (
       // describes it — what they typed is now what sends.
       const { displayText: _dropped, ...rest } = entry
 
-  if (!changed) {
-    return false
-  }
-
-  writeSessionQueue(sid, next)
+      return { ...rest, text: update.text, attachments }
+    })
 
     return changed ? next : null
   })
@@ -370,7 +408,13 @@ export const clearQueuedPrompts = (key: string | null | undefined) => {
     return
   }
 
-  writeSessionQueue(sid, [])
+  mutateSession(sid, queue => {
+    for (const entry of queue) {
+      revokeAttachmentPreviewUrls(entry.attachments)
+    }
+
+    return []
+  })
 }
 
 /**

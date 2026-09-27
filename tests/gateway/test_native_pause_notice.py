@@ -14,6 +14,8 @@ import sqlite3
 import threading
 import time
 
+import importlib.machinery
+
 import pytest
 
 from tests.gateway.fixtures.local_recovery_probe import Model, child_env, daemon
@@ -68,7 +70,8 @@ async def test_paused_fifo_releases_the_messaging_waiter_with_one_notice_per_epi
         store.close_all_db_handles()
 
 
-@pytest.mark.linux_only
+@pytest.mark.skipif(importlib.machinery.PathFinder.find_spec("telegram") is None, reason="python-telegram-bot not installed (on-demand extra)")
+@pytest.mark.platforms("linux")
 def test_crash_mid_turn_then_platform_message_gets_one_pause_notice_and_reset_unpauses(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

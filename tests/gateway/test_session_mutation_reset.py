@@ -40,7 +40,7 @@ async def reset_round(home, descriptor, previous=None):
         return params, receipt
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_reset_receipt_and_physical_target_survive_native_owner_restart(tmp_path):
     with daemon(tmp_path) as (home, descriptor):
         previous = asyncio.run(reset_round(home, descriptor))

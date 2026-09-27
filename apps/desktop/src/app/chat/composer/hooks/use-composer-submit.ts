@@ -90,9 +90,22 @@ export function useComposerSubmit({
   const surfaceId = useComposerSurfaceId()
 
   // Shared send primitive: fire onSubmit, and if the gateway rejects (accepted
-  // === false) or throws, re-load + re-stash the draft so the words survive.
-  const dispatchSubmit = (text: string, attachments?: ComposerAttachment[], displayKind?: 'hidden', target?: Parameters<ChatBarProps['onSubmit']>[1]) => {
-    const submittedScope = target?.storedSessionId ?? activeQueueSessionKeyRef.current
+  // === false) or throws, re-stash the draft so the words survive. Repaint it
+  // only while the same session still owns the visible composer; a late reject
+  // must not publish an old session's text into the newly focused one.
+  const dispatchSubmit = (
+    text: string,
+    attachments?: ComposerAttachment[],
+    displayKind?: 'hidden',
+    target?: Parameters<ChatBarProps['onSubmit']>[1]
+  ) => {
+    // A fresh chat's composer is keyed by its per-lifecycle fresh-draft key
+    // (`__new__:<uuid>`), but the submit contract spells "no session yet" as
+    // null: the create handoff below and the composer drift prong both key off
+    // it, and draftKey(null) resolves to that same fresh bucket.
+    const submittedScope =
+      target?.storedSessionId ?? (isFreshDraftScope(draftScopeRef.current) ? null : draftScopeRef.current)
+    let restoreScope = submittedScope
     const submittedAttachments = attachments ?? []
 
     // Only this operation's explicit session.create handoff may re-home a
@@ -119,7 +132,13 @@ export function useComposerSubmit({
     const rejected = displayKind ? () => {} : restore
 
     void Promise.resolve(
-      onSubmit(text, { ...target, ...(attachments ? { attachments } : {}), composerScope: submittedScope, ...(displayKind ? { displayKind } : {}) })
+      onSubmit(text, {
+        ...target,
+        ...(attachments ? { attachments } : {}),
+        composerScope: submittedScope,
+        ...assignment,
+        ...(displayKind ? { displayKind } : {})
+      })
     )
       .then(accepted => void (accepted === false ? rejected() : clearSessionDraft(submittedScope)))
       .catch(rejected)

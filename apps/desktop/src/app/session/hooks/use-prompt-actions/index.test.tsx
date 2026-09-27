@@ -7,8 +7,8 @@ import { useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { ClientSessionState } from '@/app/types'
-import { getSession } from '@/hermes'
-import { textPart } from '@/lib/chat-messages'
+import { getLatestSessionMessages, getSession } from '@/hermes'
+import { textPart, toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $compactingSessions, setSessionCompacting } from '@/store/compaction'
 import { $composerAttachments, $composerDraft, type ComposerAttachment, setComposerDraft } from '@/store/composer'
@@ -48,6 +48,11 @@ import { uploadComposerAttachment, usePromptActions } from '.'
 beforeEach(() => {
   clearSingleFlightSessionResumeState()
   window.localStorage.removeItem('hermes.desktop.preparedSubmissions.v1')
+  // Queue mutations build on the persisted map, not the atom — a queue an
+  // earlier test left in storage would otherwise sit ahead of this test's send.
+  window.localStorage.removeItem('hermes.desktop.composerQueue.v1')
+  vi.mocked(getLatestSessionMessages).mockReset()
+  vi.mocked(getLatestSessionMessages).mockImplementation(async () => ({ messages: [], session_id: 'session' }))
 })
 
 vi.mock('@/hermes', () => ({
@@ -6541,7 +6546,7 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
     expect(await handle!.submitText('fresh enough')).toBe(true)
     expect(requestGateway).toHaveBeenCalledWith(
       'prompt.submit',
-      { session_id: RUNTIME_SESSION_ID, text: 'fresh enough' },
+      { session_id: RUNTIME_SESSION_ID, submission_id: expect.any(String), text: 'fresh enough' },
       1_800_000
     )
     expect($notifications.get().some(note => note.kind === 'warning')).toBe(false)
@@ -6589,7 +6594,7 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
     expect(await handle!.submitText('follow-up after tools')).toBe(true)
     expect(requestGateway).toHaveBeenCalledWith(
       'prompt.submit',
-      { session_id: RUNTIME_SESSION_ID, text: 'follow-up after tools' },
+      { session_id: RUNTIME_SESSION_ID, submission_id: expect.any(String), text: 'follow-up after tools' },
       1_800_000
     )
   })
@@ -6612,7 +6617,7 @@ describe('usePromptActions stale multi-window guard (#65047)', () => {
     expect(await handle!.submitText('send anyway')).toBe(true)
     expect(requestGateway).toHaveBeenCalledWith(
       'prompt.submit',
-      { session_id: RUNTIME_SESSION_ID, text: 'send anyway' },
+      { session_id: RUNTIME_SESSION_ID, submission_id: expect.any(String), text: 'send anyway' },
       1_800_000
     )
   })

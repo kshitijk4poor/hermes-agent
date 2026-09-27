@@ -84,7 +84,7 @@ def _model_saw_tool(request, name):
     return any(name in json.dumps(t) for t in request.get('tools') or [])
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 # The 'background' case probes a process the retired worker reparented to init: the test spawned it
 # (through its own daemon), but pid_exists() on it is outside pytest's subtree for the live guard.
 @pytest.mark.live_system_guard_bypass

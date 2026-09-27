@@ -91,7 +91,7 @@ async def prompt(acp, sid, text='Use owned echo'):
     return await acp.rpc('session/prompt', sessionId=sid, prompt=[{'type': 'text', 'text': text}])
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_native_opposing_editor_mcp_survives_viewer_exit(daemon, specs, tmp_path, model_peer):
     (tmp_path / 'A').write_text('release')
@@ -133,7 +133,7 @@ async def test_native_opposing_editor_mcp_survives_viewer_exit(daemon, specs, tm
         'model_requests': len(model_peer.requests), 'surviving_blocked_tool': 'OWNED_RESULT_B'}))
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_native_cold_editor_rebind_refuses_changed_secret(daemon, specs, tmp_path, model_peer):
     (tmp_path / 'A').touch()

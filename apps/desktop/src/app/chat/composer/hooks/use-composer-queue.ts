@@ -234,41 +234,45 @@ export function useComposerQueue({
 
       const drainQueueSessionKey = activeQueueSessionKey
       const drainRuntimeSessionId = sessionId ?? null
-      const entry = pickEntry(getQueuedPrompts(drainQueueSessionKey).filter(entry => !entry.serverStatus))
-
-      if (!entry) {
-        return false
-      }
 
       drainingQueueRef.current = true
 
       try {
-        const accepted = await Promise.resolve(
-          onSubmit(entry.text, {
-            attachments: entry.attachments,
-            ...(entry.displayText ? { displayText: entry.displayText } : {}),
-            ...(entry.displayKind ? { displayKind: entry.displayKind } : {}),
-            fromQueue: true,
-            submission_id: entry.id,
-            sessionId: drainRuntimeSessionId,
-            storedSessionId: drainQueueSessionKey
-          })
-        )
+        return await withQueueDrainClaim(drainQueueSessionKey, async queue => {
+          const entry = pickEntry(queue.filter(candidate => !candidate.serverStatus))
 
-        if (accepted !== true) {
-          return false
-        }
+          if (!entry) {
+            return null
+          }
 
-        drainFailuresRef.current.delete(entry.id)
-        removeQueuedPrompt(drainQueueSessionKey, entry.id)
-        resetBrowseState(drainRuntimeSessionId)
-        // A successful drain means the queue is flowing again — lift any park
-        // so the remaining entries follow. Manual drains (Enter on an empty
-        // composer, the per-row send arrow) are exactly the resume gestures a
-        // parked queue waits for; the auto path only reaches here unparked.
-        unparkQueuedPrompts(drainQueueSessionKey)
+          const accepted = await Promise.resolve(
+            onSubmit(entry.text, {
+              attachments: entry.attachments,
+              ...(entry.displayText ? { displayText: entry.displayText } : {}),
+              ...(entry.displayKind ? { displayKind: entry.displayKind } : {}),
+              fromQueue: true,
+              submission_id: entry.id,
+              sessionId: drainRuntimeSessionId,
+              storedSessionId: drainQueueSessionKey
+            })
+          )
 
-        return true
+          if (accepted !== true) {
+            return false
+          }
+
+          drainFailuresRef.current.delete(entry.id)
+          // Submit now owns the blob: previews (optimistic bubble); do not revoke.
+          removeQueuedPrompt(drainQueueSessionKey, entry.id, { retainPreviewUrls: true })
+          resetBrowseState(drainRuntimeSessionId)
+          // A successful drain means the queue is flowing again — lift any park
+          // so the remaining entries follow. Manual drains (Enter on an empty
+          // composer, the per-row send arrow) are exactly the resume gestures a
+          // parked queue waits for; the auto path only reaches here unparked.
+          unparkQueuedPrompts(drainQueueSessionKey)
+
+          return true
+        })
       } finally {
         drainingQueueRef.current = false
       }

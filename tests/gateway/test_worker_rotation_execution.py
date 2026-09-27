@@ -16,7 +16,7 @@ from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
 from tests.gateway.test_worker_agent_execution import Model
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_full_agent_worker_rotation_continues_inference_without_canonical_opens(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

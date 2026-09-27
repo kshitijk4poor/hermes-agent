@@ -7,7 +7,7 @@ import sys
 import pytest
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_full_observer_cannot_block_real_authority_execution(tmp_path):
     repo = Path(__file__).resolve().parents[2]
     home, state = tmp_path / 'home', tmp_path / 'state'

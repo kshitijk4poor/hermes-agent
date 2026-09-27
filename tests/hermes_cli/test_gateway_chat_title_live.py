@@ -12,7 +12,7 @@ import pytest
 from tests.gateway.test_normal_runtime_boot import control, model_peer  # noqa: F401
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_title_create_if_missing_then_resume_by_title_is_deterministic(tmp_path, model_peer):
     home = tmp_path / "state"
     home.mkdir(mode=0o700)

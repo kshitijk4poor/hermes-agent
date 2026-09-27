@@ -693,6 +693,12 @@ def _gateway_command_subcommand(command: str | None) -> str | None:
         return "run"
     if any(tokens[i] == "-m" and tokens[i + 1] == "gateway.run" for i in range(len(tokens) - 1)):
         return "run"
+    # Atomic Hermes' bundled desktop runner shares HERMES_HOME with the CLI; without this,
+    # `gateway run --replace` does not recognise it as a running gateway, skips the
+    # terminate-and-scoped-lock-handoff path, and collides with its still-held scoped locks
+    # (e.g. the Discord bot-token lock). See #22418.
+    if any(b == "desktop-gateway.py" for b in basenames):
+        return "run"
     if any(b in ("hermes-gateway", "hermes-gateway.exe") for b in basenames):
         return "run"
     joined = " ".join(tokens)
@@ -1199,6 +1205,7 @@ def _prepare_runtime_status_update(
     error_code: Any = _UNSET, error_message: Any = _UNSET, needs_attention: Any = _UNSET,
     retrying_since: Any = _UNSET, served_profiles: Any = _UNSET, session_store: Any = _UNSET,
     parked_profiles: Any = _UNSET, multiplex_standalone_reason: Any = _UNSET,
+    platform_metrics: Any = _UNSET,
     ingress_url: Any = _UNSET, listener_base: Any = _UNSET, clear_profile_platforms: bool = False,
     drop_profile_platforms: Optional[str] = None,
     load_existing: bool = True, reload_existing: bool = False,

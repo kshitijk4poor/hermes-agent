@@ -20,7 +20,7 @@ def _peer(tmp_path, mode):
     return [sys.executable, str(Path(__file__).parent / 'fixtures' / 'native_ingress_media_peer.py'), mode], env, repo, state
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_accepted_media_survives_mutation_cleanup_and_owner_kill(tmp_path):
     command, env, repo, state = _peer(tmp_path, 'capture')
     with (state / 'owner.log').open('w+') as log:

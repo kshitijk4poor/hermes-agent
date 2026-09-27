@@ -495,29 +495,6 @@ def _replay_or_conflict(self, request, outcome, record, gateway_session_key, _op
     return _accepted_response(original_id, status.get("status", "queued"), gateway_session_key, replayed=True)
 
 
-class _RunStream:
-    """Fanout transport for one run: every subscriber reads the whole ordered event log,
-    including events published before it connected; ``None`` is the close sentinel. A
-    shared ``asyncio.Queue`` would hand each event to exactly one reader and let the first
-    disconnect tear the stream down under the others."""
-
-    def __init__(self) -> None:
-        self.events: List[Optional[Dict]] = []
-        self.subscribers: set["asyncio.Queue[Optional[Dict]]"] = set()
-
-    def put_nowait(self, event: Optional[Dict]) -> None:
-        self.events.append(event)
-        for queue in self.subscribers:
-            queue.put_nowait(event)
-
-    def subscribe(self) -> "asyncio.Queue[Optional[Dict]]":
-        queue: "asyncio.Queue[Optional[Dict]]" = asyncio.Queue()
-        for event in self.events:
-            queue.put_nowait(event)
-        self.subscribers.add(queue)
-        return queue
-
-
 @dataclass(slots=True)
 class _RunLaunch:
     """State for an admitted run's background task; contextvars are captured here
@@ -1058,6 +1035,8 @@ async def _execute_run(self, run: _RunLaunch, *, _api_server) -> None:
             approval_notify = _make_approval_notify(self, run, _api_server=_api_server)
             result, usage, served_runtime = await _submit_api_worker(
                 loop, lambda: _run_agent_sync(self, run, agent, approval_notify, _api_server=_api_server))
+        # Publish request metrics (daily counters + latency) with each completed run (#52323).
+        self._record_api_metrics(usage, time.perf_counter() - _run_started_at)
         if not isinstance(result, dict):
             result = {}
         # The committed outcome decides: a stop issued over WS by another viewer interrupts
@@ -1178,10 +1157,29 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
     else:
         return _run_not_found(_api_server._openai_error, run_id)
     stream = self._run_streams[run_id]
-    q = stream.subscribe()
-    response = web.StreamResponse(status=200, headers={
-        "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-    await response.prepare(request)
+    raw_last_seq = request.headers.get("Last-Event-ID") or request.query.get("last_seq")
+    try:
+        last_seq = max(-1, int(str(raw_last_seq).strip())) if raw_last_seq is not None else -1
+    except (TypeError, ValueError):
+        last_seq = -1
+    q, replay = stream.attach(last_seq)
+    response = web.StreamResponse(status=200, headers=self._sse_headers(request))
+
+    async def _write(data: bytes) -> None:
+        try:
+            async with asyncio.timeout(_RUN_STREAM_WRITE_TIMEOUT):
+                await response.write(data)
+        except TimeoutError:
+            with suppress(Exception):
+                response.force_close()
+            raise
+
+    async def _write_event(seq: int, event: Dict[str, Any]) -> None:
+        payload = dict(event)
+        payload["seq"] = seq
+        await _write(_api_server._sse_frame(payload, id=seq))
+
+    prepared = False
     try:
         await response.prepare(request)
         prepared = True
@@ -1226,9 +1224,8 @@ async def _handle_run_events(self, request: "web.Request", *, _api_server) -> "w
             raise
         logger.debug("[api_server] SSE stream error for run %s: %s", run_id, exc)
     finally:
-        stream.subscribers.discard(q)
-        if not stream.subscribers:
-            _drop_run_transport(self, run_id)
+        stream.detach(q)
+        self._release_run_owner_if_forgotten(run_id)
     return response
 
 
@@ -1435,7 +1432,8 @@ def _sweep_orphaned_runs_once(self, now: Optional[float] = None) -> None:
     if now is None:
         now = time.time()
     for run_id, created_at in list(self._run_streams_created.items()):
-        if now - created_at <= self._RUN_STREAM_TTL or self._run_streams[run_id].subscribers:
+        stream = self._run_streams.get(run_id)
+        if now - created_at <= self._RUN_STREAM_TTL or (stream is not None and stream.subscribers):
             continue
         logger.debug("[api_server] sweeping expired run transport %s", run_id)
         task = self._active_run_tasks.get(run_id)

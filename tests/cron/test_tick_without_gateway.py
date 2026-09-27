@@ -70,7 +70,7 @@ def test_tick_without_gateway_skips_agent_jobs_without_spawning_or_drift(cron_ho
     assert agent["id"] in refusals[0].getMessage() and "hermes gateway start" in refusals[0].getMessage()
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize("stand_in", ["starting_lock", "silent_socket"])
 def test_tick_holds_agent_jobs_while_gateway_is_starting_or_silent(cron_home, monkeypatch, caplog, stand_in):
     """A gateway mid-restart (lock held, no socket) or one whose control socket accepts but never

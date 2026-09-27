@@ -8,7 +8,7 @@ import sys
 import pytest
 
 
-@pytest.mark.parametrize("mode", ["ordinary", pytest.param("blocked", marks=pytest.mark.linux_only)])
+@pytest.mark.parametrize("mode", ["ordinary", pytest.param("blocked", marks=pytest.mark.platforms("linux"))])
 def test_authority_stream_has_one_order_and_rejects_retired_callbacks(tmp_path, mode):
     repo = Path(__file__).resolve().parents[2]
     home, state = tmp_path / 'home', tmp_path / 'state'

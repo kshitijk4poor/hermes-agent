@@ -8,7 +8,7 @@ from tests.gateway.test_native_http_auth import daemon, ticket, headers
 from tests.gateway.test_session_mutation_reset import reset_round
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_delete_after_reset_covers_physical_route_and_cache_generation(tmp_path):
     with daemon(tmp_path) as (home, descriptor), httpx.Client(base_url=descriptor['api_origin'], trust_env=False) as client:
         params, reset = asyncio.run(reset_round(home, descriptor))

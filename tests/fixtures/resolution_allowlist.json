@@ -75,6 +75,11 @@
     "kind": "bare_which"
   },
   {
+    "path": "apps/desktop/electron/fixtures/source-backend.py",
+    "symbol": "main",
+    "kind": "bare_which"
+  },
+  {
     "path": "cron/scheduler_script.py",
     "symbol": "_script_argv",
     "kind": "bare_which"

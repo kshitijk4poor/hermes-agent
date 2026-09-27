@@ -754,9 +754,17 @@ async def delete_session_endpoint(session_id: str, request: Request, profile: Op
                                   request_id: Optional[str] = None, expected_revision: Optional[int] = None,
                                   expected_generation: Optional[int] = None):
     from hermes_cli.web_server_sessions import _mutate_session_request
-    return await _mutate_session_request(request, profile, session_id,
+    from hermes_state import SessionDB
+    result = await _mutate_session_request(request, profile, session_id,
         request_id=request_id, expected_revision=expected_revision,
         expected_generation=expected_generation, operation='delete', payload={})
+    # The canonical delete retires rows only: scrub each deleted session's on-disk artifacts
+    # (secret-bearing ``session_<id>.json`` snapshots, ``request_dump_<id>_*.json``) as the CLI
+    # delete path does (#60207). Idempotent, so an exact retry of the receipt repeats it safely.
+    sessions_dir = _session_files_dir(profile)
+    for sid in result.get('deleted_ids') or ():
+        await asyncio.to_thread(SessionDB._remove_session_files, sessions_dir, str(sid))
+    return result
 
 
 @manage_router.post("/api/sessions/owner-backfill")

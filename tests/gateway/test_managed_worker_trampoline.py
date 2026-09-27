@@ -76,7 +76,7 @@ def test_owner_binds_reservation_to_verified_descendant_of_the_handle_only(tmp_p
             proc.wait(timeout=10)
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_managed_worker_completes_through_interpreter_trampoline(tmp_path):
     """The ordinary daemon spawns every child through a launcher that execs the real interpreter as
     its child (uv's Windows python.exe shape). The turn still completes in the real worker and no

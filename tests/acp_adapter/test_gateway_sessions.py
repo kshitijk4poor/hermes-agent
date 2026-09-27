@@ -137,7 +137,7 @@ async def editor(daemon, tmp_path):
             await peer.reader
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_acp_transport_shares_canonical_history_and_order(daemon, tmp_path, model_peer):
     async with viewer(daemon) as ws:
@@ -171,7 +171,7 @@ async def test_acp_transport_shares_canonical_history_and_order(daemon, tmp_path
 
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 async def test_acp_permission_detach_keeps_canonical_waiter(daemon, tmp_path, model_peer):
     import shlex
@@ -227,7 +227,7 @@ _ONE_PX_PNG = bytes.fromhex(
 )
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.asyncio
 # A loopback custom provider has no catalog entry; declaring vision is the documented
 # knob and is exactly what a user of a self-hosted vision model does.

@@ -56,12 +56,19 @@ def _owner(runner, event):
     return entry
 
 
+# notification_origin / original_trigger_message_id are producer debug context (#52694) and are not
+# persisted; notification_category="diagnostic" rides the snapshot so the replayed wake still mutes.
+_AUTOMATION_METADATA = frozenset({'gateway_session_key', 'gateway_session_id', 'automation_identities',
+    'turn_author', 'notification_origin', 'original_trigger_message_id', 'notification_category'})
+
+
 def snapshot_automation(authority, adapter, event, identity):
     runner = authority.runner
     if (not event.internal or event.message_type != MessageType.TEXT or event.is_command()
             or not isinstance(event.text, str) or not identity
             or event.media_urls or event.prompt_response or event.source.platform == Platform.API_SERVER
-            or set(event.metadata) - {'gateway_session_key', 'gateway_session_id', 'automation_identities', 'turn_author'}):
+            or set(event.metadata) - _AUTOMATION_METADATA
+            or event.metadata.get('notification_category', 'diagnostic') != 'diagnostic'):
         raise RuntimeStoreError('invalid_params')
     entry = _owner(runner, event)
     if event.source.platform == Platform.LOCAL:
@@ -92,6 +99,8 @@ def snapshot_automation(authority, adapter, event, identity):
     identities = event.metadata.get('automation_identities')
     if identities:
         envelope['automation']['identities'] = sorted(set(identities))
+    if event.metadata.get('notification_category'):
+        envelope['automation']['notification_category'] = 'diagnostic'
     return {'text': event.text, 'native_text_v1': envelope}, entry
 
 
@@ -125,6 +134,8 @@ def snapshot_local_automation(authority, adapter, event, identity, entry):
         descriptor['identities'] = sorted(set(event.metadata['automation_identities']))
     if getattr(event, '_heartbeat_session_id', None):
         descriptor['heartbeat'] = event._heartbeat_session_id
+    if event.metadata.get('notification_category'):
+        descriptor['notification_category'] = 'diagnostic'
     return {'text': event.text, 'local_automation_v1': descriptor}, entry
 
 
@@ -155,6 +166,8 @@ def restore_local_automation(authority, ref, row):
         event.metadata['turn_author'] = deepcopy(descriptor['turn_author'])
     if descriptor.get('heartbeat'):
         event._heartbeat_session_id = descriptor['heartbeat']
+    if descriptor.get('notification_category') == 'diagnostic':
+        event.metadata['notification_category'] = 'diagnostic'
     return event
 
 

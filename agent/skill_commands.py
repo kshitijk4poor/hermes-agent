@@ -458,10 +458,7 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
 
     if safe_worker_enabled():
         return {}
-    global _skill_commands, _skill_commands_platform, _skill_commands_home, _skill_commands_project
-    platform = _resolve_skill_commands_platform()
-    home = _resolve_skill_commands_home()
-    project = _resolve_skill_commands_project()
+    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
     # Build into a local map and publish once, at the end. Writing straight into the global made a scan's
     # partial results visible to everything else in the process: a second, overlapping scan deduped against
     # its own (empty) ``seen_names`` but collided against the first scan's already- published slugs, logging
@@ -514,7 +511,7 @@ def get_skill_commands() -> Dict[str, Dict[str, Any]]:
 
     if safe_worker_enabled():
         return {}
-    current = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
+    key = (_resolve_skill_commands_platform(), _resolve_skill_commands_home(), _resolve_skill_commands_project())
     with _publish_lock:
         cached = _skill_commands_by_key.get(key)
     if cached is not None:

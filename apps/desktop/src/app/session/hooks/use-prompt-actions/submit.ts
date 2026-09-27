@@ -22,6 +22,7 @@ import {
   terminalContextBlocksFromDraft
 } from '@/store/composer'
 import { serverOwnsComposerQueue } from '@/store/composer-queue'
+import { noteMessageSent } from '@/store/desktop-metrics'
 import { $hudMode } from '@/store/hud'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { consumePendingCredentialWarning, requestDesktopOnboarding } from '@/store/onboarding'
@@ -37,7 +38,8 @@ import {
   setMessages,
   touchSessionActivity
 } from '@/store/session'
-import { $sessionStates, knownOwnerForSession } from '@/store/session-states'
+import { $sessionStates, $sessionTiles, knownOwnerForSession } from '@/store/session-states'
+import type { SessionInfo } from '@/types/hermes'
 
 import {
   profileScopeForTranscriptSession,
@@ -54,7 +56,6 @@ import {
   removePreparedSubmission,
   writePreparedSubmission
 } from './prepared-submissions'
-import { finalizeInterruptedMessages } from './rewind'
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 import { captureSubmissionDestination } from './submission-destination'
 import {
@@ -566,6 +567,11 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       const dropOptimistic = (sid: null | string) => {
         if (queueAdmission) { return }
 
+        // The optimistic bubble is gone, so its blob: previews die with it —
+        // unless a rejected-submit restore already re-loaded the attachments
+        // into the composer, which re-owns those URLs (#63682 handoff).
+        revokeDiscardedAttachmentPreviews(attachments, usingComposerAttachments ? $composerAttachments.get() : [])
+
         if (!sid) {
           if (targetIsCurrentView()) {
             scope.setMessages(current => current.filter(m => m.id !== optimisticId))
@@ -896,24 +902,17 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // the gateway receives @file: paths that resolve in its workspace.
         // Images keep their inline bounded thumbnail — see optimisticAttachmentRef.
         attachmentRefs = syncedAttachments.map(optimisticAttachmentRef).filter((r): r is string => Boolean(r))
-        rewriteOptimistic(liveSessionId)
+        rewriteOptimistic(liveSessionId, syncedAttachments)
         const text = retained?.text ?? buildContextText(syncedAttachments)
-
-        trackPendingSubmission(targetStoredSessionId ?? liveSessionId, {
-          id: submissionId,
-          text,
-          displayText: options?.displayText
-        })
-
-        const imageAttachments = syncedAttachments.filter(attachment => attachment.kind === 'image' && attachment.mime)
-          .map(attachment => ({ path: attachment.path!, mime: attachment.mime! }))
 
         // Another Desktop window may own a newer transcript while this one
         // still shows an open-time snapshot. Refuse the send and refresh
-        // rather than forking the session (#65047).
+        // rather than forking the session (#65047). A server-owned
+        // (canonical gateway) route has one writer and one FIFO, so a send
+        // from a stale view only queues behind the peer's turn — no fork.
         const guardStoredId = targetStoredSessionId ?? selectedStoredSessionIdRef.current
 
-        if (guardStoredId && liveSessionId) {
+        if (!serverQueue && guardStoredId && liveSessionId) {
           const localSnapshot = updateSessionState(liveSessionId, state => state, targetStoredSessionId)
 
           const refreshed = await refreshIfTranscriptStale(guardStoredId, localSnapshot.messages, {
@@ -952,6 +951,15 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
             return false
           }
         }
+
+        trackPendingSubmission(targetStoredSessionId ?? liveSessionId, {
+          id: submissionId,
+          text,
+          displayText: options?.displayText
+        })
+
+        const imageAttachments = syncedAttachments.filter(attachment => attachment.kind === 'image' && attachment.mime)
+          .map(attachment => ({ path: attachment.path!, mime: attachment.mime! }))
 
         const submitParams = (targetId: string) => ({
           session_id: targetId,
@@ -1010,6 +1018,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         try {
           const recoverStoredSessionId = targetStoredSessionId
+
+          // A bot's chat is a tile scoped to the `bots` workspace; the primary chat is Sessions mode.
+          noteMessageSent($sessionTiles.get().find(tile => tile.runtimeId === sessionId)?.workspaceMode ?? 'sessions')
 
           const { result, sessionId: receiptSessionId } = await withSessionNotFoundResume<SubmitReceipt>(
             sessionId,

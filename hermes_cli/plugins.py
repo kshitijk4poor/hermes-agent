@@ -1354,6 +1354,8 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
 
         if safe_worker_enabled():
             return
+        if plugin_discovery_suppressed():
+            return  # a config-only read of a profile this process must not load plugins for
         if self._discovered and not force and in_plugin_load_worker():
             # A plugin whose register() re-enters discovery (importing model_tools does) runs on a
             # deadline worker that cannot re-acquire the sweep's RLock; the flag is already set for the

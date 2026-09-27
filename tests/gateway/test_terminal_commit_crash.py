@@ -13,7 +13,7 @@ import pytest
 from tests.gateway.fixtures.local_recovery_probe import daemon, Model
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_terminal_commit_before_publication_survives_kill(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

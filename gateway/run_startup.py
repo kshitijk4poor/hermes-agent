@@ -593,6 +593,8 @@ class GatewayStartupMixin:
                     'SELECT 1 FROM session_admissions WHERE target_session_id=? LIMIT 1',
                     (entry.session_id,)) for authority in all_authorities(self)):
                 continue
+            # Epoch math: the marker was stamped naive-local by the previous process, possibly
+            # on the other side of a DST change; wall-clock subtraction is off by the shift.
             marker = entry.last_resume_marked_at or entry.updated_at
             if not _is_fresh_gateway_interruption(marker, window_secs=window):
                 continue

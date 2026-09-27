@@ -14,7 +14,9 @@ from hermes_state_runtime import RuntimeStoreError, begin_runtime_epoch
 @pytest.fixture
 def owner(tmp_path):
     db = SessionDB(tmp_path / 'state.db')
-    runner = SimpleNamespace(_draining=False, session_store=SessionStore(config=GatewayConfig(), sessions_dir=tmp_path / 'sessions'))
+    store = SessionStore(config=GatewayConfig(), sessions_dir=tmp_path / 'sessions')
+    store._db = db  # production: the routing store and the authority share the profile's state.db
+    runner = SimpleNamespace(_draining=False, session_store=store)
     authority = SessionAuthority(runner, profile_id='default', instance_id='first', db=db,
                                  epoch=begin_runtime_epoch(db, instance_id='first'))
     runner.session_authority = authority

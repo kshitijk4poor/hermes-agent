@@ -11,7 +11,7 @@ from gateway.control_socket import _home_hash
 from hermes_cli.gateway_runtime_discovery import DiscoveryError, query_identify
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_fallback_pointer_uses_owner_location_and_keeps_identity_checks(tmp_path):
     home = tmp_path / 'profile'
     home.mkdir(mode=0o700)

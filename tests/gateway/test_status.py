@@ -1511,7 +1511,7 @@ class TestLaunchdPlistRespawnGovernance:
 
 
 class TestPermissionErrorOnLockFile:
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_inaccessible_lock_is_not_deleted_or_treated_as_absence(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         lock = tmp_path / "gateway.lock"
@@ -1529,7 +1529,7 @@ class TestPermissionErrorOnLockFile:
         status.release_gateway_runtime_lock()
         assert lock.stat().st_ino == inode
 
-    @pytest.mark.linux_only
+    @pytest.mark.platforms("linux")
     def test_runtime_lock_does_not_follow_symlink(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         target = tmp_path / "unrelated"

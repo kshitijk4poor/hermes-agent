@@ -16,7 +16,7 @@ from websockets.exceptions import InvalidStatus
 from tests.gateway.fixtures.local_recovery_probe import Model, daemon, rpc, websocket
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_ordinary_daemon_slash_skill_uses_durable_fifo(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

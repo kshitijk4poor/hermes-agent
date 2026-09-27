@@ -11,7 +11,7 @@ import pytest
 from gateway.session_contract import Principal, SessionRef
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_stop_before_hello_terminates_child_and_settles_interrupted(monkeypatch):
     from gateway import session_managed_worker as managed
     spawned = []

@@ -661,7 +661,11 @@ class TestRunEvents:
         from gateway.platforms.api_server_runs import _mark_run_event
 
         async def frame(resp):
-            return (await asyncio.wait_for(resp.content.readuntil(b"\n\n"), timeout=2.0)).decode()
+            # Skip SSE comment frames (``: open`` head flush, keepalives): only events count.
+            while True:
+                chunk = (await asyncio.wait_for(resp.content.readuntil(b"\n\n"), timeout=2.0)).decode()
+                if not chunk.startswith(":"):
+                    return chunk
 
         app = _create_runs_app(adapter)
         async with TestClient(TestServer(app)) as cli:

@@ -498,7 +498,7 @@ class ToolRegistry:
 
     def _merged_tools(self, scope: Optional[str] = None) -> Dict[str, ToolEntry]:
         """Return global tools overlaid with one profile's plugin tools."""
-        entries = {**self._tools, **self._scoped_tools.get(scope or self.current_scope_key(), {})}
+        entries = {**self._tools, **self._scoped_tools.get(hermes_home_key(scope), {})}
         if scope is None:
             entries.update(self._scoped_tools.get(current_session_tool_scope(), {}))
         return entries

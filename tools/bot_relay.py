@@ -346,7 +346,7 @@ def claim_pending_envelopes(root: Path | str) -> list[dict]:
         claimed = base / CLAIMED_DIR / path.name
         with contextlib.suppress(OSError, ValueError):
             os.replace(path, claimed)  # atomic claim
-            envelope = json.loads(claimed.read_text(encoding="utf-8"))
+            envelope = json.loads(claimed.read_text(encoding="utf-8-sig"))
             if not isinstance(envelope, dict):
                 raise ValueError(f"expected a JSON object, got {type(envelope).__name__}")
             out.append(envelope)
@@ -372,7 +372,7 @@ def _replay_unanswered(root: Path | str, base: Path, seen: set, now: float) -> l
         if (base / REPLIES_DIR / path.name).exists():
             continue
         with contextlib.suppress(OSError, ValueError):
-            envelope = json.loads(path.read_text(encoding="utf-8"))
+            envelope = json.loads(path.read_text(encoding="utf-8-sig"))
             if not isinstance(envelope, dict):
                 raise ValueError(f"expected a JSON object, got {type(envelope).__name__}")
             if envelope.get("canonical_delivery_v1") is not True or envelope.get("id") in seen:

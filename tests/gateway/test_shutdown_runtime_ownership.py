@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 @pytest.mark.parametrize('timed_out', [False, True])
 def test_exit_state_keeps_runtime_reserved_until_final_cleanup(tmp_path, monkeypatch, timed_out):
     import gateway.run as run

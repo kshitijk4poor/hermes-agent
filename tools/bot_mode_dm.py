@@ -419,6 +419,11 @@ def _delivery_lock(argv: list[str], *, stdin_file: bool):
     return acquire_turn_lock(_hermes_root(Path(_default_home())), argv[2])
 
 
+def _live_intent_file(dm_file: "str | os.PathLike") -> str:
+    """The pinned live-delivery intent beside a DM file (the cache sweep globs ``*.live.json``)."""
+    return f"{os.fspath(dm_file)}.live.json"
+
+
 def _dm_delivery_id(dm_file: "str | os.PathLike") -> str:
     """One delivery id per DM file: the dispatch ack, the live-owner intent and every retry
     of the runner derive it the same way, so the sender can correlate all of them."""
@@ -439,7 +444,7 @@ def _admit_live_dm(profile_home: Path | None, dm_file: str, author: Optional[dic
         owner = find_canonical_live_owner(profile_home)
         if owner is None:
             raise ValueError("canonical Bot Chat target is unavailable; no local fallback")
-        intent = dict(owner=owner, message=Path(dm_file).read_text(encoding="utf-8"),
+        intent = dict(owner=owner, message=Path(dm_file).read_text(encoding="utf-8-sig"),
                       delivery_id=_dm_delivery_id(dm_file),
                       **({"author": author} if author else {}))
         try:

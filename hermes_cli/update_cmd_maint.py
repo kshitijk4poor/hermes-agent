@@ -8,7 +8,6 @@ test patches on ``update_cmd`` stay effective).
 import logging
 from contextlib import suppress
 import os
-import shutil
 import subprocess
 import sys
 import time as _time
@@ -407,7 +406,8 @@ def _restore_state_db_from_snapshot(state_path: Path, snap_state: Path) -> bool:
     Use the single-database primitive, not whole-profile restore: post-update config
     and unrelated files must not roll back with a damaged transcript store.
     """
-    from hermes_cli.backup import _safe_restore_db, verify_sqlite_integrity
+    from hermes_cli.backup import verify_sqlite_integrity
+    from hermes_cli.backup_restore import _safe_restore_db
 
     snap_state.stat()  # Preserve the caller's OSError reporting for missing snapshots.
     if not verify_sqlite_integrity(snap_state, check_header=True, run_pragma=True).get("valid"):

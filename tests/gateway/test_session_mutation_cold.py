@@ -6,7 +6,7 @@ from tests.gateway.test_native_http_auth import daemon, ticket, headers
 from tests.gateway.test_session_mutation_retirement import create
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_cold_import_mutation_binds_owner_across_restart(tmp_path):
     with daemon(tmp_path) as (home, descriptor), httpx.Client(base_url=descriptor['api_origin'], trust_env=False) as client:
         # Native creation remains independently authorized while cold history binds.

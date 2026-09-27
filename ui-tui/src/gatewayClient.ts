@@ -1,6 +1,5 @@
 import { execFile } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -118,7 +117,7 @@ export interface LocalGatewayGrant { url: string; protocols: string[]; profile_i
 const bootstrapLocalGateway = async (start: boolean): Promise<LocalGatewayGrant> => {
   const root = process.env.HERMES_PYTHON_SRC_ROOT ?? resolve(import.meta.dirname, '../../')
 
-  const { stdout } = await promisify(execFile)(resolvePython(root),
+  const { stdout } = await promisify(execFile)(resolvePython(),
     [resolve(root, 'ui-tui/scripts/gateway_bootstrap.py'), ...(start ? ['--start'] : [])],
     { cwd: root, env: { ...process.env, PYTHONPATH: root }, timeout: 40_000, maxBuffer: 1024 * 1024 })
 

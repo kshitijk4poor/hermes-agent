@@ -13,7 +13,7 @@ import pytest
 from tests.gateway.test_normal_runtime_boot import control
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_secondary_native_ticket_implicit_selectors_touch_only_the_secondary_home(tmp_path):
     """R2: omitted / empty / ``current`` selectors used to pass ``_own_profile`` unbound, so the
     route resolved through the LAUNCH home and a valid secondary ticket read and wrote the launch
@@ -68,7 +68,7 @@ def test_secondary_native_ticket_implicit_selectors_touch_only_the_secondary_hom
                     updated = client.put('/api/config', json={**body, 'config': {'display': {'skin': 'ares'}}},
                                          headers={'X-Hermes-Gateway-Ticket': ticket()})
                     assert updated.status_code == 200, (body, updated.text)
-            import yaml
+            import hermes_yaml as yaml
             assert yaml.safe_load((beta / 'config.yaml').read_text())['display']['skin'] == 'ares'
             assert (home / 'config.yaml').read_bytes() == launch_before
         finally:

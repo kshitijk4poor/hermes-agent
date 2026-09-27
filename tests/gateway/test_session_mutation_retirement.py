@@ -21,7 +21,7 @@ async def create(home, descriptor):
                 return response['result']['session_id']
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_native_delete_exact_retry_survives_owner_restart(tmp_path):
     with daemon(tmp_path) as (home, descriptor), httpx.Client(base_url=descriptor['api_origin'], trust_env=False) as client:
         sid = asyncio.run(create(home, descriptor))

@@ -23,7 +23,7 @@ from websockets.asyncio.client import connect
 ROOT = Path(__file__).resolve().parents[2]
 # The daemon is a foreground child of the test (never detached), boots a disposable custom root
 # with HOME redirected (no systemd unit, no webhook port) and is reaped in every path below.
-pytestmark = [pytest.mark.linux_only, pytest.mark.spawns_gateway_lookalike]
+pytestmark = [pytest.mark.platforms("linux"), pytest.mark.spawns_gateway_lookalike]
 
 
 def control(home, verb, params=None, timeout=10):

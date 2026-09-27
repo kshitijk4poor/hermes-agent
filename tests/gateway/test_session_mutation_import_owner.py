@@ -4,7 +4,7 @@ import pytest
 from tests.gateway.test_native_http_auth import daemon, ticket, headers
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_import_atomically_binds_each_new_history_to_its_importer(tmp_path):
     with daemon(tmp_path) as (home, descriptor), httpx.Client(base_url=descriptor['api_origin'], trust_env=False) as client:
         response = client.post('/api/sessions/import', headers=headers(ticket(home, descriptor)), json={

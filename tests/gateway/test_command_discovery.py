@@ -68,7 +68,7 @@ async def _legacy_ws_snapshot(root, home, env, requests):
                     process.wait(timeout=5)
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_ordinary_daemon_discovery_matches_legacy_extensions(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

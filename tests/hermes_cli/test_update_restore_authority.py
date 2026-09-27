@@ -150,12 +150,13 @@ def test_update_restore_excludes_startup_until_publication(tmp_path, monkeypatch
 
     # Pause only the actual database publication, with maintenance already held.
     arrived, release = threading.Event(), threading.Event()
-    publish = backup._restore_db_pages
+    from hermes_cli import backup_restore
+    publish = backup_restore._restore_db_pages
     def barrier(*args):
         arrived.set()
         assert release.wait(30)
         return publish(*args)
-    monkeypatch.setattr(backup, '_restore_db_pages', barrier)
+    monkeypatch.setattr(backup_restore, '_restore_db_pages', barrier)
     results = []
     thread = threading.Thread(target=lambda: results.append(_restore_state_db_from_snapshot(destination, source)))
     thread.start()

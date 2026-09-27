@@ -230,7 +230,7 @@ def _execution_control(service, method, params):
 
 def _profiles(authority, actor, home, params):
     from hermes_cli.profiles import _profile_info, read_profile_meta
-    import yaml
+    import hermes_yaml as yaml
     include_sessions = params.get('include_sessions', True)
     if type(include_sessions) is not bool:
         raise RuntimeStoreError('invalid_params')

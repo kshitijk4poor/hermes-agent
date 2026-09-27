@@ -12,7 +12,7 @@ import pytest
 from tests.gateway.fixtures.local_recovery_probe import daemon, rpc, websocket
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_worker_survives_owner_restart_without_repeating_tool(tmp_path):
     root = Path(__file__).resolve().parents[2]
     home, user = tmp_path / 'state', tmp_path / 'user'

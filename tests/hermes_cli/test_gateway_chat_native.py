@@ -14,7 +14,7 @@ import pytest
 from tests.gateway.test_normal_runtime_boot import control, model_peer  # noqa: F401
 
 
-@pytest.mark.linux_only
+@pytest.mark.platforms("linux")
 def test_native_classic_fresh_resume_and_oneshot(tmp_path, model_peer, request):
     home = tmp_path / "state"
     home.mkdir(mode=0o700)
