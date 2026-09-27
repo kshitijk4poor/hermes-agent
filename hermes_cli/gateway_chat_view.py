@@ -15,6 +15,7 @@ class GatewayChatView:
         self.generation = snapshot.get("execution_generation", 0)
         self.prompts = {p["prompt_id"]: p for p in snapshot.get("prompts", [])}
         self.pending = snapshot.get("pending", [])
+        self.model = str((snapshot.get("info") or {}).get("model") or "Hermes").split("/")[-1]
         # ``--format stream-json``: stdout belongs to the JSONL protocol, so every human line is
         # replaced by an emitter event and the terminal record carries the exit code.
         self.emitter = emitter
@@ -259,7 +260,9 @@ class GatewayChatView:
             from hermes_cli.skin_engine import get_active_prompt_symbol, get_active_skin
             welcome = "Welcome to Hermes Agent! Type your message or /help for commands."
             print(get_active_skin().get_branding("welcome", welcome), flush=True)
-            prompt = PromptSession(erase_when_done=True)
+            # The classic status bar's leading segments: model, then the attached session.
+            prompt = PromptSession(erase_when_done=True,
+                                   bottom_toolbar=lambda: f" \u2624 {self.model} \u2502 {self.session_id} ")
             prompt_symbol = get_active_prompt_symbol("❯ ")
             with patch_stdout():
                 while not self.failure:
