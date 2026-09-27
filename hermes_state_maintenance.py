@@ -316,8 +316,7 @@ class SessionMaintenanceMixin:
             cursor = conn.execute(f"SELECT s.id FROM sessions s WHERE {where}", where_params)
             session_ids = {row["id"] for row in cursor.fetchall()}
             if exclude_active_write_guards:
-                session_ids -= {sid for sid in session_ids
-                                if self._write_guards_reject(conn, sid, allow_closed_compression_parent=True)}
+                session_ids -= self._guarded_ids(conn, session_ids)
             from hermes_state_mutation_retirement import retire_prunable
             session_ids = retire_prunable(conn, sorted(session_ids))
             if not session_ids:

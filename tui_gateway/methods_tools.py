@@ -427,13 +427,16 @@ def _(rid, params: dict) -> dict:
 # ─── Command catalog / dispatch ──────────────────────────────────────────────
 @_rpc("commands.catalog", 5020)
 def _(rid, params: dict) -> dict:
-    """Registry-backed slash metadata, categorized, no aliases (shared builder in command_discovery). Skill
-    discovery is bound to the calling session's profile and workspace (``_completion_cwd``: its record,
-    else the cwd a new session would be seeded with) so project-local skills register for the repo the
-    session is actually in (#114359)."""
+    """Registry-backed slash metadata, categorized, no aliases (shared builder in command_discovery). Quick
+    command, plugin command and skill discovery are all home-keyed, so the whole build runs bound to the
+    calling session's profile and workspace (``_completion_cwd``: its record, else the cwd a new session
+    would be seeded with) so project-local skills register for the repo the session is actually in
+    (#114359); a session-less draft is bound to ``params['profile']`` (#124651), and an unknown profile
+    is 4064 like ``complete.slash`` — never a launch-profile palette."""
     from tui_gateway.command_discovery import command_catalog
-    scope = _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params))
-    return _ok(rid, command_catalog(load_cfg=_load_cfg, module_loader=_tools_mod, scope=scope))
+    with _session_home_scope(_sessions.get(params.get("session_id", "")), cwd=_completion_cwd(params),
+                             profile=params.get("profile")):
+        return _ok(rid, command_catalog(load_cfg=_load_cfg, module_loader=_tools_mod))
 
 
 @method("cli.exec")

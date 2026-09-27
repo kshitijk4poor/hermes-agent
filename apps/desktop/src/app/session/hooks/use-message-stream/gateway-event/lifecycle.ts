@@ -2,6 +2,7 @@ import type { GatewayEvent } from '@hermes/shared'
 import type { HermesSkin } from '@hermes/shared/skin'
 
 import { eventSourceMatchesOwner, gatewayEventSource } from '@/lib/replay-gap-owner'
+import { clearClarifyRequest } from '@/store/clarify'
 import {
   notifyCronChanged,
   notifyPairingChanged,

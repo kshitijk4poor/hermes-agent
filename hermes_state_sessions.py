@@ -858,39 +858,18 @@ class SessionSessionsMixin:
     def _set_lineage_column(self, column: str, session_id: str, value: Any, *,
                             extra_set_sql: str = "") -> bool:
         """Set one ``sessions`` column across a whole compression lineage: Desktop projects roots
-        forward to their tip, so updating only the tip would let the root resurrect it on refresh."""
+        forward to their tip, so updating only the tip would let the root resurrect it on refresh.
+        *extra_set_sql* (trusted literal, ``, col = expr``) rides the same UPDATE."""
         return bool(self._execute_write(
-            lambda conn: self._set_lineage_column_in_transaction(conn, column, session_id, value)
+            lambda conn: self._set_lineage_column_in_transaction(
+                conn, column, session_id, value, extra_set_sql=extra_set_sql)
         ))
 
-    def _set_lineage_column_in_transaction(self, conn, column: str, session_id: str, value: Any):
+    def _set_lineage_column_in_transaction(self, conn, column: str, session_id: str, value: Any, *,
+                                           extra_set_sql: str = ""):
         """Return affected IDs so authority revisions share this exact lineage selector."""
         return [row[0] for row in conn.execute(
-            f"""
-            WITH RECURSIVE
-              ancestors(id) AS (
-                SELECT ?
-                UNION
-                SELECT parent.id
-                FROM ancestors a
-                JOIN sessions child ON child.id = a.id
-                JOIN sessions parent ON parent.id = child.parent_session_id
-                WHERE parent.end_reason = 'compression'
-              ),
-              descendants(id) AS (
-                SELECT ?
-                UNION
-                SELECT child.id
-                FROM descendants d
-                JOIN sessions parent ON parent.id = d.id
-                JOIN sessions child ON child.parent_session_id = parent.id
-                WHERE parent.end_reason = 'compression'
-              ),
-              lineage(id) AS (
-                SELECT id FROM ancestors
-                UNION
-                SELECT id FROM descendants
-              )
+            _LINEAGE_CTE_SQL + f"""
             UPDATE sessions
             SET {column} = ?{extra_set_sql}
             WHERE id IN (SELECT id FROM lineage)
@@ -1710,6 +1689,21 @@ class SessionSessionsMixin:
             ).fetchall()]
             if not existing:
                 return 0
+            if exclude_active_write_guards:
+                # A root is skipped when it or any delegate child it would cascade is guarded, so the
+                # cascade below never deletes a guarded row reported back as kept.
+                # One batched check first; per-root attribution only when something is guarded.
+                active_ids: set = set()
+                if self._guarded_ids(conn, [*existing, *_collect_delegate_child_ids(conn, existing)]):
+                    active_ids = {
+                        sid for sid in existing
+                        if self._guarded_ids(conn, [sid, *_collect_delegate_child_ids(conn, [sid])])
+                    }
+                existing = [sid for sid in existing if sid not in active_ids]
+                if skipped_ids is not None:
+                    skipped_ids.extend(sorted(active_ids))
+                if not existing:
+                    return 0
             from hermes_state_mutation_retirement import retire_sessions
             retire_sessions(conn, existing)
             removed_ids.extend(_delete_delegate_children(conn, existing))

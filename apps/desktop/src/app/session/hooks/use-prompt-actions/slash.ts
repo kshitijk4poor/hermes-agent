@@ -37,6 +37,7 @@ import {
   $connection,
   $sessions,
   $yoloActive,
+  applySessionTitle,
   resolveComposerSessionKey,
   setActiveSessionId,
   setCurrentUsage,
@@ -192,7 +193,7 @@ export function useSlashCommand(deps: SlashCommandDeps) {
   const compressInFlightRef = useRef(new Set<string>())
 
   return useCallback(
-    async (rawCommand: string, options?: SubmitTextOptions & { recordInput?: boolean }) => {
+    async (rawCommand: string, options?: SubmitTextOptions & { recordInput?: boolean; typed?: boolean }) => {
       const initialRuntimeId = options?.sessionId ?? activeSessionIdRef.current
       const initialSelectedId = selectedStoredSessionIdRef.current
       const initialRoutedId = getRoutedStoredSessionId()

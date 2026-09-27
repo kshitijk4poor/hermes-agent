@@ -462,21 +462,58 @@ class SessionMessagesMixin:
                     compression_lock_holder=compression_lock_holder, turn_lease_holder=turn_lease_holder,
                     turn_lease_ttl_seconds=turn_lease_ttl_seconds)
                 for start in range(0, len(messages), chunk_rows))
-        return self._execute_write(lambda conn: self._append_messages_in_transaction(
+        return self._execute_transcript_write(lambda conn: self._append_messages_in_transaction(
             conn, session_id, messages, compression_lock_holder=compression_lock_holder,
             turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds),
-            patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
+            messages, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def _append_messages_in_transaction(self, conn, session_id, messages, *,
             compression_lock_holder=None, turn_lease_holder=None, turn_lease_ttl_seconds=300.0):
         self._check_transcript_write_guards(conn, session_id, compression_lock_holder,
             turn_lease_holder=turn_lease_holder, turn_lease_ttl_seconds=turn_lease_ttl_seconds)
         from agent.transcript_repair import resolve_and_repair_transcript_batch
-        inserted_rows = resolve_and_repair_transcript_batch(conn, session_id, messages,
-            encode_content_fn=self._encode_content, decode_content_fn=self._decode_content)
+        inserted_rows = resolve_and_repair_transcript_batch(
+            conn,
+            session_id,
+            messages,
+            encode_content_fn=self._encode_content,
+            decode_content_fn=self._decode_content,
+            serialize_message_fn=lambda msg, timestamp: self._serialized_message_row(
+                session_id, msg, timestamp
+            ),
+            decode_row_fn=self._decoded_repair_row,
+        )
         inserted, tool_calls_total = self._insert_message_rows(conn, session_id, inserted_rows)
         self._bump_session_counters(conn, session_id, inserted, tool_calls_total, unit=False)
         return inserted
+
+    _ROW_STATE_KEYS = ("_row_id", DB_ROW_SNAPSHOT, "timestamp")
+
+    def _execute_transcript_write(self, fn, messages: List[Dict[str, Any]], **kwargs):
+        """``_execute_write(fn)`` for callbacks that stamp row state onto the caller's *messages* (every
+        :meth:`_insert_message_rows` caller that passes caller-owned dicts; rewind and import insert fresh copies). Each attempt, and a final failure, restores the caller's
+        ``_row_id`` / digest / timestamp: a rolled-back insert's id is reused by SQLite, so a stale stamp
+        would make a later flush adopt another writer's row and drop this message."""
+        _absent = object()
+        pre_state = [tuple(m.get(k, _absent) for k in self._ROW_STATE_KEYS) for m in messages]
+
+        def _restore() -> None:
+            for msg, state in zip(messages, pre_state):
+                msg.pop(CANONICAL_ROW, None)
+                for key, value in zip(self._ROW_STATE_KEYS, state):
+                    if value is _absent:
+                        msg.pop(key, None)
+                    else:
+                        msg[key] = value
+
+        def _attempt(conn):
+            _restore()
+            return fn(conn)
+        try:
+            return self._execute_write(_attempt, **kwargs)
+        except BaseException:
+            _restore()
+            raise
 
     def set_latest_matching_message_display_kind(self, session_id: str, *, role: str, content: str,
                                                  display_kind: str,
@@ -1883,15 +1920,19 @@ class SessionMessagesMixin:
         lease refuses; expired/dead holders are reclaimed. ``rewind_count`` always increments."""
         from hermes_state_mutation_transcript import rewind_in_transaction
         def _do(conn):
-            return rewind_in_transaction(self, conn, session_id, target_message_id,
+            target_row, ids, head_id, replacement_message_id = rewind_in_transaction(
+                self, conn, session_id, target_message_id,
                 preserve_compaction_handoff=preserve_compaction_handoff,
                 expected_active_ids=expected_active_ids, expected_target_content=expected_target_content)
-        target_row, rewound, new_head_id, replacement_message_id = self._execute_write(_do)
+            replacement_message_uid = None if replacement_message_id is None else conn.execute(
+                "SELECT message_uid FROM messages WHERE id = ?", (replacement_message_id,)).fetchone()[0]
+            return target_row, ids, head_id, replacement_message_id, replacement_message_uid
+        target_row, rewound, new_head_id, replacement_message_id, replacement_message_uid = self._execute_write(_do)
         # Decode for the prompt-buffer prefill without a second fallible DB operation.
         target_row["content"] = self._decode_content(target_row.get("content"))
         return {"rewound_count": len(rewound), "target_message": target_row, "new_head_id": new_head_id,
-                **({"replacement_message_id": replacement and replacement["_row_id"],
-                    "replacement_message_uid": replacement and message_uid_or_none(replacement)}
+                **({"replacement_message_id": replacement_message_id,
+                    "replacement_message_uid": replacement_message_uid}
                    if preserve_compaction_handoff else {})}
 
     def message_count(self, session_id: str = None) -> int:
