@@ -20,7 +20,7 @@ PNG = base64.b64encode(b'\x89PNG\r\n\x1a\n' + b'\x00' * 64).decode()
 def _turn_runner(owner, ref):
     from gateway.run_turn_runner import TurnRunner
     turn = object.__new__(TurnRunner)
-    turn._ctx = SimpleNamespace(_native_slack_task_cards=False, _voice_ack_guild=[None])
+    turn._ctx = SimpleNamespace(_native_slack_task_cards=False, _voice_ack_guild=[None], progress_mode='off')
     turn._approval_owner = (owner, ref.session_id, owner.db.get_session(ref.session_id)['runtime_generation'])
     return turn
 
