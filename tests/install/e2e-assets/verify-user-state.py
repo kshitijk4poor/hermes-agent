@@ -276,6 +276,17 @@ def _env_line_summary(path: str) -> dict:
     return {"lines": len(lines), "comments": comments, "blanks": blanks, "key_order": order}
 
 
+def _entry_record_unless_vanished(rel: str, abs_path: str) -> dict | None:
+    """A SQLite sidecar can vanish between listdir and its digest (a live gateway closes
+    the connection): record what exists, never crash on that race. Anything else raises."""
+    try:
+        return _entry_record(abs_path)
+    except FileNotFoundError:
+        if _volatile_sidecar(rel):
+            return None
+        raise
+
+
 def _entry_record(abs_path: str) -> dict:
     if _is_link(abs_path):
         record: dict = {"kind": "symlink", "target": os.readlink(abs_path)}
@@ -332,10 +343,6 @@ def _walk_root(home: str, root_rel: str, *, profiles: bool, judged: bool):
             rel = os.path.relpath(abs_path, home).replace(os.sep, "/")
             if _owns_plugins(rel, profiles=profiles):
                 continue
-            # Never judged, and a live gateway (it serves every profile) can close the
-            # connection between listdir and the digest open: skip, don't race it.
-            if _volatile_sidecar(rel):
-                continue
             # The judged skills/.archive tree is walked as its own root, so the
             # advisory walk of skills/ must not claim it.
             if not judged and (rel.split("/")[-1] == SKILL_ARCHIVE or "/" + SKILL_ARCHIVE + "/" in rel):
@@ -366,7 +373,9 @@ def snapshot_home(home: str, profiles_dir: str | None = None) -> dict:
 
     for rel_root, profiles, judged in targets:
         for rel, abs_path, entry_judged in _walk_root(home, rel_root, profiles=profiles, judged=judged):
-            (entries if entry_judged else advisory)[rel] = _entry_record(abs_path)
+            record = _entry_record_unless_vanished(rel, abs_path)
+            if record is not None:
+                (entries if entry_judged else advisory)[rel] = record
 
     # Profiles may live somewhere else entirely (a test harness override).
     if profiles_dir and os.path.abspath(profiles_dir) != os.path.join(home, PROFILES_DIR):
@@ -382,7 +391,9 @@ def snapshot_home(home: str, profiles_dir: str | None = None) -> dict:
                             override_abs, name, profiles=True, judged=True):
                         if sub_rel == name:
                             continue
-                        (entries if sub_judged else advisory)[f"{PROFILES_DIR}/{sub_rel}"] = _entry_record(sub_abs)
+                        record = _entry_record_unless_vanished(sub_rel, sub_abs)
+                        if record is not None:
+                            (entries if sub_judged else advisory)[f"{PROFILES_DIR}/{sub_rel}"] = record
 
     return {
         "schema": SCHEMA_VERSION,
