@@ -734,9 +734,15 @@ def run_codex_scenario(root: Path, turns: list[dict], runs: list[dict], *, confi
     home = make_home(root, model, env_file={"OPENAI_API_KEY": "sk-fake-codex-e2e"}, extra_config=config)
     results, session_id = [], None
     for run in runs:
-        results.append(run_chat(home, run["prompt"], args=tuple(run.get("args", ())), resume=session_id,
-                                timeout=run.get("timeout", 120)))
-        session_id = latest_session(home)
+        result = run_chat(home, run["prompt"], args=tuple(run.get("args", ())), resume=session_id,
+                          timeout=run.get("timeout", 120))
+        results.append(result)
+        try:
+            session_id = latest_session(home)
+        except AssertionError as exc:
+            # Without the CLI's own output a crashed run reads only as "no session persisted".
+            raise AssertionError(f"{exc}\nrc={result.returncode}\n--- stdout (tail) ---\n{result.stdout[-3000:]}"
+                                 f"\n--- stderr (tail) ---\n{result.stderr[-3000:]}") from None
         if run.get("then"):
             fake.set_scenario(**run["then"])
     assert session_id is not None
