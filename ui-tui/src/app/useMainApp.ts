@@ -55,11 +55,11 @@ import type { Msg, PanelSection, SlashCatalog } from '../types.js'
 import { applyAgentSnapshot } from './agentRoster.js'
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
 import { createServerRequestHandler } from './createServerRequestHandler.js'
-import { createSlashHandler } from './createSlashHandler.js'
+import { createSlashHandler, type TypedSlashHandler } from './createSlashHandler.js'
 import { planGatewayRecovery } from './gatewayRecovery.js'
 import { applyGoalSnapshot } from './goalStatus.js'
 import { getInputSelection } from './inputSelectionStore.js'
-import { type GatewayRpc, type SlashHandler, type StateSetter, type TranscriptRow } from './interfaces.js'
+import { type GatewayRpc, type StateSetter, type TranscriptRow } from './interfaces.js'
 import { $overlayState, capturePromptResponseGuard, patchOverlayState } from './overlayStore.js'
 import { $goodVibesTick } from './petFlashStore.js'
 import { applyProcessSnapshot, type ProcessEntry } from './processRoster.js'
@@ -163,7 +163,7 @@ export async function startPromptLiveSession({
     }
 
     if (isCurrentDestination(destination)) {
-      sys(`model → ${result.value}`)
+      sys(t('session.main.modelSwitched', result.value))
       maybeWarn(result)
       onModelSwitched?.(result.value, result)
     }
@@ -256,7 +256,7 @@ export function useMainApp(gw: GatewayClient) {
   )
 
   const slashFlightRef = useRef(0)
-  const slashRef = useRef<SlashHandler>(() => false)
+  const slashRef = useRef<TypedSlashHandler>(() => false)
   const colsRef = useRef(cols)
   const scrollRef = useRef<null | ScrollBoxHandle>(null)
   const onEventRef = useRef<(ev: AnyGatewayEvent) => void>(() => {})
@@ -740,7 +740,12 @@ export function useMainApp(gw: GatewayClient) {
           scrollRef.current.scrollToBottom()
         }
 
-        void rpc<TerminalResizeResponse>('terminal.resize', { cols: stdout.columns ?? 80, session_id: ui.sid })
+        // A canonical session has no server-side width (create/resume drop `cols`) and is not
+        // in the legacy registry `terminal.resize` looks up: it answers 4001 "session not
+        // found", which reads as "no longer attached" on every resize.
+        if (!gw.isCanonical) {
+          void rpc<TerminalResizeResponse>('terminal.resize', { cols: stdout.columns ?? 80, session_id: ui.sid })
+        }
       }, 100)
     }
 
@@ -750,64 +755,54 @@ export function useMainApp(gw: GatewayClient) {
       clearTimeout(timer)
       stdout.off('resize', onResize)
     }
-  }, [rpc, stdout, ui.sid])
+  }, [gw, rpc, stdout, ui.sid])
 
   const cancelClarify = useCallback(() => {
     const clarify = overlay.clarify
 
-      const fresh = capturePromptResponseGuard('clarify', clarify)
+    if (!clarify) {
+      return
+    }
 
-      if (!fresh()) {
-        return
-      }
+    const fresh = capturePromptResponseGuard('clarify', clarify)
 
-      const label = toolTrailLabel('clarify')
+    if (!fresh()) {
+      return
+    }
 
     const label = toolTrailLabel('clarify')
 
-      // Canonical shared controls answer through the generation-bound RPC; a
-      // legacy server→client request resolves its response frame locally.
-      const answered = clarify.sharedControl
-        ? rpc<SharedControlRespondResponse>('clarify.respond', { answer, ...sharedControlParams(clarify) }).then(r => Boolean(r) && fresh())
-        : Promise.resolve(respondToServerRequest(clarify.requestId, { answer }))
+    turnController.turnTools = turnController.turnTools.filter(line => !sameToolTrailGroup(label, line))
+    patchTurnState({ turnTrail: turnController.turnTools })
 
-      void answered.then(ok => {
-        if (!ok) {
-          // The request already expired (request.cancel raced the keystroke): nothing to answer.
-          if (!clarify.sharedControl) {
-            patchOverlayState({ clarify: null })
-          }
+    // Canonical shared controls cancel through the generation-bound RPC; a
+    // legacy server→client request resolves its response frame locally.
+    const cancelled = clarify.sharedControl
+      ? rpc<SharedControlRespondResponse>('clarify.respond', { answer: '', ...sharedControlParams(clarify) }).then(
+          r => Boolean(r) && fresh()
+        )
+      : Promise.resolve(respondToServerRequest(clarify.requestId, {}))
 
-          return
+    void cancelled.then(ok => {
+      if (!ok) {
+        // The request already expired (request.cancel raced the keystroke): nothing to answer.
+        if (!clarify.sharedControl) {
+          patchOverlayState({ clarify: null })
         }
 
-        if (answer) {
-          turnController.persistedToolLabels.add(label)
-          appendMessage({
-            kind: 'trail',
-            role: 'system',
-            text: '',
-            tools: [buildToolTrailLine('clarify', clarify.question)]
-          })
-          appendMessage({ role: 'user', text: answer })
-          patchUiState({ status: 'running…' })
-        } else {
-          // Esc / Ctrl+C cancel: persist the question + options as a system
-          // line (not a transient "prompt cancelled" flash) so the prompt
-          // survives on screen as standard output, matching the timeout path.
-          appendMessage({
-            role: 'system',
-            text: clarify.questions?.length
-              ? formatAbandonedClarifyBatch(clarify.questions, clarify.answers ?? {}, 'cancelled')
-              : formatAbandonedClarify(clarify.question, clarify.choices, 'cancelled')
-          })
-        }
+        return
+      }
 
-        patchOverlayState({ clarify: null })
+      // Esc / Ctrl+C cancel: persist the question as a system line (not a
+      // transient "prompt cancelled" flash) so the prompt survives on screen as
+      // standard output, matching the timeout path.
+      appendMessage({
+        role: 'system',
+        text: formatAbandonedClarify(clarify.questions, clarify.answers ?? {}, 'cancelled')
       })
-    },
-    [appendMessage, overlay.clarify, rpc]
-  )
+      patchOverlayState({ clarify: null })
+    })
+  }, [appendMessage, overlay.clarify, rpc])
 
   // Lock one answer of a batch clarify (`clarify.lock` RPC). The overlay stays
   // up until the server reports no remaining questions — the final lock
@@ -826,11 +821,20 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
-      rpc<ClarifyLockResponse>('clarify.lock', {
-        answer: answer.trim() ? answer : null,
-        question_id: qid,
-        request_id: clarify.requestId
-      }).then(r => {
+      // A single canonical shared prompt answers through the generation-bound
+      // RPC; a batch locks each answer via clarify.lock.
+      const locked: Promise<ClarifyLockResponse | null> =
+        clarify.sharedControl && clarify.questions.length === 1
+          ? rpc<SharedControlRespondResponse>('clarify.respond', { answer, ...sharedControlParams(clarify) }).then(r =>
+              r ? { remaining: [], status: 'ok' as const } : null
+            )
+          : rpc<ClarifyLockResponse>('clarify.lock', {
+              answer: answer.trim() ? answer : null,
+              question_id: qid,
+              request_id: clarify.requestId
+            })
+
+      void locked.then(r => {
         if (!r || !fresh()) {
           return
         }
@@ -1034,7 +1038,7 @@ export function useMainApp(gw: GatewayClient) {
       // fenced to its destination and drains once `gatewayConnected` returns.
       if (gw.attached) {
         recoverSidRef.current = storedSid ?? recoverSidRef.current
-        patchUiState({ busy: false, compacting: false, gatewayConnected: false, status: 'reconnecting…' })
+        patchUiState({ busy: false, compacting: false, gatewayConnected: false, status: t('session.status.reconnecting') })
 
         if (state.sid) {
           turnController.pushActivity(connectionLostActivity(), 'warn')
@@ -1052,12 +1056,12 @@ export function useMainApp(gw: GatewayClient) {
       const plan = planGatewayRecovery(storedSid, recoverSidRef.current, recoveryAtRef.current, Date.now())
 
       recoveryAtRef.current = plan.attempts
-      patchUiState({ busy: false, compacting: false, gatewayConnected: false, status: 'gateway exited' })
+      patchUiState({ busy: false, compacting: false, gatewayConnected: false, status: t('libText.gateway.exited') })
 
       if (plan.recover && plan.sid) {
         recoverSidRef.current = plan.sid
-        turnController.pushActivity(BACKEND_RESTARTING_ACTIVITY, 'warn')
-        sys(BACKEND_RESTARTING)
+        turnController.pushActivity(backendRestartingActivity(), 'warn')
+        sys(backendRestarting())
 
         return
       }
@@ -1269,7 +1273,7 @@ export function useMainApp(gw: GatewayClient) {
 
   const onModelSelect = useCallback((value: string) => {
     patchOverlayState({ modelPicker: false })
-    slashRef.current(`/model ${value}`, false) // the typed /model that opened the picker already counted
+    slashRef.current(`/model ${value}`, undefined, false) // the typed /model that opened the picker already counted
   }, [])
 
   const closeLiveSession = useCallback(
