@@ -171,6 +171,18 @@ def check_resume_policy(args, snapshot):
             raise GatewayClientError(_RESUME_POLICY_MISMATCH)
 
 
+def _register_terminal_process() -> None:
+    """The chat client is still a terminal on this HERMES_HOME: record it in the process ledger
+    (purpose ``cli`` is never update-reapable) and warn once when another install shares the home."""
+    from hermes_cli.process_identity import register_self
+    from hermes_cli.shared_profile_warning import shared_profile_warning
+
+    register_self("cli")
+    warning = shared_profile_warning()
+    if warning:
+        print(f"Warning: {warning}", file=sys.stderr)
+
+
 def launch_from_args(args) -> int:
     from websockets.exceptions import WebSocketException
     emitter = None
@@ -188,6 +200,7 @@ def launch_from_args(args) -> int:
 
     try:
         validate_options(args)
+        _register_terminal_process()
         from hermes_cli.gateway_chat_startup import ensure_launch_provider
         if emitter is None:
             if not ensure_launch_provider(args):

@@ -41,6 +41,12 @@ def current_session_tool_scope():
     return _session_tool_scope.get()
 
 
+def _session_slot_key():
+    """The overlay slot key for the current session scope: writes go through ``normalize_scope``
+    (``register``/``deregister``), so reads must key the same way or the overlay is invisible."""
+    return normalize_scope(_session_tool_scope.get())
+
+
 # Cap on a tool error body; only trims runaway interpolated exceptions (static msgs are ~115 chars).
 _MAX_TOOL_ERROR_CHARS = 2048
 _TOOL_ERROR_TRUNCATION_MARKER = "… [truncated]"
@@ -500,7 +506,7 @@ class ToolRegistry:
         """Return global tools overlaid with one profile's plugin tools."""
         entries = {**self._tools, **self._scoped_tools.get(hermes_home_key(scope), {})}
         if scope is None:
-            entries.update(self._scoped_tools.get(current_session_tool_scope(), {}))
+            entries.update(self._scoped_tools.get(_session_slot_key(), {}))
         return entries
 
     def _toolset_entries(self, toolset: str, scope: Optional[str]) -> List[ToolEntry]:
@@ -536,7 +542,7 @@ class ToolRegistry:
         """``_merged_tools(scope).get(name)`` without building the merged dict. An implicit scope
         (the caller passed none) also sees the current session's tool overlay, as the merge does."""
         if not explicit_scope:
-            session_scoped = self._scoped_tools.get(current_session_tool_scope())
+            session_scoped = self._scoped_tools.get(_session_slot_key())
             if session_scoped is not None and name in session_scoped:
                 return session_scoped[name]
         scoped = self._scoped_tools.get(scope_key)
