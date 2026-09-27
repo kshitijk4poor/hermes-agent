@@ -1022,11 +1022,8 @@ def _file_cache_signature(path: Path) -> tuple[bool, Optional[int], Optional[int
     return (True, st.st_mtime_ns, st.st_size)
 
 
-def _cleanup_invalid_pid_path(
-    pid_path: Path, *, cleanup_stale: bool, unlink_lock: bool = True
-) -> None:
-    """Force-unlink a stale PID file + sibling lock (lock confirmed inactive, so no pid check).
-    ``unlink_lock=False`` drops only the PID file: the caller saw the lock HELD."""
+def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
+    """Force-unlink a stale PID file; the sibling lock is never unlinked, held or not."""
     if not cleanup_stale:
         return
     _clear_running_pid_cache()
@@ -2082,7 +2079,6 @@ def get_running_pid(
         )
         expected_home = pid_path.parent if pid_path is not None else None
         saw_live_pid = False
-        foreign_live_pid = False
         for record in records:
             pid = _live_pid_from_record(record)
             if pid is None:
@@ -2101,12 +2097,8 @@ def get_running_pid(
             # lock held. A scoped poll never unlinks the other home's files either (#106406).
             if home_ok or expected_home is not None:
                 saw_live_pid = True
-            else:
-                foreign_live_pid = True
         if not saw_live_pid:
-            _cleanup_invalid_pid_path(
-                resolved_pid_path, cleanup_stale=cleanup_stale, unlink_lock=not foreign_live_pid
-            )
+            _cleanup_invalid_pid_path(resolved_pid_path, cleanup_stale=cleanup_stale)
         return get_runtime_status_running_pid() if pid_path is None else None
     # Lock inactive: the runtime-status fallback runs BEFORE cleanup here. A record naming THIS
     # process is one we wrote earlier in our own boot (the multiplex verdict is persisted before
