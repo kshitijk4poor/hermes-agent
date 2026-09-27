@@ -78,15 +78,16 @@ async def test_reserved_home_is_eligible_for_same_user_bootstrap(tmp_path):
         await server.stop()
         owner.close()
 
-    # Pre-existing readable homes are refused, not silently chmodded.
-    existing = tmp_path / 'existing-readable-home'
-    existing.mkdir(mode=0o755)
-    existing.chmod(0o755)
+    # Pre-existing group/other-writable homes are refused, not silently chmodded (a readable
+    # operator-chosen mode is fine: only write lets another user swap the socket).
+    existing = tmp_path / 'existing-writable-home'
+    existing.mkdir(mode=0o775)
+    existing.chmod(0o775)
     owner.reserve([existing])
     try:
         observed = await asyncio.to_thread(discover_gateway_endpoint, existing)
         assert (observed.state, observed.reason_code) == ('inaccessible', 'unsafe_control_permissions')
-        assert existing.stat().st_mode & 0o777 == 0o755
+        assert existing.stat().st_mode & 0o777 == 0o775
     finally:
         owner.close()
 

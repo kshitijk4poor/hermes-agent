@@ -17,18 +17,24 @@ class DiscoveryError(ValueError):
         self.reason = reason
 
 
-def _private_node(path: Path, *, kind: str) -> os.stat_result:
+# The profile home keeps the operator's mode (main's home policy: symlinked homes, HERMES_HOME_MODE
+# 0701/0750, shared setups). Only group/other WRITE lets another user swap the socket; read/search
+# bits grant nothing against our 0600 socket. Everything we create ourselves stays owner-only.
+HOME_UNSAFE_BITS = 0o022
+
+
+def _private_node(path: Path, *, kind: str, unsafe_bits: int = 0o077) -> os.stat_result:
     node = path.lstat()
     predicates = {"socket": stat.S_ISSOCK, "file": stat.S_ISREG, "directory": stat.S_ISDIR}
     if not predicates[kind](node.st_mode) or node.st_uid != os.getuid():  # windows-footgun: ok — POSIX socket path only
         raise DiscoveryError("unsafe_control_path")
-    if stat.S_IMODE(node.st_mode) & 0o077:
+    if stat.S_IMODE(node.st_mode) & unsafe_bits:
         raise DiscoveryError("unsafe_control_permissions")
     return node
 
 
 def _socket_path(home: Path) -> Path:
-    _private_node(home, kind="directory")
+    _private_node(home, kind="directory", unsafe_bits=HOME_UNSAFE_BITS)
     direct = home / "gateway.sock"
     if os.path.lexists(direct):
         _private_node(direct, kind="socket")

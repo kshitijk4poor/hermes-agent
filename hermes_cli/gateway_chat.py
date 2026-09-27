@@ -133,6 +133,7 @@ async def run_gateway_chat(args, emitter=None):
                        (query and not (sys.stdin.isatty() and sys.stdout.isatty())))
         view = GatewayChatView(client, snapshot, quiet=quiet, emitter=emitter,
                                usage_file=getattr(args, "usage_file", None))
+        view.unattended = isinstance(oneshot_prompt, str)
         if (getattr(args, "resume", None) or title) and not quiet:
             for row in snapshot.get("messages", []):
                 if row.get("role") in {"user", "assistant"} and isinstance(row.get("content"), str):

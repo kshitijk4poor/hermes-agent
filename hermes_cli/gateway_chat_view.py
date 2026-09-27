@@ -20,6 +20,7 @@ class GatewayChatView:
         self.emitter = emitter
         self.quiet = quiet or emitter is not None
         self.finite = False
+        self.unattended = False  # `-z`: the classic one-shot auto-approves; `-q` stays single-query
         self.streams = {}
         self.completions = {}
         self.changed = asyncio.Event()
@@ -134,7 +135,8 @@ class GatewayChatView:
     async def submit(self, text):
         return await self.client.rpc("prompt.submit", session_id=self.session_id,
                                      input_id=uuid.uuid4().hex, text=text,
-                                     **({"finite": True} if self.finite else {}))
+                                     **({"finite": True} if self.finite else {}),
+                                     **({"unattended": True} if self.finite and self.unattended else {}))
 
     async def command(self, text):
         command, _, rest = text.partition(" ")

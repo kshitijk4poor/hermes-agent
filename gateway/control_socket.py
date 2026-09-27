@@ -279,10 +279,11 @@ class GatewayControlServer:
         if os.name == "nt":
             return None
         try:
+            from hermes_cli.gateway_runtime_discovery import HOME_UNSAFE_BITS
             home = self._home
             info = home.lstat()
             if (home.absolute() != home.resolve() or not stat.S_ISDIR(info.st_mode)
-                    or info.st_uid != os.getuid() or info.st_mode & 0o077):  # windows-footgun: ok — POSIX-only helper
+                    or info.st_uid != os.getuid() or info.st_mode & HOME_UNSAFE_BITS):  # windows-footgun: ok — POSIX-only helper
                 return None
             sock = writer.get_extra_info("socket")
             if hasattr(socket, "SO_PEERCRED"):
