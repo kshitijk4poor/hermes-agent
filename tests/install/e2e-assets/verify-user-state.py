@@ -277,9 +277,17 @@ def _env_line_summary(path: str) -> dict:
 
 
 def _entry_record_unless_vanished(rel: str, abs_path: str) -> dict | None:
-    """A SQLite sidecar can vanish between listdir and its digest (a live gateway closes
-    the connection): record what exists, never crash on that race. Anything else raises."""
+    """Volatile entries are recorded by kind only, never read.
+
+    A SQLite sidecar can vanish between listdir and its digest (a live gateway closes the
+    connection), and a lock file's bytes are unreadable while its owner holds it (Windows
+    byte-range locks: Errno 13). Anything else vanishing still raises.
+    """
     try:
+        if _volatile_sidecar(rel) and not _is_link(abs_path):
+            if not _lexists(abs_path):
+                return None
+            return {"kind": "dir" if os.path.isdir(abs_path) else "file"}
         return _entry_record(abs_path)
     except FileNotFoundError:
         if _volatile_sidecar(rel):
@@ -441,8 +449,11 @@ def _volatile_sidecar(rel: str) -> bool:
     live sees them; they disappear when it closes, and the report then says the
     upgrade DELETED user state (observed: cron/executions.db-shm and -wal). The
     database itself stays judged -- state.db by row counts -- so real loss still fails.
+    Lock files (``*.lock``, ``.lock``) are the same kind of hardware: the running gateway
+    holds its own (and, serving every profile, each profile's gateway.lock).
     """
-    return rel.endswith(("-wal", "-shm", "-journal"))
+    name = rel.rsplit("/", 1)[-1]
+    return rel.endswith(("-wal", "-shm", "-journal")) or name.endswith(".lock")
 
 
 def _rows_shrank(rel: str, before: dict, after: dict) -> bool:
@@ -544,7 +555,7 @@ def _render(report: dict) -> str:
             continue
         lines.append(f"  tolerated (config rewrite) {rel}")
     for rel in report.get("tolerated_deleted", []):
-        lines.append(f"  tolerated (sqlite sidecar) {rel}")
+        lines.append(f"  tolerated (sidecar or lock) {rel}")
     advisory = report["advisory"]
     for label, key in (("advisory deleted", "deleted"), ("advisory modified", "modified")):
         for rel in advisory[key]:

@@ -409,11 +409,32 @@ def test_a_sidecar_vanishing_mid_walk_is_not_a_scan_crash(tmp_path, monkeypatch)
     monkeypatch.setattr(vus, "_entry_record", racing)
     snap = vus.snapshot_home(str(home))
     assert "cron/jobs.json" in snap["entries"]
-    assert "cron/executions.db-journal" not in snap["entries"]
+    # Never opened at all: recorded by kind, so the digest race cannot happen.
+    assert snap["entries"]["cron/executions.db-journal"] == {"kind": "file"}
 
     gone.add("jobs.json")
     with pytest.raises(FileNotFoundError):
         vus.snapshot_home(str(home))
+
+
+def test_a_held_lock_file_is_recorded_without_reading_it(tmp_path, monkeypatch):
+    """Windows: a gateway's msvcrt-held gateway.lock raises Errno 13 on read (live on the leg)."""
+    home = tmp_path / "home"
+    (home / "profiles" / "p").mkdir(parents=True)
+    (home / "profiles" / "p" / "gateway.lock").write_text("1", encoding="utf-8")
+    real = vus._sha256_file
+
+    def locked(path):
+        if path.endswith(".lock"):
+            raise PermissionError(13, "Permission denied", path)
+        return real(path)
+
+    monkeypatch.setattr(vus, "_sha256_file", locked)
+    snap = vus.snapshot_home(str(home))
+    assert snap["entries"]["profiles/p/gateway.lock"] == {"kind": "file"}
+    os.remove(home / "profiles" / "p" / "gateway.lock")
+    report = vus.verify_home(str(home), snap)
+    assert report["ok"] is True and report["tolerated_deleted"] == ["profiles/p/gateway.lock"]
 
 
 def test_the_running_gateways_state_record_may_change_but_not_vanish(tmp_path):
