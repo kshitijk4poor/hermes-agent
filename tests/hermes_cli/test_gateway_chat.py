@@ -8,7 +8,7 @@ def test_unsupported_launch_options_fail_before_connection(monkeypatch, capsys):
     from hermes_cli import gateway_chat
     calls = []
     monkeypatch.setattr(gateway_chat, "connect_gateway", lambda: calls.append(True))
-    for option in ("checkpoints", "worktree", "usage_file", "run_budget"):
+    for option in ("checkpoints", "worktree", "run_budget"):
         args = argparse.Namespace(**{option: True})
         assert gateway_chat.launch_from_args(args) == 2
         assert option.replace("_", "-") in capsys.readouterr().err
@@ -18,9 +18,15 @@ def test_unsupported_launch_options_fail_before_connection(monkeypatch, capsys):
     assert "--continue" in capsys.readouterr().err
     assert gateway_chat.launch_from_args(argparse.Namespace(create_if_missing=True)) == 2
     assert "create-if-missing" in capsys.readouterr().err
-    assert gateway_chat.launch_from_args(argparse.Namespace(continue_last="named", model="m", query="x")) == 2
-    assert calls == []
-    assert gateway_chat.launch_from_args(argparse.Namespace(resume="stored", source="tui", query="x")) == 2
+    # Creation flags on resume are judged against the frozen route: repeating the launch
+    # flags is fine (scripts re-run one command line), changing one is refused.
+    frozen = {"info": {"launch_request": {"source": "cli", "model": "m", "toolsets": ["file"], "reasoning": "high"},
+                       "cwd": "/w"}}
+    gateway_chat.check_resume_policy(argparse.Namespace(resume="stored", model="m", toolsets="file",
+                                                        reasoning="high", query="x"), frozen)
+    for override in ({"model": "other"}, {"source": "tui"}, {"toolsets": "browser"}, {"in_dir": "/elsewhere"}):
+        with pytest.raises(gateway_chat.GatewayClientError):
+            gateway_chat.check_resume_policy(argparse.Namespace(resume="stored", query="x", **override), frozen)
     # Bypass launches read no profile default model, so one must be explicit.
     assert gateway_chat.launch_from_args(argparse.Namespace(safe_mode=True, query="x")) == 1
     assert "--model" in capsys.readouterr().err

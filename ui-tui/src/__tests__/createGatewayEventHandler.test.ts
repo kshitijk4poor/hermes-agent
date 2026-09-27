@@ -1759,7 +1759,12 @@ describe('createGatewayEventHandler', () => {
 
           if (race === 'settled acknowledgement') {
             emit('message.complete', { text: 'completed before the interrupt reached the server' })
-            expect(appended).toEqual([{ role: 'assistant', text: 'completed before the interrupt reached the server' }])
+            // The streamed tail the user watched is kept as its own segment when the final
+            // text does not carry it (#61520); the final lands once, after it.
+            expect(appended).toEqual([
+              { role: 'assistant', text: 'partial' },
+              { role: 'assistant', text: 'completed before the interrupt reached the server' }
+            ])
             expect(getUiState().busy).toBe(false)
           }
         }
