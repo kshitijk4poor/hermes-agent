@@ -121,7 +121,7 @@ class RuntimeSessionStore(RuntimeSessionCompressionMixin, RuntimeSessionLifecycl
             if self.path.exists():
                 if self.path.stat().st_size > max_bytes:
                     raise WorkerPersistenceError('outbox_full')
-                self.journal = json.loads(self.path.read_text(encoding="utf-8"))
+                self.journal = json.loads(self.path.read_text(encoding="utf-8-sig"))
                 if self.journal['scope'] != self.scope:
                     raise WorkerPersistenceError('outbox_scope_mismatch')
             else:

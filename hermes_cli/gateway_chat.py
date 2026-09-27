@@ -204,7 +204,7 @@ def launch_from_args(args) -> int:
                 return failed("credentials or agent init failed", 1)
         query_file = getattr(args, "query_file", None)
         if query_file:
-            args.query = sys.stdin.read() if query_file == "-" else Path(query_file).read_text(encoding="utf-8")
+            args.query = sys.stdin.read() if query_file == "-" else Path(query_file).read_text(encoding="utf-8-sig")
             if not args.query.strip():
                 raise GatewayClientError("--query-file is empty")
         if not (getattr(args, "query", None) or getattr(args, "q", None) or getattr(args, "oneshot", None) or sys.stdin.isatty()):
