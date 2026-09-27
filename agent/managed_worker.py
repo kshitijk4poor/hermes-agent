@@ -4,6 +4,14 @@ stdin is the owner's bounded bootstrap/control pipe; a duplicate of stdout is
 reserved for framed events before runtime imports redirect ordinary output.
 Neither assignment secrets nor launch credentials appear in argv or logs.
 """
+# Spawned as a bare ``sys.executable -m``: in a PM install that interpreter carries no dependencies
+# until hermes_bootstrap selects the committed environment, so it must be the first import.
+try:
+    import hermes_bootstrap  # noqa: F401
+except ModuleNotFoundError as exc:
+    if exc.name != "hermes_bootstrap":
+        raise
+
 import json
 import os
 from pathlib import Path
