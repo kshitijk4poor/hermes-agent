@@ -28,6 +28,8 @@ def test_client_config_projection_keeps_session_policy_and_secrets_private(tmp_p
                 assert full.get('result', {}).get('config', {}).get('voice', {}).get('record_key') == 'ctrl+r', full
                 assert 'PRIVATE_VOICE' not in json.dumps(full)
                 assert full['result']['config']['display']['bell_on_complete'] is True
+                # The user's settings, not DEFAULT_CONFIG: an unset display.streaming stays unset.
+                assert 'streaming' not in full['result']['config']['display']
                 mtime = (await rpc(ws, 'config.get', key='mtime', session_id=sid))['result']
                 assert mtime['mtime'] > 0 and mtime['mcp_rev']
                 config['mcp_servers'] = {'later': {'command': 'not-started'}}
