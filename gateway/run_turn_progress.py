@@ -787,9 +787,15 @@ class GatewayTurnProgressMixin:
     def combined_tool_complete_callback(self, call_id, tool_name, args, result):
         from agent.display import _detect_tool_failure
         is_error, _ = _detect_tool_failure(tool_name, result)
-        self._publish_execution("tool.complete", {
-            **_tool_lifecycle_payload(call_id, tool_name, args), "is_error": bool(is_error),
-            "result": result if isinstance(result, str) else str(result)})
+        payload = {**_tool_lifecycle_payload(call_id, tool_name, args), "is_error": bool(is_error),
+                   "result": result if isinstance(result, str) else str(result)}
+        owner = self._approval_owner
+        live = owner[0].sessions.get(owner[1]) if owner is not None else None
+        # A session's /verbose (gateway/session_busy_controls.py) ships the Result block text.
+        if live is not None and (getattr(live, "tool_progress_mode", None) or self._ctx.progress_mode) == "verbose":
+            from tui_gateway.tool_progress import _tool_result_text
+            payload["result_text"] = _tool_result_text(result)
+        self._publish_execution("tool.complete", payload)
         self._publish_api_tool("tool.complete", call_id, tool_name, args, result)
         if self._ctx._native_slack_task_cards:
             self.native_tool_complete_callback(call_id, tool_name, args, result)

@@ -53,7 +53,7 @@ async def config_get(connection, ref, params):
     key = params.get('key')
     if not isinstance(key, str):
         raise RuntimeStoreError('invalid_params')
-    if key == 'busy':
+    if key in ('busy', 'verbose'):
         from gateway.session_busy_controls import busy_config
         return await busy_config(connection, ref, params)
     policy = _authorize(connection, ref, params)

@@ -129,6 +129,12 @@ def test_busy_policy_is_authorized_session_scoped_and_not_inference(tmp_path):
                             'key': 'busy', 'value': 'queue', 'scope': 'session'}, result
                 assert (await rpc(ws, 'config.get', session_id=ids[0], key='busy'))['result']['value'] == 'queue'
                 assert (await rpc(ws, 'config.get', session_id=ids[1], key='busy'))['result']['value'] == 'steer'
+                # /verbose is the same kind of session-scoped display negotiation.
+                result = await rpc(ws, 'config.set', session_id=ids[0], key='verbose', value='cycle')
+                assert result.get('result') == {'key': 'verbose', 'value': 'verbose', 'scope': 'session'}, result
+                assert (await rpc(ws, 'config.get', session_id=ids[1], key='verbose'))['result']['value'] == 'all'
+                assert (await rpc(ws, 'config.set', session_id=ids[0], key='verbose', value='loud')
+                        )['error']['message'] == 'invalid_params'
                 assert (home / 'config.yaml').read_bytes() == config_before
                 assert not admissions(home) and not peer.requests
         asyncio.run(probe())

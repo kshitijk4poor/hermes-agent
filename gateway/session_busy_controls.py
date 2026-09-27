@@ -27,6 +27,8 @@ def authorize(connection, ref, params, capability):
 
 async def busy_config(connection, ref, params, *, write=False):
     allowed = {'session_id', 'profile', 'key'} | ({'value'} if write else set())
+    if params.get('key') == 'verbose' and not set(params) - allowed and ref.session_id:
+        return verbose_config(connection, ref, params, write)
     if (set(params) - allowed or not ref.session_id or params.get('key') != 'busy'
             or (write and params.get('value') not in ('interrupt', 'steer', 'queue'))):
         raise RuntimeStoreError('invalid_params')
@@ -46,6 +48,24 @@ async def busy_config(connection, ref, params, *, write=False):
         if value not in ('interrupt', 'steer', 'queue'):
             value = 'interrupt'
     return {'key': 'busy', 'value': value, 'scope': 'session'}
+
+
+_VERBOSE_CYCLE = ('off', 'new', 'all', 'verbose')
+
+
+def verbose_config(connection, ref, params, write):
+    """Session-scoped /verbose: the tool-progress mode the next tool events of
+    this session render with (read by TurnRunner), like busy never a settings write."""
+    value = params.get('value')
+    if write and value not in (*_VERBOSE_CYCLE, 'cycle'):
+        raise RuntimeStoreError('invalid_params')
+    authorize(connection, ref, params, 'session:control' if write else 'session:read')
+    live = connection.authority.sessions[ref.session_id]
+    current = getattr(live, 'tool_progress_mode', None) or 'all'
+    if write:
+        live.tool_progress_mode = current = (
+            _VERBOSE_CYCLE[(_VERBOSE_CYCLE.index(current) + 1) % 4] if value == 'cycle' else value)
+    return {'key': 'verbose', 'value': current, 'scope': 'session'}
 
 
 async def correct(connection, ref, params, *, verb):

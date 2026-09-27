@@ -53,6 +53,8 @@ def test_gateway_publishes_tool_arguments_and_result_for_live_viewers():
     published = []
 
     class Authority:
+        sessions = {}  # no live session: the viewer stream carries no verbose result_text
+
         def publish_execution(self, session_id, generation, event_type, payload):
             published.append((event_type, payload))
             return True
