@@ -6,6 +6,7 @@ SessionDB transaction owner, including its inode guard and SQLite retry policy.
 import json
 import uuid
 
+from agent.message_metadata import CANONICAL_ROW, DB_ROW_SNAPSHOT
 from gateway.session_admission import admission_fingerprint
 
 
@@ -510,8 +511,15 @@ _MESSAGE_FIELDS = frozenset({
     'finish_reason', 'reasoning', 'reasoning_content', 'reasoning_details',
     'codex_reasoning_items', 'codex_message_items', 'platform_message_id', 'message_id',
     'observed', 'effect_disposition', '_compressed_summary', 'timestamp', 'api_content',
-    'display_kind', 'display_metadata', '_row_id', '_canonical_content',
+    'display_kind', 'display_metadata', '_row_id', '_canonical_content', DB_ROW_SNAPSHOT, CANONICAL_ROW,
 })
+# Row state the owner's transcript repair stamps on each message (main mutates the caller's dict
+# in place; a worker gets it back as an annotation). None = absent, so a stale adoption is cleared.
+_ROW_ANNOTATION_KEYS = ('_row_id', 'timestamp', DB_ROW_SNAPSHOT, CANONICAL_ROW)
+
+
+def row_annotations(messages):
+    return [{key: msg.get(key) for key in _ROW_ANNOTATION_KEYS} for msg in messages]
 
 
 def _worker_append(db, conn, session_id, payload):
@@ -533,8 +541,7 @@ def _worker_append(db, conn, session_id, payload):
     if holder is not None:
         _text(holder)
     count = db._append_messages_in_transaction(conn, session_id, messages, turn_lease_holder=holder)
-    return {'count': count, 'annotations': [
-        {key: msg[key] for key in ('_row_id', '_canonical_content') if key in msg} for msg in messages]}
+    return {'count': count, 'annotations': row_annotations(messages)}
 
 
 def _worker_turn(db, conn, session_id, payload, operation):

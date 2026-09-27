@@ -8,8 +8,8 @@ class RuntimeSessionCompressionMixin:
         result = self._apply('compression.append', dict(messages=messages,
             compression_lock_holder=compression_lock_holder, turn_lease_holder=turn_lease_holder,
             turn_lease_ttl_seconds=turn_lease_ttl_seconds))
-        for message, annotation in zip(messages, result['annotations'], strict=True):
-            message.update(annotation)
+        from agent.runtime_session_store import apply_row_annotations
+        apply_row_annotations(messages, result['annotations'])
         return result['count']
 
     def get_session(self, session_id):

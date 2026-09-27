@@ -45,6 +45,6 @@ async def test_exclusive_offline_maintenance_preserves_bulk_behavior(tmp_path, m
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://localhost') as client:
             result = await client.post('/api/sessions/bulk-delete', json={'ids': ['parent', 'absent']})
             assert result.status_code == 200, result.text
-            assert result.json() == {'ok': True, 'deleted': 1}
+            assert result.json() == {'ok': True, 'deleted': 1, 'skipped_active': []}
             assert db.get_session('parent') is None
             assert db.get_session('child')['parent_session_id'] is None

@@ -3,6 +3,7 @@ import pytest
 
 from hermes_state import SessionDB
 from hermes_state_runtime import RuntimeStoreError, begin_runtime_epoch, register_worker_execution
+from agent.message_metadata import CANONICAL_ROW, DB_ROW_SNAPSHOT
 
 
 def test_structured_worker_receipts_are_atomic_and_scoped(tmp_path):
@@ -51,7 +52,9 @@ def test_structured_worker_receipts_are_atomic_and_scoped(tmp_path):
         repaired = apply(6, 'transcript.append', {'messages': [{'role': 'assistant',
             'content': 'loser', '_row_id': winner['annotations'][0]['_row_id']}]})
         assert repaired['count'] == 0
-        assert repaired['annotations'][0]['_canonical_content'] == assistant['content']
+        adopted = repaired['annotations'][0]
+        assert adopted[CANONICAL_ROW]['content'] == assistant['content']
+        assert adopted[DB_ROW_SNAPSHOT] and adopted['_row_id'] == winner['annotations'][0]['_row_id']
         terminal = apply(7, 'execution.finish', {})
         assert terminal['status'] == 'terminal'
         assert apply(7, 'execution.finish', {}) == terminal

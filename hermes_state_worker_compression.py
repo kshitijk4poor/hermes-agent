@@ -478,8 +478,8 @@ def worker_compression_append(db, conn, sid, payload):
     if not 0.1 <= _number(payload['turn_lease_ttl_seconds']) <= 3600:
         raise RuntimeStoreError('invalid_params')
     count = db._append_messages_in_transaction(conn, sid, **payload)
-    return {'count': count, 'annotations': [
-        {key: msg[key] for key in ('_row_id', '_canonical_content') if key in msg} for msg in payload['messages']]}
+    from hermes_state_runtime import row_annotations
+    return {'count': count, 'annotations': row_annotations(payload['messages'])}
 
 
 def worker_turn_cleanup(db, conn, sid, payload):
