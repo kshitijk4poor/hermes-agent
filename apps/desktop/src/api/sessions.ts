@@ -374,7 +374,9 @@ export async function listSidebarSessions(req: SidebarSessionsRequest): Promise<
 const runSessionMutation = createSessionMutationClient()
 
 function mutateSessionHttp<T>(id: string, method: 'PATCH' | 'DELETE', payload: Record<string, unknown>, profile?: ProfileScope): Promise<T> {
-  const scope = { connectionId: getApiRequestConnection() || 'local', ...sessionScoped(profile) }
+  // Null is the window's v1 route (its primary, local or remote); defaulting it to
+  // the registry's 'local' source would pin a remote primary's edits to this machine.
+  const scope = { connectionId: getApiRequestConnection(), ...sessionScoped(profile) }
   const path = `/api/sessions/${encodeURIComponent(id)}`
   const query = new URLSearchParams(scope.profile ? { profile: scope.profile } : {})
   const suffix = query.size ? `?${query}` : ''

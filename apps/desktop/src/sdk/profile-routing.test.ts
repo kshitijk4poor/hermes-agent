@@ -348,6 +348,16 @@ describe('connection-aware plugin host APIs', () => {
     expect(requestGatewayForProfile).not.toHaveBeenCalled()
   })
 
+  it('keeps an unrouted persisted-session edit on the window primary instead of pinning it to this device', async () => {
+    vi.mocked(hermesApi)
+      .mockResolvedValueOnce({ exists: true, runtime_revision: 2, runtime_generation: 1 })
+      .mockResolvedValueOnce({ ok: true, hidden: true })
+
+    await host.setPersistedSessionHidden(null, { sessionId: 'remote-chat', profile: 'default', hidden: true })
+
+    expect(vi.mocked(hermesApi).mock.calls.map(([request]) => request.connectionId)).toEqual([null, null])
+  })
+
   it('forwards an explicit timeout so long-running methods outlive the generic deadline', async () => {
     // #93911: bot_relay.deliver's backend contract tolerates ~1320s (120s turn
     // lock + a 600s turn, doubled by the bounded retry). Without a way to pass

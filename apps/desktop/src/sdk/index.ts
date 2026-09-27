@@ -1605,7 +1605,8 @@ export const host = {
       throw new Error('Persisted session updates require a profile and session id')
     }
 
-    const scope = { connectionId: route?.connectionId || getApiRequestConnection() || 'local' }
+    // Null keeps the window's v1 route (a remote primary stays remote).
+    const scope = { connectionId: route?.connectionId || getApiRequestConnection() }
     const path = `/api/sessions/${encodeURIComponent(options.sessionId)}`
     const payload = { hidden: options.hidden, profile }
 
