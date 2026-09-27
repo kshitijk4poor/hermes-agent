@@ -29,3 +29,17 @@ def owner_reclaim_paused(conn, task_id):
         return True
     except psutil.Error:
         return True
+
+
+
+def bound_interpreter_gone(conn, task_id):
+    """True when the owner bound an interpreter to the task's current run and it is dead."""
+    from hermes_cli.kanban_db_dispatch import _worker_alive
+    row = conn.execute(
+        "SELECT e.payload FROM task_events e JOIN tasks t ON t.current_run_id=e.run_id "
+        "WHERE t.id=? AND e.task_id=t.id AND e.kind='worker_bound' ORDER BY e.id DESC LIMIT 1",
+        (task_id,)).fetchone()
+    if row is None:
+        return False
+    bound = json.loads(row['payload'])
+    return not _worker_alive(bound.get('pid'), bound.get('started_at'))

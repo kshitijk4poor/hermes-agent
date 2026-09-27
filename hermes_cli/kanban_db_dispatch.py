@@ -1167,10 +1167,8 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             "WHERE status = 'running' AND worker_pid IS NOT NULL"
         ).fetchall()
         host_prefix = _kb._host_prefix()
-        from hermes_cli.kanban_owner_recovery import owner_reclaim_paused
+        from hermes_cli.kanban_owner_recovery import bound_interpreter_gone, owner_reclaim_paused
         for row in rows:
-            if owner_reclaim_paused(conn, row["id"]):
-                continue
             lock = row["claim_lock"] or ""
             if not lock.startswith(host_prefix):
                 continue
@@ -1180,6 +1178,10 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
             if started_at is not None and time.time() - started_at < _kb._resolve_crash_grace_seconds():
                 continue
             if _worker_alive(row["worker_pid"], _kb._row_get(row, "worker_started_at")):
+                continue
+            # An ambiguous owner receipt holds the card while the attempt may still run; once the
+            # interpreter the owner bound to this run is dead nothing can, and it is a crash.
+            if owner_reclaim_paused(conn, row["id"]) and not bound_interpreter_gone(conn, row["id"]):
                 continue
 
             pid = int(row["worker_pid"])
@@ -2523,26 +2525,6 @@ def _module_hermes_argv() -> list[str]:
     """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
     console-script target — there is no top-level ``hermes`` package)."""
     return [sys.executable, "-m", "hermes_cli.main"]
-
-
-def _propagate_module_import_root(cmd: list[str], env: dict[str, str]) -> None:
-    """Put the running install's package root on a module-form worker's path.
-
-    ``_resolve_hermes_argv`` proves ``hermes_cli`` importable in THIS process,
-    where a store-python shim has the repo root on ``sys.path`` in-process;
-    the spawned child runs the bare ``sys.executable`` from the task workspace
-    with a scrubbed ``PYTHONPATH`` and cannot import the package the parent
-    just proved importable — it dies before any work and the board
-    auto-blocks (#122299, #122487, #122500). Same-interpreter child, so the
-    root is version-safe to propagate; ``hermes_cli.main``'s own bootstrap
-    then owns dependency activation as usual. A resolved shim path owns its
-    imports and is left alone. Same pin cron's external worker uses (#112729).
-    """
-    if cmd[1:3] != ["-m", "hermes_cli.main"]:
-        return
-    from cron.scheduler_worker_env import pin_hermes_tree_on_pythonpath
-
-    pin_hermes_tree_on_pythonpath(env, Path(__file__).resolve().parents[1])
 
 
 def _absolute_hermes_path(path: str) -> str:

@@ -104,7 +104,9 @@ def main():
             if peer.mode == 'timeout':
                 assert peer.blocked.wait(55), 'managed worker did not reach loopback'
                 with closing(connect(board='owned')) as snapshot:
-                    receipt['managed_pid'] = kb.get_task(snapshot, tid).worker_pid
+                    bound = snapshot.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='worker_bound' "
+                                             "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+                    receipt['managed_pid'] = json.loads(bound[0])['pid'] if bound else None
         return child
     def wait_for(predicate):
         deadline = time.monotonic() + 60
@@ -126,12 +128,15 @@ def main():
                     active = kb.get_task(conn, tid)
                     receipt.update(client_pid=clients[0].pid, stored_pid=active.worker_pid, run_id=task.current_run_id)
                     if peer.mode == 'timeout':
-                        receipt['pid_preserved'] = active.worker_pid == receipt['managed_pid'] != clients[0].pid
+                        # The spawned worker stays the run's handle; the owner's interpreter dies with it.
+                        receipt['pid_preserved'] = active.worker_pid == clients[0].pid != receipt['managed_pid']
                         # Deterministically elapse this owned attempt; keep real timeout/kill logic.
                         conn.execute('UPDATE task_runs SET started_at=? WHERE id=?', (int(time.time()) - 3601, task.current_run_id))
                         conn.commit()
                         swept = dispatch.dispatch_once(conn, board='owned', max_spawn=0)
-                        receipt.update(timed_out=swept.timed_out, managed_dead=not kb._pid_alive(receipt['managed_pid']))
+                        receipt['timed_out'] = swept.timed_out
+                        wait_for(lambda: not kb._pid_alive(receipt['managed_pid']))
+                        receipt['managed_dead'] = True
                         assert receipt['pid_preserved'] and receipt['managed_dead'], receipt
                     elif peer.mode == 'crash':
                         import signal
@@ -156,7 +161,8 @@ def main():
                         assert receipt['client_exit'] == ('rate_limited', kb.KANBAN_RATE_LIMIT_EXIT_CODE), receipt
                         assert receipt['cooldown'] == 'rate_limit_cooldown', receipt
                     elif peer.mode == 'crash':
-                        assert task.status == 'running' and task.consecutive_failures == 0 and run['outcome'] is None, receipt
+                        # Killing the spawned worker ends the attempt: one crash, re-queued, as before the owner.
+                        assert task.status == 'ready' and task.consecutive_failures == 1 and run['outcome'] == 'crashed', receipt
                     elif peer.mode == 'timeout':
                         assert task.status == 'ready' and task.consecutive_failures == 1 and run['outcome'] == 'timed_out', receipt
             finally:

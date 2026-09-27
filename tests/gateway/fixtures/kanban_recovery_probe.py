@@ -117,7 +117,9 @@ def main():
                 if mode == 'restart':
                     proc.kill(); proc.wait(timeout=10)
                     # Model effects are ambiguous: terminate the exact owned executing interpreter.
-                    os.kill(active.worker_pid, signal.SIGKILL)
+                    bound = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='worker_bound' "
+                                         "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+                    os.kill(json.loads(bound[0])['pid'], signal.SIGKILL)
                     dispatch._recent_worker_exits.clear()
                     swept = dispatch.dispatch_once(conn, board='owned', max_spawn=1)
                     assert not swept.spawned and kb.get_task(conn, tid).current_run_id == task.current_run_id
@@ -129,37 +131,33 @@ def main():
             if mode == 'restart':
                 cfg['model']['default'] = 'changed-default'
                 (owner / 'config.yaml').write_text(json.dumps(cfg))
-                for generation in range(2):
-                    with daemon(root, owner, env, barrier=False) as (proc, desc):
-                        answer = asyncio.run(retry(desc, params))
-                        assert answer['receipt']['status'] == 'unknown', answer
-                        assert answer['session_id'] == first['target_session_id']
-                        with closing(sqlite3.connect((owner / 'state.db').as_uri() + '?mode=ro', uri=True)) as db:
-                            frozen = json.loads(db.execute('SELECT value FROM state_meta WHERE key=?',
-                                ('gateway.local_policy.v1:' + first['target_session_id'],)).fetchone()[0])
-                            assert frozen['policy']['model'] == 'frozen-model', frozen
-                            private = json.loads(frozen['policy']['kanban_json'])
-                            assert private['db'] == str(board_path.resolve()) and private['claim_lock'] == task.claim_lock
-                        # Elapse TTL, heartbeat and runtime to exercise every reclaim route.
-                        conn.execute('UPDATE tasks SET claim_expires=1,last_heartbeat_at=1,max_runtime_seconds=1 WHERE id=?', (tid,))
-                        conn.execute('UPDATE task_runs SET started_at=1 WHERE id=?', (task.current_run_id,))
-                        conn.commit()
-                        dispatch._recent_worker_exits.clear()
-                        swept = dispatch.dispatch_once(conn, board='owned', max_spawn=1, stale_timeout_seconds=1)
-                        same = kb.get_task(conn, tid)
-                        assert not swept.spawned and same.status == 'running', (swept, same)
-                        assert (same.current_run_id, same.claim_lock) == (task.current_run_id, task.claim_lock)
-                        assert same.consecutive_failures == 0
-                        assert len(peer.requests) == 1, peer.requests
-                        if generation == 1:
-                            asyncio.run(retry(desc, params, resolve=True))
-                            assert admission()['status'] == 'terminal'
-                            dispatch.dispatch_once(conn, board='owned', max_spawn=0)
-                            assert kb.get_task(conn, tid).status == 'running'
-                            # Discarding unknown admission is not permission to rerun the card.
-                            kb.block_task(conn, tid, reason='Operator resolves ambiguous attempt', expected_run_id=task.current_run_id)
-                            assert kb.get_task(conn, tid).status == 'blocked'
-                receipt['unknown_preserved_two_restarts'] = True
+                with daemon(root, owner, env, barrier=False) as (proc, desc):
+                    answer = asyncio.run(retry(desc, params))
+                    assert answer['receipt']['status'] == 'unknown', answer
+                    assert answer['session_id'] == first['target_session_id']
+                    with closing(sqlite3.connect((owner / 'state.db').as_uri() + '?mode=ro', uri=True)) as db:
+                        frozen = json.loads(db.execute('SELECT value FROM state_meta WHERE key=?',
+                            ('gateway.local_policy.v1:' + first['target_session_id'],)).fetchone()[0])
+                        assert frozen['policy']['model'] == 'frozen-model', frozen
+                        private = json.loads(frozen['policy']['kanban_json'])
+                        assert private['db'] == str(board_path.resolve()) and private['claim_lock'] == task.claim_lock
+                    # The attempt's interpreter and its spawned worker are both gone: an ordinary crash,
+                    # booked once and re-queued once (same as a killed one-shot worker), never duplicated.
+                    wait_for(lambda: all(p.poll() is not None for p in clients))
+                    assert len(peer.requests) == 1, peer.requests  # the restart never replays the lost call
+                    conn.execute('UPDATE tasks SET claim_expires=1,last_heartbeat_at=1,max_runtime_seconds=1 WHERE id=?', (tid,))
+                    conn.execute('UPDATE task_runs SET started_at=1 WHERE id=?', (task.current_run_id,))
+                    conn.commit()
+                    dispatch._recent_worker_exits.clear()
+                    dispatch.dispatch_once(conn, board='owned', max_spawn=0, stale_timeout_seconds=1)
+                    same = kb.get_task(conn, tid)
+                    run = conn.execute('SELECT outcome FROM task_runs WHERE id=?', (task.current_run_id,)).fetchone()
+                    # 'running' when the owner's own dispatcher already re-queued it onto a fresh run.
+                    assert same.status in {'ready', 'running'} and (same.consecutive_failures, run[0]) == (1, 'crashed'), (same, run[0])
+                    assert same.current_run_id != task.current_run_id or same.status == 'ready', same
+                    dispatch.dispatch_once(conn, board='owned', max_spawn=0, stale_timeout_seconds=1)
+                    assert kb.get_task(conn, tid).consecutive_failures == 1
+                receipt['crash_requeued_once'] = True
             receipt.update(inference_calls=len(peer.requests), frozen_model=peer.requests[0]['model'])
             assert peer.requests[0]['model'] == 'frozen-model'
             wait_for(lambda: all(p.poll() is not None for p in clients))

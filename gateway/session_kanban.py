@@ -1,6 +1,7 @@
 """Trusted dispatcher claims enter the ordinary owner's durable admission queue."""
 from contextlib import closing
 from dataclasses import asdict, replace
+import threading
 import json
 from pathlib import Path
 import sqlite3
@@ -39,6 +40,10 @@ def build_kanban_policy(connection, params, config):
             if bound and json.loads(bound[0])['request_id'] != 'kanban:' + json.dumps([board, task.id, task.current_run_id], separators=(',', ':')):
                 raise RuntimeStoreError('stale_kanban_claim')
             context = kb.build_worker_context(conn, task.id)
+            skills = list(task.skills or ())
+            if kb._retry_status_for_run(conn, task.id, task.current_run_id) == 'review':
+                # Same rule as the dispatcher's review lane: the reviewer always loads sdlc-review.
+                skills = list(dict.fromkeys([*skills, 'sdlc-review']))
     except (ValueError, OSError, sqlite3.Error) as exc:
         raise RuntimeStoreError('invalid_kanban_claim') from exc
     cwd = task.workspace_path
@@ -53,7 +58,7 @@ def build_kanban_policy(connection, params, config):
         policy = replace(policy, model=_resolve_gateway_model(policy.config()))
     context = dict(params, workspace=cwd, branch=task.branch_name, tenant=task.tenant,
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
-        skills=list(task.skills or ()), goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
+        skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
         max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
     context['db'] = str(path)
@@ -149,21 +154,48 @@ def bind_worker_context(frame):
             if (task is None or task.status != 'running' or task.current_run_id != context['run_id']
                     or task.claim_lock != context['claim_lock']):
                 raise RuntimeStoreError('stale_kanban_claim')
-            # Reclaim/timeout must track the executing interpreter, not its disposable viewer. The
-            # fingerprint moves with the pid: the dispatcher's liveness/kill checks compare the live
-            # process against ``worker_started_at``, so a launcher fingerprint left beside our pid
-            # would read as a recycled PID and reclaim a running worker.
+            # The dispatcher's spawned worker stays the run's pid (reclaim, timeout and operator
+            # kills target it; ``_watch_submitter`` ties this interpreter's life to it). The bound
+            # interpreter is recorded beside it so a sweep can tell when the attempt is truly gone.
             from hermes_cli.kanban_db_dispatch import UNVERIFIED_WORKER_FINGERPRINT, _process_fingerprint
             fingerprint = _process_fingerprint(os.getpid()) or UNVERIFIED_WORKER_FINGERPRINT
-            conn.execute('UPDATE tasks SET worker_pid=?, worker_started_at=? WHERE id=?',
-                         (os.getpid(), fingerprint, task.id))
-            conn.execute('UPDATE task_runs SET worker_pid=?, worker_started_at=? WHERE id=?',
-                         (os.getpid(), fingerprint, context['run_id']))
-            kb._append_event(conn, task.id, 'worker_bound', {'pid': os.getpid(), 'claim_lock': context['claim_lock']}, run_id=context['run_id'])
+            kb._append_event(conn, task.id, 'worker_bound', {'pid': os.getpid(), 'claim_lock': context['claim_lock'],
+                             'started_at': fingerprint}, run_id=context['run_id'])
+            claimed = conn.execute("SELECT payload, created_at FROM task_events WHERE task_id=? AND run_id=? AND kind='claimed' ORDER BY id DESC LIMIT 1",
+                                   (task.id, context['run_id'])).fetchone()
+    # Heartbeats extend the claim by the TTL the dispatcher claimed it with (a spawned worker
+    # inherited it from the dispatcher's environment); this daemon's own default is not that.
+    expires = json.loads(claimed[0]).get('expires') if claimed else None
+    if isinstance(expires, int) and claimed[1]:
+        env['HERMES_KANBAN_CLAIM_TTL_SECONDS'] = str(max(1, expires - int(claimed[1])))
+    _watch_submitter(Path(context['db']), context['run_id'])
     os.environ.update(env)
     os.chdir(context['workspace'])
     from agent.shell_hooks import register_from_config
     register_from_config(json.loads(frame['policy']['config_json']), accept_hooks=context['accept_hooks'])
+
+
+_TURNS_DONE = threading.Event()
+
+
+def _watch_submitter(db, run_id):
+    """The dispatcher's spawned worker is this attempt's handle: killing it (an operator, a
+    timeout, an OOM kill) must end the attempt, as it did when the worker ran the agent itself.
+    Exiting hard leaves no ``worker_result``, so the dead-worker sweep books this run's crash.
+    The run row is re-read each tick: the dispatcher records the pid only after its spawn returns."""
+    import os
+    from hermes_cli.kanban_db_dispatch import _worker_alive
+
+    def watch():
+        with closing(sqlite3.connect(db.resolve().as_uri() + '?mode=ro', uri=True)) as conn:
+            while not _TURNS_DONE.wait(1.0):
+                try:
+                    row = conn.execute('SELECT worker_pid, worker_started_at FROM task_runs WHERE id=?', (run_id,)).fetchone()
+                except sqlite3.Error:
+                    continue
+                if row and row[0] and row[0] != os.getpid() and not _worker_alive(row[0], row[1]):
+                    os._exit(1)
+    threading.Thread(target=watch, name='kanban-submitter-watch', daemon=True).start()
 
 
 def run_worker_turns(agent, frame, history):
@@ -173,32 +205,40 @@ def run_worker_turns(agent, frame, history):
         return agent.run_conversation(frame['text'], conversation_history=history,
                                       **({'turn_author': author} if author is not None else {}))
     from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
-    code = 1
+    code, last_output = 1, ''
     try:
         result = _run_task_turns(agent, frame, history, context)
         code = KANBAN_RATE_LIMIT_EXIT_CODE if result.get('failed') and result.get('failure_reason') in {'rate_limit', 'billing'} else int(bool(result.get('failed') or result.get('interrupted')))
+        last_output = str(result.get('final_response') or '')[-500:]
         return result
     finally:
+        _TURNS_DONE.set()
         import os
         from hermes_cli.kanban_db_connect import connect_closing
         from hermes_cli import kanban_db as kb
         with connect_closing(Path(context['db'])) as conn, kb.write_txn(conn):
             row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='worker_bound' ORDER BY id DESC LIMIT 1",
                 (context['task_id'], context['run_id'])).fetchone()
-            if row and json.loads(row[0]) == {'pid': os.getpid(), 'claim_lock': context['claim_lock']}:
+            bound = json.loads(row[0]) if row else {}
+            if (bound.get('pid'), bound.get('claim_lock')) == (os.getpid(), context['claim_lock']):
                 # Closing a run clears its claim/PID and replaces metadata; keep the
                 # result in the immutable attempt event stream instead.
                 kb._append_event(conn, context['task_id'], 'worker_result',
-                    {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code}, run_id=context['run_id'])
+                    {'pid': os.getpid(), 'claim_lock': context['claim_lock'], 'exit_code': code,
+                     'last_output': last_output}, run_id=context['run_id'])
 
 
-def worker_exit_code(path, params):
+def worker_result(path, params):
     """Read only the dispatcher's exact attempt; never infer success from admission settlement."""
     with closing(sqlite3.connect(Path(path).resolve().as_uri() + '?mode=ro', uri=True)) as conn:
         row = conn.execute("SELECT payload FROM task_events WHERE run_id=? AND task_id=? AND kind='worker_result' ORDER BY id DESC LIMIT 1",
             (params['run_id'], params['task_id'])).fetchone()
         result = json.loads(row[0]) if row else {}
-        return result.get('exit_code', 1) if result.get('claim_lock') == params['claim_lock'] else 1
+        return result if result.get('claim_lock') == params['claim_lock'] else {}
+
+
+def worker_exit_code(path, params):
+    return worker_result(path, params).get('exit_code', 1)
 
 
 def _run_task_turns(agent, frame, history, context):

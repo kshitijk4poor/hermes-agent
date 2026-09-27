@@ -18,11 +18,27 @@ async def run(params, board_db):
             receipt = await client.rpc('prompt.receipt', session_id=sid, admission_id=receipt['admission_id'])
         if receipt['status'] == 'unknown':
             raise GatewayClientError('Kanban execution unknown; retained by owner')
-        from gateway.session_kanban import worker_exit_code
-        return worker_exit_code(board_db, params)
+        from gateway.session_kanban import worker_result
+        result = worker_result(board_db, params)
+        # The attempt's reply ends the log, as a one-shot worker's did: crash diagnostics quote it.
+        if result.get('last_output'):
+            print(result['last_output'])
+        return result.get('exit_code', 1)
 
 
 def main():
+    # The dead-worker sweep books this process's exit from the trailer in its log (it never
+    # reaps us), so every exit path writes it — the same contract as a quiet one-shot worker.
+    from hermes_cli.quiet_single_query import KANBAN_WORKER_EXIT_TRAILER
+    rc = 1
+    try:
+        rc = _submit()
+    finally:
+        print(f'\n{KANBAN_WORKER_EXIT_TRAILER}{int(rc)}', file=sys.stderr, flush=True)
+    return rc
+
+
+def _submit():
     try:
         params = {'board': os.environ['HERMES_KANBAN_BOARD'], 'task_id': os.environ['HERMES_KANBAN_TASK'],
             'run_id': int(os.environ['HERMES_KANBAN_RUN_ID']), 'claim_lock': os.environ['HERMES_KANBAN_CLAIM_LOCK']}
