@@ -1940,10 +1940,21 @@ def _raw_config_cache_hit(path_key: str, cache_key: Tuple[Any, ...]) -> Optional
     return None
 
 
-def _read_raw_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
-    from agent.safe_worker_policy import worker_config_snapshot
+def _worker_config_snapshot() -> Optional[Dict[str, Any]]:
+    """A safe worker's frozen config, or None. Install-time loads run from ``hermes_cli`` alone
+    (the installer's completion step ships no ``agent`` package), and without ``agent`` there
+    is no worker policy to consult."""
+    try:
+        from agent.safe_worker_policy import worker_config_snapshot
+    except ModuleNotFoundError as exc:
+        if exc.name != "agent":
+            raise
+        return None
+    return worker_config_snapshot()
 
-    snapshot = worker_config_snapshot()
+
+def _read_raw_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
+    snapshot = _worker_config_snapshot()
     if snapshot is not None:
         return snapshot
 
@@ -2026,9 +2037,7 @@ def require_readable_config_before_write(config_path: Optional[Path] = None) -> 
     non-mapping root — bare-``except`` loaders treat both as ``{}``, so a subsequent write would
     replace the recoverable file with only the caller's partial dict. Fails closed."""
     if config_path is None:
-        from agent.safe_worker_policy import worker_config_snapshot
-
-        snapshot = worker_config_snapshot()
+        snapshot = _worker_config_snapshot()
         if snapshot is not None:
             # A bypass worker's config IS its frozen snapshot; it never reads the profile file.
             return copy.deepcopy(snapshot)
@@ -2367,9 +2376,7 @@ def _load_config_cache_hit(path_key: str, cache_sig: Any) -> Optional[Dict[str, 
 
 
 def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
-    from agent.safe_worker_policy import worker_config_snapshot
-
-    snapshot = worker_config_snapshot()
+    snapshot = _worker_config_snapshot()
     if snapshot is not None:
         return _deep_merge(copy.deepcopy(DEFAULT_CONFIG), snapshot)
 
@@ -2575,11 +2582,9 @@ def load_env() -> Dict[str, str]:
     """Load ~/.hermes/.env as a dict. Memoised inside ``load_env_file`` (``get_env_value()`` runs
     hundreds of times per interactive menu render). Each assignment's value is opaque data for
     boundary discovery."""
-    from agent.safe_worker_policy import worker_config_snapshot
-
     # A frozen-policy worker never opens the profile's files; its secrets arrive
     # through the owner-installed scope, so the .env layer is empty here.
-    if worker_config_snapshot() is not None:
+    if _worker_config_snapshot() is not None:
         return {}
     from agent.secret_scope import load_env_file  # the one .env tokenizer; also installs profile scopes
 
@@ -4090,20 +4095,29 @@ def _inject_profile_env_vars() -> None:
 _inject_profile_env_vars()
 
 
-def _platform_plugin_manifests():
-    """Yield ``(dir_name, manifest_dict)`` for every platform plugin manifest: bundled
-    ``plugins/platforms/*``, the user's ``<HERMES_HOME>/plugins/platforms/*`` category dir, and flat
-    user installs ``<HERMES_HOME>/plugins/*`` that declare ``kind: platform`` (#46600)."""
-    from agent.safe_worker_policy import safe_worker_enabled
+PlatformManifestSource = Literal["all", "bundled", "user"]
 
-    if safe_worker_enabled():
-        return
-    user_plugins = get_hermes_home() / "plugins"
-    roots = (
-        (get_project_root() / "plugins" / "platforms", False),
-        (user_plugins / "platforms", False),
-        (user_plugins, True),  # flat layout: only manifests that say they are platforms
-    )
+
+def _is_plugin_dir_name(name: str) -> bool:
+    # Same rule as plugins_discovery.scan_directory: __pycache__-style dunders aren't plugins; a dot
+    # dir can be, so its secrets are declared too.
+    return not (name.startswith("__") and name.endswith("__"))
+
+
+def _platform_manifest_paths(home: Optional[Path] = None, source: PlatformManifestSource = "all"):
+    """Yield ``(dir_name, manifest_path, require_kind, stat)`` for every platform plugin manifest.
+    ``source`` is ``"bundled"`` (shipped ``plugins/platforms/*``), ``"user"`` (``<home>/plugins/
+    platforms/*`` plus flat ``<home>/plugins/*`` installs, which must declare ``kind: platform``,
+    #46600) or ``"all"``. ``home`` defaults to the bound Hermes home. A directory that cannot be
+    listed or searched yields ``(name, None, require_kind, error)``: a plugin there can't load
+    either, so callers skip it. One ``scandir`` per root and one ``stat`` per candidate, because
+    the child-env scrub stamps these on every spawn."""
+    roots = []
+    if source in ("all", "bundled"):
+        roots.append((get_project_root() / "plugins" / "platforms", False))
+    if source in ("all", "user"):
+        user_plugins = (home if home is not None else get_hermes_home()) / "plugins"
+        roots += [(user_plugins / "platforms", False), (user_plugins, True)]
     for root, require_kind in roots:
         try:
             with os.scandir(root) as it:
@@ -4152,6 +4166,10 @@ def _platform_plugin_manifests(home: Optional[Path] = None, source: PlatformMani
     skipped with a warning, as is an unsearchable plugin directory. A manifest that does not
     parse declares nothing (its adapter cannot load either) and is skipped. Every skip is appended
     to ``skipped``, so a caller can tell a complete scan from a partial one."""
+    from agent.safe_worker_policy import safe_worker_enabled
+
+    if safe_worker_enabled():
+        return
     for dir_name, manifest_path, require_kind, st in _platform_manifest_paths(home, source):
         if manifest_path is None:
             logger.warning("Skipping unreadable plugin directory %s: %s", dir_name, st)
