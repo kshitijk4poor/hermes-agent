@@ -33,7 +33,7 @@ class LocalSessionPolicy:
     ignore_user_config: bool = False
 
     def config(self, authority=None):
-        config = json.loads(self.config_json)
+        config = present_sections(json.loads(self.config_json))
         if self.config_secret_ref is not None and authority is not None:
             from gateway.session_policy_credentials import recover_config_secrets
             secrets = recover_config_secrets(authority, self)
@@ -76,6 +76,12 @@ class LocalSessionPolicy:
         return resolve_reasoning_config(self.config(), self.model or '')
 
 
+def present_sections(config):
+    """A bare ``gateway:`` key parses as YAML null; like load_config's merge (#58277), treat it as absent so
+    ``cfg.get('gateway', {}).get(...)`` reads the default instead of crashing a fresh install's first turn."""
+    return {key: value for key, value in config.items() if value is not None}
+
+
 def build_policy(params, config, *, private_secrets=None, profile_terminal=True):
     from hermes_cli.tools_config import _get_platform_tools
     from toolsets import validate_toolset
@@ -103,7 +109,7 @@ def build_policy(params, config, *, private_secrets=None, profile_terminal=True)
         raise RuntimeStoreError('invalid_params')
     from gateway.session_local_editor import validate_editor
     validate_editor(source, params.get('editor'))
-    config = json.loads(json.dumps(config))
+    config = present_sections(json.loads(json.dumps(config)))
     from urllib.parse import urlsplit
     from hermes_constants import parse_reasoning_effort
     for key in ('provider', 'base_url'):

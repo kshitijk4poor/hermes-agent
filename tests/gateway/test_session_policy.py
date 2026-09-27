@@ -121,3 +121,17 @@ def test_ordinary_daemon_cli_launch_policy(tmp_path):
     print(json.dumps(json.loads(result.stdout.splitlines()[-1])))
 
 
+def test_null_config_sections_read_as_absent(tmp_path):
+    # A fresh install's config.yaml carries a bare ``gateway:`` (YAML null); the managed-worker gate chains
+    # ``.get('gateway', {}).get(...)`` on the frozen policy and must read the default, not crash the turn.
+    from gateway.session_policy import build_policy, LocalSessionPolicy
+    from dataclasses import replace
+    import json
+
+    cfg = {'gateway': None, 'display': None, 'platform_toolsets': {'cli': ['terminal']}}
+    policy = build_policy({'source': 'cli', 'cwd': str(tmp_path)}, cfg)
+    assert policy.config().get('gateway', {}).get('managed_workers') is None
+    legacy = replace(policy, config_json=json.dumps(cfg))  # persisted before normalization
+    assert isinstance(legacy, LocalSessionPolicy)
+    assert legacy.config().get('display', {}).get('busy_input_mode', 'interrupt') == 'interrupt'
+
