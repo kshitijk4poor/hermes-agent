@@ -332,6 +332,10 @@ def _walk_root(home: str, root_rel: str, *, profiles: bool, judged: bool):
             rel = os.path.relpath(abs_path, home).replace(os.sep, "/")
             if _owns_plugins(rel, profiles=profiles):
                 continue
+            # Never judged, and a live gateway (it serves every profile) can close the
+            # connection between listdir and the digest open: skip, don't race it.
+            if _volatile_sidecar(rel):
+                continue
             # The judged skills/.archive tree is walked as its own root, so the
             # advisory walk of skills/ must not claim it.
             if not judged and (rel.split("/")[-1] == SKILL_ARCHIVE or "/" + SKILL_ARCHIVE + "/" in rel):
