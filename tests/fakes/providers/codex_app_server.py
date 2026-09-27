@@ -520,7 +520,8 @@ def _step_message(ctx: _TurnCtx, step: dict) -> None:
     item_id, text = ctx.new_id(), step["text"]
     ctx.started({"type": "agentMessage", "id": item_id, "text": ""})
     size = max(1, len(text) // max(1, step.get("chunks", 3)))
-    for start in range(0, len(text), size):
+    # ``deltas: False``: the item reaches item/completed with no item/agentMessage/delta before it.
+    for start in range(0, len(text), size) if step.get("deltas", True) else ():
         ctx.server.notify("item/agentMessage/delta", ctx.scope(itemId=item_id, delta=text[start:start + size]))
     ctx.completed({"type": "agentMessage", "id": item_id, "text": text})
 

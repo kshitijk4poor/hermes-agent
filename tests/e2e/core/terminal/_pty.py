@@ -102,15 +102,17 @@ def cmdline(pid: int) -> str:
 class PtyHermes:
     """One interactive ``hermes`` process on a PTY with an emulated screen."""
 
-    def __init__(self, root: Path, argv_tail: list[str], llm: FakeLLMServer, *, rows: int, cols: int,
+    def __init__(self, root: Path, argv_tail: list[str], llm: FakeLLMServer | None, *, rows: int, cols: int,
                  extra_config: str = "") -> None:
+        """``llm=None``: the caller already wrote ``root/home/.hermes`` (e.g. a native-runtime home)."""
         self.root = root
         self.home = root / "home"
         self.hermes_home = self.home / ".hermes"
         operator = (_operator_home() / ".hermes").resolve()
         assert operator not in (self.hermes_home.resolve(), *self.hermes_home.resolve().parents), (
             f"sandbox {self.hermes_home} sits inside the operator's Hermes home")
-        write_hermes_home(self.hermes_home, llm.base_url, extra_config=extra_config)
+        if llm is not None:
+            write_hermes_home(self.hermes_home, llm.base_url, extra_config=extra_config)
         self.llm = llm
         self.screen = Screen(rows, cols)
         self.raw = bytearray()

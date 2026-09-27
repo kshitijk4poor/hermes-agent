@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-import json
 import logging
 import queue
 import re
@@ -61,7 +60,10 @@ def _renders_exec_approval_buttons(adapter_cls: type) -> bool:
 
 # Rendered on a native clarify card whose wait ended without a click (mirrors the notice the
 # Slack click handler shows on a dead entry).
-_CLARIFY_EXPIRED_NOTICE = "⏳ This prompt expired — please send a new request."
+def _clarify_expired_notice() -> str:
+    return t("gateway.clarify.expired")
+
+
 # run_conversation result keys the gateway projection carries verbatim so a finite viewer's
 # `-z --usage-file` ledger (hermes_cli/oneshot._USAGE_KEYS) reads what the in-process path did.
 _LEDGER_PASSTHROUGH_KEYS = (
@@ -210,15 +212,28 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                     # stitched as a "partial delivery" nobody received (classic -q parity).
                     raise _NoStreamConsumer()
 
+        local_viewer_route = getattr(ctx.source, "platform", None) == Platform.LOCAL
+
         def interim_assistant_cb(text: str, *, already_streamed: bool = False) -> None:
             if not ctx._run_still_current():
                 return
+            unseen = False
+            if local_viewer_route and not already_streamed and str(text or "").strip():
+                # LocalSessionAdapter.send publishes nothing, so unstreamed commentary handed to the
+                # consumer would be recorded as delivered while no viewer saw it. A codex app-server
+                # final that arrives with no deltas then suppresses the reply (message.complete "").
+                # Publish the in-process TUI's message.interim contract instead, and count the text
+                # as delivered only when a viewer or observer actually took it.
+                payload = {"text": text, "already_streamed": False}
+                unseen = not self._publish_execution("message.interim", payload)
             if stts is not None:
                 # Flush accepted deltas; completed commentary is a separate speech segment.
                 stts.on_delta(None)
                 if not already_streamed:
                     stts.on_delta(text)
                     stts.on_delta(None)
+            if unseen:
+                return
             if stream_consumer is not None:
                 stream_consumer.on_segment_break() if already_streamed else stream_consumer.on_commentary(text)
             elif not already_streamed and ctx._status_adapter and str(text or "").strip():
@@ -412,26 +427,12 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             authority.register_clarify(session_id, generation, entry)
         return result
 
-    def _clarify_callback_sync(self, question: str, choices, multi_select: bool = False,
-                               questions=None) -> str:
-        """Present a clarify prompt and block on a response (clarify_tool's synchronous contract):
-        schedule send_clarify on the gateway loop, block on the primitive's threading.Event with a
-        timeout. Returns the response string, or a sentinel when none arrived.
-
-        ``questions`` (clarify_tool's batch form) is answered here, one card per question, because
-        this surface knows whether an answer arrived: the loop that would otherwise call this
-        callback once per question can only recognize "no answer" from the returned sentinel text,
-        and treated that text as the question's answer.
-        """
-        if questions:
-            return self._clarify_batch_sync(questions)
-        response, _answered = self._ask_clarify_question(question, choices, multi_select)
-        return response
-
-    def _clarify_batch_sync(self, questions) -> str:
-        """Answer a batch: one card per question, stop at the first the user never answers.
-        Returns the JSON shape clarify_tool's batch path reads. The stream/typing re-arm waits for
-        the last question — between two cards it only opens a bubble the next boundary closes."""
+    def _clarify_callback_sync(self, questions) -> dict:
+        """Answer the clarify tool's questions (clarify_tool's synchronous contract): one card per
+        question, stop at the first the user never answers. The stream/typing re-arm waits for the
+        last question — between two cards it only opens a bubble the next boundary closes."""
+        from gateway.run_turn_runner_clarify_delivery import UNDELIVERED, UNDELIVERED_DECLINED, UNDELIVERED_NO_SURFACE
+        from tools.clarify_gateway import CANCELLED, SKIPPED
         answers: Dict[str, Any] = {}
         reply: Dict[str, Any] = {"answers": answers, "outcome": "submitted"}
         last = len(questions) - 1
@@ -806,6 +807,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
                 kwargs["turn_author"] = (api.get('turn_author') if api is not None else
                     admission_author.get() or {"id": ctx.source.user_id or None, "name": ctx.source.user_name or None,
                                                "is_bot": bool(getattr(ctx.source, "is_bot", False))})
+            if ctx.title_user_message is not None:
+                kwargs["title_user_message"] = ctx.title_user_message
             if persist_user_message_override is not None:
                 kwargs["persist_user_message"] = persist_user_message_override
             elif observed_group_context:
@@ -1093,11 +1096,8 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             if ctx.source.platform == Platform.LOCAL:
                 # The local operator reads the terminal: the resolver's own sentence ("provider
                 # 'custom' resolved without credentials ...") is the diagnosis; /login is not.
-                return _unresolved(f"⚠️ {exc}")
-            return _unresolved(
-                "⚠️ I couldn't connect to the AI model service, so this message wasn't processed. "
-                "Use /login to sign in again, or /model to pick a different model. If it keeps "
-                "failing, run `hermes doctor` on the host.")
+                return _unresolved(t("gateway.shared.warn_passthrough", error=exc))
+            return _unresolved(t("gateway.errors.no_credentials"))
         pr = runner._provider_routing
         reasoning_config = (policy.reasoning_config if policy else
             runner._resolve_session_reasoning_config(source=ctx.source, session_key=ctx.session_key, model=model))
