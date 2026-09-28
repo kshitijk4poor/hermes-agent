@@ -7,6 +7,7 @@ import { DASHBOARD_TUI_MODE } from '../config/env.js'
 import { DOUBLE_ESC_MS, TYPING_IDLE_MS } from '../config/timing.js'
 import { applyCompletion } from '../domain/slash.js'
 import type { ConfigSetResponse, SharedControlRespondResponse, VoiceRecordResponse } from '../gatewayTypes.js'
+import { t } from '../i18n/runtime.js'
 import { isAction, isCopyShortcut, isMac, isMacActionFallback, isVoiceToggleKey } from '../lib/platform.js'
 import { computePrecisionWheelStep, initPrecisionWheel } from '../lib/precisionWheel.js'
 import { computeWheelStep, initWheelAccelForHost } from '../lib/wheelAccel.js'
@@ -263,7 +264,7 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
 
       const settle = () => {
         patchOverlayState({ approval: null })
-        patchTurnState({ outcome: 'denied' })
+        patchTurnState({ outcome: t('session.approval.denied') })
       }
 
       // Canonical shared controls deny through the generation-bound RPC; a
