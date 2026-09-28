@@ -612,7 +612,7 @@ import {
   MIN_HEIGHT as WINDOW_MIN_HEIGHT,
   MIN_WIDTH as WINDOW_MIN_WIDTH
 } from './window-state'
-import { hiddenWindowsChildOptions, windowsShellCommand } from './windows-child-options'
+import { hiddenWindowsChildOptions } from './windows-child-options'
 import { buildPathExtCandidates, chooseUpdaterArgs, resolveVenvHermesCommand } from './windows-hermes-path'
 import {
   connectWindowsRemote,
@@ -12406,8 +12406,6 @@ async function startHermes(requestedProfile?: string) {
       HERMES_HOME,
       profileBackendParentEnv({ hermesHome: HERMES_HOME, profile: primaryProfile })
     ))
-
-    void showPluginCompatNoticeOnce()
 
     backendConnectionState.assertCurrentAttempt(connectionAttempt)
 
