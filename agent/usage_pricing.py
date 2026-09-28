@@ -195,6 +195,10 @@ _SNAPSHOTS: tuple[tuple[str, Optional[str], str, dict], ...] = (
         "claude-opus-5": _OPUS,
         "claude-opus-5-5": ("4.00", "20.00", "0.20", "5.00"),
     }),
+    # Sonnet 5.5 keeps Sonnet 5's rates (the intro price became standard on 2026-08-10).
+    ("anthropic", _ANTHROPIC_URL, "anthropic-pricing-2026-09-28", {
+        "claude-sonnet-5-5": ("2.00", "10.00", "0.20", "2.50"),
+    }),
     ("openai", "https://openai.com/api/pricing/", "openai-pricing-2026-03-16", {
         "gpt-4o": ("2.50", "10.00", "1.25"), "gpt-4o-mini": ("0.15", "0.60", "0.075"),
         "gpt-4.1": ("2.00", "8.00", "0.50"), "gpt-4.1-mini": ("0.40", "1.60", "0.10"),
