@@ -1,0 +1,31 @@
+name: s5 fs.watch storm probe (#118974, throwaway)
+on:
+  push:
+    branches: ['wine2e/s5-fswatch-probe']
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: .s5-probe
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: probe (tmpdir on the runner's NTFS drive)
+        shell: pwsh
+        run: |
+          $env:GUARD_MODULE = (Resolve-Path .s5-probe/watch-storm-breaker.ts).Path
+          $env:OUT = "fswatch-${{ matrix.os }}.json"
+          node .s5-probe/probe-fswatch.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fswatch-${{ matrix.os }}
+          path: fswatch-*.json
