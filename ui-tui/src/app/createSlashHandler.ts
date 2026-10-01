@@ -6,16 +6,13 @@ import { rpcErrorMessage } from '../lib/rpc.js'
 import { launchWidget } from '../sdk/host.js'
 import { getWidgetApp } from '../sdk/registry.js'
 
-import type { SlashHandlerContext, SlashSubmission } from './interfaces.js'
+import type { SlashHandler, SlashHandlerContext, SlashSubmission } from './interfaces.js'
 import { scoreSlashMenuItem } from './slash/fuzzyScore.js'
 import { findSlashCommand } from './slash/registry.js'
 import type { SlashRunCtx } from './slash/types.js'
 import { captureDestination, isCurrentDestination } from './submissionDestination.js'
 import { getUiState } from './uiStore.js'
 import { describeSlashExecError, shouldFallbackToDispatch } from './userMessages.js'
-
-/** `typed` is false for programmatic dispatch, so shared metrics count only user-typed commands. */
-export type TypedSlashHandler = (cmd: string, submission?: SlashSubmission, typed?: boolean) => boolean
 
 /** Shared metrics count each user-typed command once, from the client: the gateway no longer
  *  counts slash.exec, so locally handled commands (/resume, /skin, overlays) land too.
@@ -31,7 +28,7 @@ export function reportSlashCommand(gw: GatewayClient, name: string, sid: null | 
 /** `typed` is false for programmatic calls (a picker re-issuing `/model <x>`) and for the
  *  backend's alias re-dispatch; prefix/alias expansion keeps it, so a typed `/hea` counts once
  *  as the /heartbeat it resolved to. */
-export function createSlashHandler(ctx: SlashHandlerContext): TypedSlashHandler {
+export function createSlashHandler(ctx: SlashHandlerContext): SlashHandler {
   const { gw } = ctx.gateway
   const { catalog } = ctx.local
   const { page, send, sys } = ctx.transcript

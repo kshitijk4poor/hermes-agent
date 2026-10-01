@@ -1620,15 +1620,14 @@ def test_resolve_hermes_argv_module_actually_runs():
 
 
 def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monkeypatch):
-    """A module-form worker must carry the import context that selected it.
+    """The worker is always module-form and must carry the import context.
 
-    ``_resolve_hermes_argv`` proves ``hermes_cli`` importable in the gateway,
-    where a store-python shim has the repo root on ``sys.path`` in-process;
-    the worker env scrub strips Hermes-owned PYTHONPATH entries, so the bare
-    ``sys.executable -m hermes_cli.main`` child died on import and the board
-    auto-blocked (#122299, #122487, #122500). The spawned env must put the
-    running install's root first on PYTHONPATH — and never for a resolved shim
-    path, which owns its own imports.
+    The worker env scrub strips Hermes-owned PYTHONPATH entries, so a bare
+    ``sys.executable -m ...`` child died on import and the board auto-blocked
+    (#122299, #122487, #122500). The worker argv is now always
+    ``-m hermes_cli.kanban_worker_client`` (the profile owner executes), so
+    the running install's root must be first on PYTHONPATH regardless of
+    what ``_resolve_hermes_argv`` would pick for a CLI child.
     """
     import os
     import sys
@@ -1662,13 +1661,12 @@ def test_default_spawn_pins_repo_root_on_module_worker_pythonpath(tmp_path, monk
         claim_expires=None, tenant=None, branch_name=None,
     )
 
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: [sys.executable, "-m", "hermes_cli.main"])
-    kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
-
-    monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda: ["/opt/hermes/bin/hermes"])
-    kbd._default_spawn(task, str(tmp_path / "ws"))
-    assert root not in captured["env"].get("PYTHONPATH", "").split(os.pathsep)
+    for resolved in ([sys.executable, "-m", "hermes_cli.main"], ["/opt/hermes/bin/hermes"]):
+        monkeypatch.setattr(kbd, "_resolve_hermes_argv", lambda r=resolved: r)
+        captured.clear()
+        kbd._default_spawn(task, str(tmp_path / "ws"))
+        assert captured["cmd"][-2:] == ["-m", "hermes_cli.kanban_worker_client"]
+        assert captured["env"]["PYTHONPATH"].split(os.pathsep)[0] == root
 
 
 # ---------------------------------------------------------------------------

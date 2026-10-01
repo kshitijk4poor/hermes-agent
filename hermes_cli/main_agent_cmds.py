@@ -122,7 +122,8 @@ def cmd_insights(args):
         report = engine.generate(days=args.days, source=args.source)
         print(engine.format_terminal(report))
     except Exception as e:
-        print(f"Error generating insights: {e}")
+        from agent.i18n import t
+        print(t("gateway.insights.error", error=str(e)))
     finally:
         if db is not None:
             try:

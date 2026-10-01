@@ -171,9 +171,14 @@ export class CanonicalDesktopProtocol {
         throw new Error('Prompt is stale or unavailable; reconnect before responding')
       }
 
-      const field = method === 'approval.respond' ? 'choice' : 'answer'
+      const identity = { session_id: sessionId, execution_generation: prompt.execution_generation, prompt_id: id }
 
-      return { session_id: sessionId, execution_generation: prompt.execution_generation, prompt_id: id, [field]: params[field] }
+      if (method === 'clarify.respond') {
+        // `answers` ({qid: text | null}) submits; a response without it cancels.
+        return params.answers && typeof params.answers === 'object' ? { ...identity, answers: params.answers } : identity
+      }
+
+      return { ...identity, choice: params.choice }
     }
 
     return params

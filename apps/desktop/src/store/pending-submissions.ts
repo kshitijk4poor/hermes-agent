@@ -1,4 +1,4 @@
-import { getQueuedPrompts, type QueuedPromptEntry, writeSessionQueue } from './composer-queue'
+import { mutateSession, type QueuedPromptEntry } from './composer-queue'
 
 const STORAGE_KEY = 'hermes.desktop.pendingSubmissions.v1'
 interface PendingSubmission { id: string; text: string; displayText?: string; status?: string }
@@ -31,24 +31,6 @@ export function reconcilePendingSubmissions(key: string, value: unknown): void {
     receipts.set(id, { ...known[id], id, text: typeof raw.user === 'string' ? raw.user : known[id]?.text ?? '', status: raw.status })
   }
 
-  const current = getQueuedPrompts(key)
-  const next: QueuedPromptEntry[] = []
-
-  for (const entry of current) {
-    const receipt = receipts.get(admissionByInput.get(entry.id) ?? entry.id)
-
-    if (receipt) {
-      if (receipt.status !== 'started') { next.push({ ...entry, id: receipt.id, serverStatus: receipt.status }) }
-      receipts.delete(receipt.id)
-    } else if (!entry.serverStatus) { next.push(entry) }
-  }
-
-  for (const receipt of receipts.values()) {
-    if (receipt.status !== 'started') {
-      next.push({ id: receipt.id, text: receipt.text, displayText: receipt.displayText, attachments: [], queuedAt: Date.now(), serverStatus: receipt.status })
-    }
-  }
-
   // Only observed server records may be retired by their later absence.
   for (const [id, entry] of Object.entries(known)) {
     if (entry.status && !value.some(raw => raw?.admission_id === id)) { delete known[id] }
@@ -61,5 +43,24 @@ export function reconcilePendingSubmissions(key: string, value: unknown): void {
   journal[key] = known
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(journal))
 
-  if (JSON.stringify(current) !== JSON.stringify(next)) { writeSessionQueue(key, next) }
+  mutateSession(key, current => {
+    const next: QueuedPromptEntry[] = []
+
+    for (const entry of current) {
+      const receipt = receipts.get(admissionByInput.get(entry.id) ?? entry.id)
+
+      if (receipt) {
+        if (receipt.status !== 'started') { next.push({ ...entry, id: receipt.id, serverStatus: receipt.status }) }
+        receipts.delete(receipt.id)
+      } else if (!entry.serverStatus) { next.push(entry) }
+    }
+
+    for (const receipt of receipts.values()) {
+      if (receipt.status !== 'started') {
+        next.push({ id: receipt.id, text: receipt.text, displayText: receipt.displayText, attachments: [], queuedAt: Date.now(), serverStatus: receipt.status })
+      }
+    }
+
+    return JSON.stringify(current) === JSON.stringify(next) ? null : next
+  })
 }

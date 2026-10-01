@@ -55,11 +55,11 @@ import type { Msg, PanelSection, SlashCatalog } from '../types.js'
 import { applyAgentSnapshot } from './agentRoster.js'
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
 import { createServerRequestHandler } from './createServerRequestHandler.js'
-import { createSlashHandler, type TypedSlashHandler } from './createSlashHandler.js'
+import { createSlashHandler } from './createSlashHandler.js'
 import { planGatewayRecovery } from './gatewayRecovery.js'
 import { applyGoalSnapshot } from './goalStatus.js'
 import { getInputSelection } from './inputSelectionStore.js'
-import { type GatewayRpc, type StateSetter, type TranscriptRow } from './interfaces.js'
+import { type GatewayRpc, type SlashHandler, type StateSetter, type TranscriptRow } from './interfaces.js'
 import { $overlayState, capturePromptResponseGuard, patchOverlayState } from './overlayStore.js'
 import { $goodVibesTick } from './petFlashStore.js'
 import { applyProcessSnapshot, type ProcessEntry } from './processRoster.js'
@@ -256,7 +256,7 @@ export function useMainApp(gw: GatewayClient) {
   )
 
   const slashFlightRef = useRef(0)
-  const slashRef = useRef<TypedSlashHandler>(() => false)
+  const slashRef = useRef<SlashHandler>(() => false)
   const colsRef = useRef(cols)
   const scrollRef = useRef<null | ScrollBoxHandle>(null)
   const onEventRef = useRef<(ev: AnyGatewayEvent) => void>(() => {})
@@ -775,10 +775,10 @@ export function useMainApp(gw: GatewayClient) {
     turnController.turnTools = turnController.turnTools.filter(line => !sameToolTrailGroup(label, line))
     patchTurnState({ turnTrail: turnController.turnTools })
 
-    // Canonical shared controls cancel through the generation-bound RPC; a
-    // legacy server→client request resolves its response frame locally.
+    // Canonical shared controls cancel through the generation-bound RPC (no
+    // `answers`); a legacy server→client request resolves its response frame locally.
     const cancelled = clarify.sharedControl
-      ? rpc<SharedControlRespondResponse>('clarify.respond', { answer: '', ...sharedControlParams(clarify) }).then(
+      ? rpc<SharedControlRespondResponse>('clarify.respond', sharedControlParams(clarify)).then(
           r => Boolean(r) && fresh()
         )
       : Promise.resolve(respondToServerRequest(clarify.requestId, {}))
@@ -821,25 +821,29 @@ export function useMainApp(gw: GatewayClient) {
         return
       }
 
-      // A single canonical shared prompt answers through the generation-bound
-      // RPC; a batch locks each answer via clarify.lock.
-      const locked: Promise<ClarifyLockResponse | null> =
-        clarify.sharedControl && clarify.questions.length === 1
-          ? rpc<SharedControlRespondResponse>('clarify.respond', { answer, ...sharedControlParams(clarify) }).then(r =>
-              r ? { remaining: [], status: 'ok' as const } : null
-            )
-          : rpc<ClarifyLockResponse>('clarify.lock', {
-              answer: answer.trim() ? answer : null,
-              question_id: qid,
-              request_id: clarify.requestId
-            })
+      const answers = { ...(clarify.answers ?? {}), [qid]: answer }
+      const remaining = clarify.questions.filter(q => !(q.qid in answers)).map(q => q.qid)
+
+      // A canonical shared prompt stages answers locally and submits the whole
+      // set through the generation-bound RPC (blank = skipped); a legacy
+      // server→client request locks each answer via clarify.lock.
+      const locked: Promise<ClarifyLockResponse | null> = !clarify.sharedControl
+        ? rpc<ClarifyLockResponse>('clarify.lock', {
+            answer: answer.trim() ? answer : null,
+            question_id: qid,
+            request_id: clarify.requestId
+          })
+        : remaining.length > 0
+          ? Promise.resolve({ remaining, status: 'ok' as const })
+          : rpc<SharedControlRespondResponse>('clarify.respond', {
+              ...sharedControlParams(clarify),
+              answers: Object.fromEntries(clarify.questions.map(q => [q.qid, answers[q.qid]?.trim() ? answers[q.qid] : null]))
+            }).then(r => (r ? { remaining: [], status: 'ok' as const } : null))
 
       void locked.then(r => {
         if (!r || !fresh()) {
           return
         }
-
-        const answers = { ...(clarify.answers ?? {}), [qid]: answer }
 
         if (r.status === 'expired') {
           patchOverlayState({ clarify: null })

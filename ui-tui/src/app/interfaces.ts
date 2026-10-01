@@ -542,7 +542,8 @@ export interface SlashSubmission {
   expand: (text: string) => string
 }
 
-export type SlashHandler = (cmd: string, submission?: SlashSubmission) => boolean
+/** `typed` is false for programmatic dispatch, so shared metrics count only user-typed commands. */
+export type SlashHandler = (cmd: string, submission?: SlashSubmission, typed?: boolean) => boolean
 
 export interface SlashHandlerContext {
   composer: {

@@ -16,7 +16,7 @@ def test_readiness_reports_selected_free_route(monkeypatch, provider, host, expe
     monkeypatch.setattr('hermes_cli.main._has_any_provider_configured', lambda **kw: True)
     monkeypatch.setattr('hermes_cli.runtime_provider.resolve_runtime_provider', lambda **kw: {
         'provider': provider, 'base_url': host, 'api_key': 'no-key-required', 'model': 'nous/welcome'})
-    assert check_runtime_readiness()['free_tier'] is expected
+    assert check_runtime_readiness()['free_tier_route'] is expected
 
 
 def test_local_launch_bootstraps_before_provider_guard(monkeypatch):

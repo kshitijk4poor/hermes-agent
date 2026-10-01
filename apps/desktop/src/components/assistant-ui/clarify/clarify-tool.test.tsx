@@ -193,26 +193,36 @@ describe('ClarifyTool live card stays mounted across settle', () => {
     expect(screen.getByRole('button', { name: /Confirm and continue/ }).hasAttribute('disabled')).toBe(true)
   })
 
-  it('a batch tool call answered one card at a time by the shared gateway gets a live single card', () => {
-    // `gateway/run_turn_runner.py::_clarify_batch_sync` sends one single-question request per
-    // entry; the batch preview built from the tool args must not shadow it as a disabled form.
+  it('a batch the shared gateway asks one card at a time answers only the question it sent', async () => {
+    // `gateway/run_turn_runner.py::_clarify_callback_sync` asks each question as its own
+    // prompt: the live request's questions, not the tool args, decide what is answerable.
+    const request = vi.fn().mockResolvedValue({ remaining: [], status: 'ok' })
+    liveServerRequest('request-1')
     $activeSessionId.set('session-1')
-    $gateway.set({ request: vi.fn().mockResolvedValue({ ok: true }) } as never)
+    $gateway.set({ request } as never)
     setClarifyRequest({
-      choices: ['staging', 'production'],
-      multiSelect: false,
-      question: 'Which deployment target?',
+      questions: [
+        { choices: ['staging', 'production'], multiSelect: false, qid: 'q0', question: 'Which deployment target?' }
+      ],
       requestId: 'request-1',
       sessionId: 'session-1'
     })
-    const props = liveClarifyProps()
-    const args = { questions: [{ question: 'Which deployment target?', choices: ['staging', 'production'] }] }
-    renderClarify(<ClarifyTool {...props} args={args} argsText={JSON.stringify(args)} />)
 
-    const staging = screen.getByRole('button', { name: /staging/ })
+    const args = {
+      questions: [
+        { choices: ['staging', 'production'], question: 'Which deployment target?' },
+        { choices: ['eu', 'us'], question: 'Which region?' }
+      ]
+    }
 
-    expect(staging.hasAttribute('disabled')).toBe(false)
-    expect(screen.queryByRole('button', { name: /Confirm and continue/ })).toBeNull()
+    renderClarify(<ClarifyTool {...liveClarifyProps()} args={args} argsText={JSON.stringify(args)} />)
+
+    expect(screen.queryByText('Which region?')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: /staging/ }))
+    fireEvent.submit(document.querySelector('form') as HTMLFormElement)
+
+    await waitFor(() => expect(request).toHaveBeenCalledTimes(1))
+    expect(request).toHaveBeenCalledWith(...lock('staging'))
   })
 })
 

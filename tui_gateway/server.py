@@ -2131,8 +2131,6 @@ from .mcp_rpc_helpers import summarize_server as _mcp_summarize_server  # noqa: 
 
 # ── Split @method handler modules (see method_ctx.py): imported last so every global the handlers close
 # over exists; register() rebinds them onto this namespace.
-from hermes_state import _BARE_BILLING_PROVIDERS  # noqa: E402, F401
-
 from . import (  # noqa: E402
     session_registry as _session_registry, agent_factory as _agent_factory,
     methods_voice as _methods_voice, methods_browser as _methods_browser, methods_slash as _methods_slash,

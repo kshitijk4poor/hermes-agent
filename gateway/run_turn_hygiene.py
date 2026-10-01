@@ -623,24 +623,18 @@ class GatewayTurnHygieneMixin:
             if not _hyg_fence_cancelled:
                 # Force-redact: provider exception text may contain credentials; this reaches users.
                 from agent.redact import redact_sensitive_text
-                _err = redact_sensitive_text(getattr(_comp, "_last_summary_error", None) or "unknown error", force=True)
+                _err = redact_sensitive_text(
+                    getattr(_comp, "_last_summary_error", None) or t("gateway.shared.unknown_error"), force=True)
                 logger.warning("Session hygiene compression aborted: %s", _err)
                 await self._hmwa_hygiene_notify(
-                    source, attempt.meta,
-                    "⚠️ Shortening the conversation history failed, so I kept everything as-is. "
-                    "Run /compress to try again or /new to start fresh. If this keeps happening, "
-                    "run `hermes doctor` on the host.",
-                    "compression-failure warning",
+                    source, attempt.meta, t("gateway.compress.hygiene_failed"), "compression-failure warning",
                 )
         # Configured aux model failed, recovered on the main model: only the user can fix that config.
         elif _comp is not None and getattr(_comp, "_last_aux_model_failure_model", None):
             _aux_model = getattr(_comp, "_last_aux_model_failure_model", "")
-            _aux_err = getattr(_comp, "_last_aux_model_failure_error", None) or "unknown error"
+            _aux_err = getattr(_comp, "_last_aux_model_failure_error", None) or t("gateway.shared.unknown_error")
             await self._hmwa_hygiene_notify(
-                source, attempt.meta, f"ℹ️ Configured compression model `{_aux_model}` "
-                f"failed ({_aux_err}). Recovered using your main "
-                "model — context is intact — but you may want to "
-                "check `auxiliary.compression.model` in config.yaml.",
+                source, attempt.meta, t("gateway.compress.aux_failed", model=_aux_model, error=_aux_err),
                 "aux-model-fallback notice",
             )
 

@@ -104,7 +104,7 @@ class WorkerControls:
             self.agent.interrupt()
         with self.lock:
             for state in self.clarifications.values():
-                state['answer'] = '[Interrupted]'
+                state['reply'] = {'answers': {}, 'outcome': 'cancelled'}
                 state['event'].set()
 
     def read(self):
@@ -120,17 +120,22 @@ class WorkerControls:
                     return
                 if (set(frame) != {'type', 'prompt_id', 'value'} or frame['type'] not in {'approval', 'clarify'}
                         or not isinstance(frame['prompt_id'], str) or not isinstance(frame['value'], str)
-                        or len(frame['value']) > 16384):
+                        or len(frame['value']) > (16384 if frame['type'] == 'approval' else 131072)):
                     raise ValueError('invalid_managed_control')
                 if frame['type'] == 'approval':
                     if frame['value'] not in {'once', 'deny', 'session', 'always'}:
                         raise ValueError('invalid_managed_control')
                     resolve_gateway_approval(self.route, frame['value'], request_id=frame['prompt_id'])
                 else:
+                    reply = json.loads(frame['value'])
+                    if (not isinstance(reply, dict) or set(reply) != {'answers', 'outcome'}
+                            or not isinstance(reply['answers'], dict)
+                            or reply['outcome'] not in {'submitted', 'cancelled'}):
+                        raise ValueError('invalid_managed_control')
                     with self.lock:
                         state = self.clarifications.get(frame['prompt_id'])
                         if state is not None:
-                            state['answer'] = frame['value']
+                            state['reply'] = reply
                             state['event'].set()
         except (EOFError, OSError, ValueError):
             self.stop()
@@ -142,19 +147,22 @@ class WorkerControls:
         self.channel.send('approval', data={k: v for k, v in data.items() if k in fields})
         ack_gateway_approval(self.route, data['request_id'])
 
-    def clarify(self, question, choices, multi_select=False):
+    def clarify(self, questions):
+        """The clarify tool's callback: the whole batch is one owner prompt; the reply is the
+        tool's ``{answers, outcome}``."""
         import uuid
         prompt_id = uuid.uuid4().hex
-        state = {'event': threading.Event(), 'answer': '[No response]'}
+        state = {'event': threading.Event(), 'reply': {'answers': {}, 'outcome': 'timed_out'}}
         with self.lock:
             if self.stopped.is_set() or len(self.clarifications) >= 16:
-                return '[Interrupted]'
+                return {'answers': {}, 'outcome': 'cancelled'}
             self.clarifications[prompt_id] = state
         try:
-            self.channel.send('clarify', prompt_id=prompt_id, question=question,
-                              choices=list(choices or []), multi_select=bool(multi_select))
+            self.channel.send('clarify', prompt_id=prompt_id, questions=[
+                {'qid': q['qid'], 'question': q['question'], 'choices': list(q['choices'] or []),
+                 'multi_select': bool(q['multi_select'])} for q in questions])
             state['event'].wait(3600)
-            return state['answer']
+            return state['reply']
         finally:
             with self.lock:
                 self.clarifications.pop(prompt_id, None)

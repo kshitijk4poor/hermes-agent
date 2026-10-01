@@ -30,7 +30,7 @@ class Model(BaseHTTPRequestHandler):
             self.server.requests.append(body)
             message = {'role': 'assistant', 'content': None, 'tool_calls': [{
                 'id': 'managed-clarify', 'type': 'function', 'function': {'name': 'clarify',
-                'arguments': json.dumps({'question': 'Choose managed answer', 'choices': ['Alpha', 'Beta']})}}]}
+                'arguments': json.dumps({'questions': [{'question': 'Choose managed answer', 'choices': ['Alpha', 'Beta']}]})}}]}
         elif any(m['role'] == 'tool' for m in body['messages']):
             self.server.requests.append(body)
             self.server.blocked.set()

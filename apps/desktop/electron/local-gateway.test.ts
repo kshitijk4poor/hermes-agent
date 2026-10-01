@@ -34,6 +34,8 @@ test.skipIf(process.platform === 'win32')('native HTTP mints fresh purpose-bound
   const { nativeGatewayHttpHeaders } = await import('./local-gateway')
   // macOS: os.tmpdir() is /var/..., a symlink to /private/var; the gateway canonicalises
   // profile_id, so the endpoint must carry the realpath or identities never match.
+  // Keep the prefix short: the per-run vitest TMPDIR already eats most of macOS's 104-byte
+  // socket path limit.
   const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-http-')))
   const endpoint = { profile_id: home, instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
   const requests: any[] = []
@@ -177,7 +179,9 @@ test.skipIf(process.platform === 'win32')('a stopped gateway that unlinked its c
   const { mintLocalGatewayTicket, redialLocalGateway } = await import('./local-gateway')
   // macOS: os.tmpdir() is /var/..., a symlink to /private/var; the gateway canonicalises
   // profile_id, so the endpoint must carry the realpath or identities never match.
-  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-redial-')))
+  // Keep the prefix short: the per-run vitest TMPDIR already eats most of macOS's 104-byte
+  // socket path limit.
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'gw-redial-')))
   const socketPath = path.join(home, 'gateway.sock')
   const endpoint = { profile_id: home, instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
 
@@ -236,7 +240,9 @@ test.skipIf(process.platform === 'win32')('a group-accessible control socket is 
   const { isStaleLocalGatewayError, mintLocalGatewayTicket } = await import('./local-gateway')
   // macOS: os.tmpdir() is /var/..., a symlink to /private/var; the gateway canonicalises
   // profile_id, so the endpoint must carry the realpath or identities never match.
-  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'desktop-unsafe-')))
+  // Keep the prefix short: the per-run vitest TMPDIR already eats most of macOS's 104-byte
+  // socket path limit.
+  const home = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'gw-unsafe-')))
   const socketPath = path.join(home, 'gateway.sock')
   const endpoint = { profile_id: home, instance_id: 'owner', authority_epoch: 1, runtime_protocol: 1, api_origin: 'http://127.0.0.1:1234', capabilities: ['session-authority-v1'], supervisor: 'none' }
   const server = net.createServer(socket => socket.end())

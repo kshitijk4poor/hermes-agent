@@ -67,6 +67,12 @@ export class HermesGateway extends JsonRpcGatewayClient {
   private readonly protocol = new CanonicalDesktopProtocol()
   private readonly promptHandlers = new Set<ServerRequestHandler>()
   private readonly deliveredPrompts = new Set<string>()
+  // Canonical clarify prompts answer as one `clarify.respond`; the card's per-question
+  // `clarify.lock` calls stage here until the last question lands.
+  private readonly clarifyLocks = new Map<
+    string,
+    { locked: Record<string, null | string>; qids: string[]; sessionId: string; settle: () => void }
+  >()
 
   override onRequest(handler: ServerRequestHandler): () => void {
     this.promptHandlers.add(handler)
@@ -91,11 +97,17 @@ export class HermesGateway extends JsonRpcGatewayClient {
     const choices = Array.isArray(p.choices) ? p.choices : []
 
     const params: Record<string, unknown> = kind === 'clarify'
-      ? { session_id: sid, question: p.question, choices, multi_select: p.multi_select, questions: p.questions, answers: p.answers }
+      ? { session_id: sid, questions: p.questions, answers: p.answers }
       : { session_id: sid, request_id: id, command: p.command, description: p.description, choices,
           allow_permanent: choices.includes('always'), edit: p.edit }
 
     let settled = false
+
+    if (kind === 'clarify' && Array.isArray(p.questions)) {
+      const qids = p.questions.map(q => (q as { qid?: unknown })?.qid).filter((q): q is string => typeof q === 'string')
+
+      this.clarifyLocks.set(id, { locked: {}, qids, sessionId: sid, settle: () => { settled = true } })
+    }
 
     const request: ServerRequest = {
       id,
@@ -105,10 +117,17 @@ export class HermesGateway extends JsonRpcGatewayClient {
       respond: result => {
         if (settled) { return }
         settled = true
-        const answer = kind === 'clarify' ? { answer: result.answer } : { choice: result.choice }
+        this.clarifyLocks.delete(id)
+        // `{answers}` submits (null = skipped); a response without it cancels.
+        const answer = kind === 'clarify'
+          ? (result.answers && typeof result.answers === 'object' ? { answers: result.answers } : {})
+          : { choice: result.choice }
         void this.request(`${kind}.respond`, { session_id: sid, request_id: id, ...answer }).catch(() => undefined)
       },
-      fail: () => { settled = true }
+      fail: () => {
+        settled = true
+        this.clarifyLocks.delete(id)
+      }
     }
 
     for (const handler of this.promptHandlers) {
@@ -137,8 +156,35 @@ export class HermesGateway extends JsonRpcGatewayClient {
   // a redial) the new socket must resume before it may submit or respond.
   private attached = new Set<string>()
 
+  // `clarify.lock` against a canonical prompt: stage the answer, and send the whole set through
+  // `clarify.respond` with the last one (the reply mirrors `tui_gateway`'s lock result).
+  private async lockCanonicalClarify(params: Record<string, unknown>): Promise<{ remaining: string[]; status: 'expired' | 'ok' }> {
+    const id = String(params.request_id ?? '')
+    const pending = this.clarifyLocks.get(id)
+
+    if (!pending) { return { remaining: [], status: 'expired' } }
+    const qid = String(params.question_id ?? '')
+
+    if (!pending.qids.includes(qid)) { throw new Error(`Unknown clarify question: ${qid}`) }
+    const { answer } = params
+    pending.locked[qid] = answer === null || answer === undefined ? null : typeof answer === 'string' ? answer : JSON.stringify(answer)
+    const remaining = pending.qids.filter(q => !(q in pending.locked))
+
+    if (remaining.length === 0) {
+      await this.request('clarify.respond', { session_id: pending.sessionId, request_id: id, answers: { ...pending.locked } })
+      pending.settle()
+      this.clarifyLocks.delete(id)
+    }
+
+    return { remaining, status: 'ok' }
+  }
+
   override async request<T>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number, signal?: AbortSignal): Promise<T> {
     if (!this.canonical) { return super.request<T>(method, legacyParams(method, params), timeoutMs, signal) }
+
+    if (method === 'clarify.lock' && this.clarifyLocks.has(String(params.request_id ?? ''))) {
+      return this.lockCanonicalClarify(params) as Promise<T>
+    }
     const sid = typeof params.session_id === 'string' ? params.session_id : null
 
     if (sid && ATTACH_REQUIRED.has(method) && !this.attached.has(sid)) {
@@ -211,7 +257,10 @@ export class HermesGateway extends JsonRpcGatewayClient {
       } else if (event.type.endsWith('.settled')) {
         const id = (event.payload as { prompt_id?: unknown } | undefined)?.prompt_id
 
-        if (typeof id === 'string') { this.deliveredPrompts.delete(id) }
+        if (typeof id === 'string') {
+          this.deliveredPrompts.delete(id)
+          this.clarifyLocks.delete(id)
+        }
       }
     })
   }

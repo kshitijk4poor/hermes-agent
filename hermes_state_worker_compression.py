@@ -246,7 +246,7 @@ def publish_on_connection(db, conn, *, parent_session_id: str, child_session_id:
     lock_row = conn.execute(_LOCK_ROW_SQL, (parent_session_id,)).fetchone()
     if require_compression_lease and (lock_row is None or not compression_lock_holder or lock_row['holder'] != compression_lock_holder or (float(lock_row['expires_at']) <= time.time())):
         raise CompressionSessionBusyError(f'Compression lease lost before publication: {parent_session_id}')
-    parent = conn.execute('SELECT ended_at, end_reason, cwd, git_branch, git_repo_root,\n                          user_id, session_key, chat_id, chat_type,\n                          thread_id, display_name, origin_json, profile_name, tool_names\n                   FROM sessions WHERE id = ?', (parent_session_id,)).fetchone()
+    parent = conn.execute('SELECT ended_at, end_reason, cwd, git_branch, git_repo_root,\n                          user_id, session_key, chat_id, chat_type,\n                          thread_id, display_name, origin_json, profile_name, tool_names,\n                          archived, auto_archived\n                   FROM sessions WHERE id = ?', (parent_session_id,)).fetchone()
     if parent is None:
         raise RuntimeError(f'Compression parent not found: {parent_session_id}')
     if parent['ended_at'] is not None:
@@ -256,6 +256,7 @@ def publish_on_connection(db, conn, *, parent_session_id: str, child_session_id:
     if not messages:
         raise RuntimeError('Compression child handoff must not be empty')
     db._publish_child_session_row(conn, parent, parent_session_id=parent_session_id, child_session_id=child_session_id, source=source, model=model, model_config=model_config, system_prompt=system_prompt, cwd=cwd, profile_name=profile_name)
+    db._carry_parent_timestamps(conn, parent_session_id, messages)
     total_messages, total_tool_calls = db._insert_message_rows(conn, child_session_id, messages)
     if watermark is not None:
         bounded = watermark_ceiling is not None
@@ -270,6 +271,8 @@ def publish_on_connection(db, conn, *, parent_session_id: str, child_session_id:
         raise RuntimeError(f'Compression parent changed during publication: {parent_session_id}')
     from hermes_state_local_lineage import advance_local_target
     advance_local_target(conn, parent_session_id, child_session_id)
+    if parent['archived']:
+        db._unarchive_auto_archived_lineage(conn, child_session_id)
 
 
 def worker_watermark(db, conn, sid, payload):

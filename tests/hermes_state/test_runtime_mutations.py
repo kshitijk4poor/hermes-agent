@@ -100,3 +100,19 @@ def test_mutation_rules_and_receipt_failure_are_atomic(tmp_path, operation, payl
             assert db.get_session('child')['runtime_revision'] == 1
     finally:
         db.close()
+
+
+def test_runtime_archive_is_deliberate_and_clears_auto_archived_provenance(tmp_path):
+    """A user archive through the runtime mutation path owns the row: a later reopen or
+    compression publish must not un-hide it as if the idle sweep had archived it."""
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        db.create_session('s', source='test')
+        db._auto_archive_lineage('s')
+        assert (db.get_session('s')['archived'], db.get_session('s')['auto_archived']) == (1, 1)
+        epoch = rt.begin_runtime_epoch(db, instance_id='boot')
+        rt.mutate_runtime_session(db, epoch=epoch, principal_id='human', session_id='s', request_id='arch',
+                                  expected_revision=0, operation='archive', payload={'archived': True})
+        assert (db.get_session('s')['archived'], db.get_session('s')['auto_archived']) == (1, 0)
+    finally:
+        db.close()

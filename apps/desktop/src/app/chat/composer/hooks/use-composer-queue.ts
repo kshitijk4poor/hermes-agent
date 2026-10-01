@@ -4,7 +4,7 @@ import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { useSessionSlice } from '@/lib/use-session-slice'
-import { type ComposerAttachment } from '@/store/composer'
+import { type ComposerAttachment, isFreshDraftScope } from '@/store/composer'
 import { resetBrowseState } from '@/store/composer-input-history'
 import {
   $parkedQueueSessions,
@@ -193,7 +193,8 @@ export function useComposerQueue({
       return false
     }
 
-    if (serverOwnsComposerQueue(sessionId ?? activeQueueSessionKey)) {
+    // A fresh chat's queue stays local until the chat has a session to admit into.
+    if (!isFreshDraftScope(activeQueueSessionKey) && serverOwnsComposerQueue(sessionId ?? activeQueueSessionKey)) {
       return Promise.resolve(onSubmit(text, {
         attachments: cloneAttachments(attachments), fromQueue: true,
         sessionId: sessionId ?? null, storedSessionId: activeQueueSessionKey

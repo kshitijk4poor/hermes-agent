@@ -420,11 +420,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             logger.warning("%s boundary timed out or failed: %s", reason, err)
             return False
 
-    async def _send_shared_clarify(self, entry, **kwargs):
+    async def _send_shared_clarify(self, entry, wire=None, **kwargs):
         result = await self._ctx._status_adapter.send_clarify(**kwargs)
         if self._approval_owner is not None and result.success:
             authority, session_id, generation = self._approval_owner
-            authority.register_clarify(session_id, generation, entry)
+            authority.register_clarify(session_id, generation, entry, [wire] if wire else None)
         return result
 
     def _clarify_callback_sync(self, questions) -> dict:
@@ -439,7 +439,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         for index, entry in enumerate(questions):
             question = f"{entry['question']}\n{t('gateway.clarify.skip_hint')}"
             raw, answered = self._ask_clarify_question(
-                question, entry["choices"], bool(entry["multi_select"]), rearm=index == last)
+                question, entry["choices"], bool(entry["multi_select"]), rearm=index == last, wire=entry)
             if raw == CANCELLED:
                 reply["outcome"] = "cancelled"
                 break
@@ -453,9 +453,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             answers[entry["qid"]] = None if raw == SKIPPED else raw
         return reply
 
-    def _ask_clarify_question(self, question, choices, multi_select, rearm: bool = True) -> tuple[str, bool]:
+    def _ask_clarify_question(self, question, choices, multi_select, rearm: bool = True,
+                              wire=None) -> tuple[str, bool]:
         """One card: register, send, wait, then retire it (no answer) or re-arm (answer).
-        Returns ``(response, answered)``; the caller decides what "no answer" means."""
+        Returns ``(response, answered)``; the caller decides what "no answer" means. ``wire`` is
+        the tool's question entry attached clients see (without the messaging skip hint)."""
         from gateway.run_turn_runner_clarify_delivery import (
             UNDELIVERED_NO_SURFACE, _clarify_send_then_wait, text_fallback_coro)
         from tools import clarify_gateway as clarify_mod
@@ -498,7 +500,7 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         except Exception:
             logger.debug("Stream-consumer flush before clarify prompt failed", exc_info=True)
         fut = self._schedule(
-            self._send_shared_clarify(entry, **send_kwargs),
+            self._send_shared_clarify(entry, wire, **send_kwargs),
             "Clarify send failed to schedule",
         )
         # Boundary rule (see _approval_send_outcome): a send timeout is AMBIGUOUS — the card may

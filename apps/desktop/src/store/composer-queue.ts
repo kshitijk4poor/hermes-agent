@@ -132,7 +132,7 @@ const current = (): QueueState => (storageCurrent ? load() : $queuedPromptsBySes
 // atom: another window may have written since our last storage event, into any
 // session including this one, and saving our stale snapshot would drop its
 // entries (#46732). `op` returns the next queue, or null for no change.
-const mutateSession = (sid: string, op: (queue: QueuedPromptEntry[]) => null | QueuedPromptEntry[]): boolean => {
+export const mutateSession = (sid: string, op: (queue: QueuedPromptEntry[]) => null | QueuedPromptEntry[]): boolean => {
   const live = current()
   const queue = op(live[sid] ?? [])
 

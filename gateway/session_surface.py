@@ -42,12 +42,18 @@ def admit_surface(params):
     return {'surface_v1': committed} if committed else {}
 
 
-def _hud_note(committed, valid_tool_names):
+def _hud_note(committed, agent):
     from agent.prompt_builder import hud_surface_note
-    return hud_surface_note(valid_tool_names)
+    from tools.tool_search_catalog import TOOL_CALL_NAME
+    direct = getattr(agent, 'valid_tool_names', None) or set()
+    if TOOL_CALL_NAME not in direct:
+        return hud_surface_note(direct)
+    # Tool search defers the desktop tools behind the ``tool_call`` bridge: they are still callable.
+    from agent.tool_executor import _tool_search_scoped_names
+    return hud_surface_note(direct, _tool_search_scoped_names(agent))
 
 
-def _voice_live_note(committed, valid_tool_names):
+def _voice_live_note(committed, agent):
     from tools.voice_live import voice_live_turn_note
     return voice_live_turn_note(committed.get('voice_context') or '')
 
@@ -55,16 +61,17 @@ def _voice_live_note(committed, valid_tool_names):
 _SURFACE_NOTES = {'hud': _hud_note, 'voice-live': _voice_live_note}
 
 
-def surface_note(committed, valid_tool_names=None):
+def surface_note(committed, agent=None):
     """The model-bound note for a committed surface (``""`` for the plain app window): barge-in
-    first, then the HUD read-the-window-below prior or the spoken-delegation contract."""
+    first, then the HUD read-the-window-below prior or the spoken-delegation contract. ``agent``
+    gates the HUD note on the tools it can actually call (direct or deferred behind tool search)."""
     notes = []
     if committed.get('interrupted'):
         from tools.tts_streaming import SPEECH_INTERRUPTED_NOTE
         notes.append(SPEECH_INTERRUPTED_NOTE)
     render = _SURFACE_NOTES.get(committed.get('surface'))
     if render is not None:
-        notes.append(render(committed, valid_tool_names))
+        notes.append(render(committed, agent))
     return '\n\n'.join(note for note in notes if note)
 
 
@@ -82,4 +89,4 @@ def surface_turn_note(agent):
     committed = _surface_turn.get()
     if not committed:
         return ''
-    return surface_note(committed, getattr(agent, 'valid_tool_names', None))
+    return surface_note(committed, agent)

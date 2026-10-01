@@ -69,7 +69,11 @@ def apply_action(db, conn, session_id, operation, payload, *, prepared=None):
         else:
             column = 'last_read_at' if key == 'unread' else key
             stored = (0.0 if value else time.time()) if key == 'unread' else int(value)
-            affected.update(db._set_lineage_column_in_transaction(conn, column, session_id, stored))
+            # A deliberate archive (user, CLI, API) clears the idle sweep's ``auto_archived``
+            # provenance, so re-activation never un-hides it on the user's behalf.
+            extra_set_sql = ', auto_archived = 0' if column == 'archived' else ''
+            affected.update(db._set_lineage_column_in_transaction(
+                conn, column, session_id, stored, extra_set_sql=extra_set_sql))
             result[key] = value
     return affected, result
 
@@ -92,9 +96,12 @@ def _rewind(db, conn, session_id, payload):
     # Receipts are JSON: publish the same public message shape get_messages() returns (decoded
     # content/tool_calls, no internal display_identity BLOB / display_order).
     target = db._row_to_message_dict(target, warn_context='rewind receipt', summary_flag=True)
+    replacement_uid = None if replacement is None else conn.execute(
+        'SELECT message_uid FROM messages WHERE id = ?', (replacement,)).fetchone()[0]
     conn.execute('UPDATE sessions SET runtime_generation=runtime_generation+1 WHERE id=?', (session_id,))
     return {session_id, physical}, {'rewound_count': len(ids), 'target_message': target,
-        'new_head_id': head, 'replacement_message_id': replacement}
+        'new_head_id': head, 'replacement_message_id': replacement,
+        'replacement_message_uid': replacement_uid}
 
 
 def _import(db, conn, session_id, payload):

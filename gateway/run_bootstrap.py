@@ -701,10 +701,8 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
             return False
 
         def _recover_pending() -> None:
-            from gateway.shutdown_flush import recover_pending_to_db
-            recovered = recover_pending_to_db(
-                session_resolver=runner.session_store.resolve_session_id_for_key,
-            )
+            from gateway.run import _recover_pending_flushes
+            recovered = _recover_pending_flushes(runner)
             if recovered:
                 logger.info("Recovered %d pending message(s) from shutdown flush", recovered)
 

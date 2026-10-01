@@ -145,15 +145,13 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
     if room_plumbing or (_row_follows_profile(row) and not composer_profile_matches):
         return {}
     overrides: dict = {}
-    field = lambda k: str(model_config.get(k) or "").strip()
     model = str(row.get("model") or model_config.get("model") or "").strip()
-    # ``billing_provider`` is only the billing bucket — for a custom endpoint the bare class "custom", which
-    # agent_init treats as non-routable. Only restore an explicit provider; else resume uses the configured default.
-    provider = field("provider")
-    billing_provider = str(model_config.get("billing_provider") or row.get("billing_provider") or "").strip()
-    if not provider and billing_provider.lower() not in _BARE_BILLING_PROVIDERS:
-        provider = billing_provider
-    base_url, api_mode, service_tier = field("base_url"), field("api_mode"), field("service_tier")
+    # Canonical route reader shared with CLI --resume: nested ``gateway_runtime`` (the route the messaging
+    # gateway last ran) before the TUI's top-level keys, then a routable ``billing_provider`` (#125942).
+    from hermes_state import SessionDB
+    route = SessionDB.session_gateway_runtime(row)
+    provider, base_url, api_mode = (str(route.get(k) or "").strip() for k in ("provider", "base_url", "api_mode"))
+    service_tier = str(model_config.get("service_tier") or "").strip()
     reasoning_config = model_config.get("reasoning_config")
     from hermes_cli.runtime_provider import is_foreign_provider_endpoint
     if is_foreign_provider_endpoint(provider, base_url):
@@ -284,12 +282,10 @@ def _load_reasoning_config(model: str = "") -> dict | None:
     return resolve_reasoning_config(_load_cfg(), model)
 
 
-_SERVICE_TIER_ALIASES = {"fast": "priority", "priority": "priority", "on": "priority", "auto": "auto", "cold": "cold"}
-
-
 def _load_service_tier() -> str | None:
-    raw = str((_load_cfg().get("agent") or {}).get("service_tier", "") or "").strip().lower()
-    return _SERVICE_TIER_ALIASES.get(raw)
+    from agent.fast_mode import parse_service_tier
+
+    return parse_service_tier((_load_cfg().get("agent") or {}).get("service_tier", ""))
 
 
 def _load_provider_routing() -> dict:
@@ -480,11 +476,6 @@ def _session_show_reasoning(sid: str) -> bool:
     if "show_reasoning" in session:
         return bool(session["show_reasoning"])
     return _load_show_reasoning()
-
-
-def _process_tool_chrome_enabled(sid: str) -> bool:
-    """Non-essential tool rows follow display.show_reasoning, not reasoning_effort."""
-    return _session_show_reasoning(sid) and _tool_progress_enabled(sid)
 
 
 def _tool_progress_enabled(sid: str) -> bool:
@@ -685,6 +676,8 @@ def _make_agent(
         checkpoints_enabled=is_truthy_value(os.environ.get("HERMES_TUI_CHECKPOINTS")),
         pass_session_id=is_truthy_value(os.environ.get("HERMES_TUI_PASS_SESSION_ID")),
         skip_context_files=ignore_rules, skip_memory=ignore_rules, fallback_model=_load_fallback_model(),
+        # The resolved provider's request body (a custom entry's extra_body), as the CLI/cron/gateway pass it.
+        request_overrides=runtime.get("request_overrides"),
         prefill_messages=_load_prefill_messages() or None, **_agent_cbs(sid))
     if context_cwd_is_launch_artifact is None:
         context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(session)

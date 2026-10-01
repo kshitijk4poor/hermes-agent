@@ -1,7 +1,7 @@
 """Provider readiness probe shared by ``setup.runtime_check`` (TUI gateway) and the session authority."""
 
 
-def check_runtime_readiness(requested=None, *, strict_profile_scope=False, resolve=None):
+def check_runtime_readiness(requested=None, *, strict_profile_scope=False, resolve=None, blame=None):
     """ok/error verdict for the runtime a session would be built with.
 
     ``resolve`` is an optional ``() -> (model, runtime)`` pair supplied by the caller that owns the
@@ -10,6 +10,10 @@ def check_runtime_readiness(requested=None, *, strict_profile_scope=False, resol
     shows onboarding for a backend whose sessions build fine (#111775). An explicit ``requested``
     provider stays a strict single-provider check so onboarding can verify the provider just connected
     without another provider's fallback masking a failed connection. Both branches report the model.
+
+    ``blame`` names the provider a failure is attributed to (the caller's pin). When the fallback chain
+    only resolves at its tail, the resolved runtime stops there and a failure would otherwise blame a
+    provider the user never pinned (#124939). Without it failures name the resolved route's provider.
     """
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from hermes_cli.auth import has_usable_secret
@@ -25,15 +29,17 @@ def check_runtime_readiness(requested=None, *, strict_profile_scope=False, resol
     source = str(runtime.get('source') or '')
     result = {'ok': True, 'provider': runtime.get('provider'),
               'model': model, 'source': runtime.get('source')}
+    blamed = blame or provider
+    failed = {**result, 'ok': False, 'provider': blamed}
     if not configured and provider == 'bedrock' and source in {'iam-role', 'aws-sdk-default-chain'}:
-        return {**result, 'ok': False, 'error': 'No Hermes provider is configured.'}
+        return {**failed, 'error': 'No Hermes provider is configured.'}
     api_key = runtime.get('api_key')
     api_key_text = '' if callable(api_key) else str(api_key or '').strip()
     if not (callable(api_key) or api_key_text in {'aws-sdk', 'no-key-required'}
             or has_usable_secret(api_key_text) or bool(runtime.get('command'))):
-        return {**result, 'ok': False, 'error': f'No usable credentials found for {provider}.'}
+        return {**failed, 'error': f'No usable credentials found for {blamed}.'}
     from hermes_cli.anon_auth import route_is_welcome_host
-    # free_tier is keyed on the SELECTED route (the welcome host serves only nous/welcome), not
+    # free_tier_route is keyed on the SELECTED route (the welcome host serves only nous/welcome), not
     # on profile state: a paid Nous key beside a free-tier identity must not read as free.
-    result['free_tier'] = provider == 'nous' and route_is_welcome_host(runtime.get('base_url'))
+    result['free_tier_route'] = provider == 'nous' and route_is_welcome_host(runtime.get('base_url'))
     return result

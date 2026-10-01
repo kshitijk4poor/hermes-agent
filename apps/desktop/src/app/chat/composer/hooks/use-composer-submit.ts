@@ -352,19 +352,21 @@ export function useComposerSubmit({
     clearDraft()
 
     const submittedScope = activeQueueSessionKeyRef.current
+    // A fresh chat's scope is its fresh-draft bucket, not a session to queue into.
+    const queueKey = isFreshDraftScope(activeQueueSessionKey) ? null : activeQueueSessionKey
 
     // The draft is already cleared, so a refused or failed redirect must keep the only copy
     // (#68927): the canonical queue when the server owns it, the local queue otherwise, or the
     // composer itself when there is no queue yet (a new chat busy before its first session).
-    const canonical = serverOwnsComposerQueue(sessionId ?? activeQueueSessionKey)
+    const canonical = serverOwnsComposerQueue(sessionId ?? queueKey)
     const keep = () => {
-      if (!activeQueueSessionKey) {
+      if (!queueKey) {
         loadIntoComposer(text, [])
         stashAt(submittedScope, text, [])
       } else if (canonical) {
-        dispatchSubmit(text, [], undefined, { fromQueue: true, sessionId: sessionId ?? null, storedSessionId: activeQueueSessionKey })
+        dispatchSubmit(text, [], undefined, { fromQueue: true, sessionId: sessionId ?? null, storedSessionId: queueKey })
       } else {
-        enqueueQueuedPrompt(activeQueueSessionKey, { text, attachments: [] })
+        enqueueQueuedPrompt(queueKey, { text, attachments: [] })
       }
     }
 

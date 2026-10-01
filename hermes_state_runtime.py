@@ -6,7 +6,10 @@ SessionDB transaction owner, including its inode guard and SQLite retry policy.
 import json
 import uuid
 
-from agent.message_metadata import CANONICAL_ROW, DB_ROW_SNAPSHOT
+from agent.message_metadata import (
+    ABSORBED_MESSAGE_UIDS, CANONICAL_ROW, DB_ROW_SNAPSHOT, MERGED_TURN_PREFIX, MESSAGE_UID,
+    TOOL_CALL_UID, TOOL_CALL_UIDS,
+)
 from gateway.session_admission import admission_fingerprint
 
 
@@ -512,10 +515,12 @@ _MESSAGE_FIELDS = frozenset({
     'codex_reasoning_items', 'codex_message_items', 'platform_message_id', 'message_id',
     'observed', 'effect_disposition', '_compressed_summary', 'timestamp', 'api_content',
     'display_kind', 'display_metadata', '_row_id', '_canonical_content', DB_ROW_SNAPSHOT, CANONICAL_ROW,
+    MESSAGE_UID, ABSORBED_MESSAGE_UIDS, TOOL_CALL_UIDS, TOOL_CALL_UID, MERGED_TURN_PREFIX,
 })
 # Row state the owner's transcript repair stamps on each message (main mutates the caller's dict
 # in place; a worker gets it back as an annotation). None = absent, so a stale adoption is cleared.
-_ROW_ANNOTATION_KEYS = ('_row_id', 'timestamp', DB_ROW_SNAPSHOT, CANONICAL_ROW)
+_ROW_ANNOTATION_KEYS = ('_row_id', 'timestamp', DB_ROW_SNAPSHOT, CANONICAL_ROW,
+                        MESSAGE_UID, TOOL_CALL_UIDS, TOOL_CALL_UID)
 
 
 def row_annotations(messages):

@@ -23,7 +23,9 @@ it('branch hydration replaces source authority only after a successful destinati
   patchUiState({ sid: 'source', info: source, busy: true })
   const pending: Array<{ method: string; resolve: (value: any) => void }> = []
 
-  const request = vi.fn((method: string) => method === 'session.close'
+  // session.close and the fire-and-forget shared_metrics.slash_command settle at once; every
+  // other RPC waits for the test to resolve it in order.
+  const request = vi.fn((method: string) => method === 'session.close' || method === 'shared_metrics.slash_command'
     ? Promise.resolve({}) : new Promise(resolve => pending.push({ method, resolve })))
 
   const setHistoryItems = vi.fn()

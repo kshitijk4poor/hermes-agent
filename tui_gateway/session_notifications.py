@@ -771,7 +771,7 @@ def _hud_surface_note(session: dict) -> str:
     prior; voice-live -> the spoken-delegation contract with the recent transcript."""
     from gateway.session_surface import surface_note
     committed = {"surface": session.get("client_surface"), "voice_context": session.get("voice_live_context")}
-    return surface_note(committed, getattr(session.get("agent"), "valid_tool_names", None))
+    return surface_note(committed, session.get("agent"))
 
 
 def _prepend_note(run_message: Any, note: str) -> Any:

@@ -66,7 +66,7 @@ class GatewayTurnPersistenceMixin:
         # opened the chain: an internal follow-up, or a message not addressed to the bot, may go
         # silent; any other human one must not.
         from gateway.response_filters import is_machinery_display_kind, silence_allowed
-        from gateway.run_turn import _UNEXPECTED_SILENCE_REPLY
+        from gateway.run_turn import _unexpected_silence_reply
         _silence_kind = agent_result.get("queued_terminal_display_kind", persist_user_display_kind)
         _silence_reply_expected = agent_result.get("queued_terminal_reply_expected", reply_expected)
         if _intentional_silence and not silence_allowed(_silence_kind, _silence_reply_expected):
@@ -75,7 +75,7 @@ class GatewayTurnPersistenceMixin:
                 _platform_name, source.chat_id or "unknown",
             )
             _intentional_silence = False
-            response = _UNEXPECTED_SILENCE_REPLY
+            response = _unexpected_silence_reply()
         elif _intentional_silence and not is_machinery_display_kind(_silence_kind):
             logger.debug(
                 "silence marker suppressed on an unaddressed turn: platform=%s chat=%s",
@@ -88,8 +88,8 @@ class GatewayTurnPersistenceMixin:
         if response == "(empty)" and not _intentional_silence:
             from agent.turn_explainers import EMPTY_RESPONSE_EXPLANATION
 
-            _model = str(agent_result.get("model") or "").strip() or "The model"
-            response = "⚠️ " + EMPTY_RESPONSE_EXPLANATION.format(model=_model)
+            _model = str(agent_result.get("model") or "").strip() or t("gateway.errors.empty_response_model_label")
+            response = t("gateway.shared.warn_passthrough", error=EMPTY_RESPONSE_EXPLANATION.format(model=_model))
         agent_messages = agent_result.get("messages", [])
         logger.info(
             "response ready: platform=%s chat=%s session=%s time=%.1fs api_calls=%d response=%d chars",
@@ -134,9 +134,10 @@ class GatewayTurnPersistenceMixin:
                 )
         return response, _intentional_silence, agent_messages
 
-    # reasoning_style → (header line, per-line quote prefix for blank / non-blank lines)
+    # reasoning_style → (header catalog key, per-line quote prefix for blank / non-blank lines)
     _REASONING_QUOTE_STYLES = {
-        "subtext": ("-# 💭 Reasoning", "-# ", "-#"), "blockquote": ("> 💭 **Reasoning:**", "> ", ">")
+        "subtext": ("gateway.reasoning.quote_label_discord", "-# ", "-#"),
+        "blockquote": ("gateway.reasoning.quote_label_md", "> ", ">"),
     }
 
     def _hmwa_prepend_reasoning(self, agent_result, response, source, _intentional_silence):
@@ -160,7 +161,7 @@ class GatewayTurnPersistenceMixin:
         # Collapse long reasoning to keep messages readable
         lines = last_reasoning.strip().splitlines()
         if len(lines) > 15:
-            display_reasoning = "\n".join(lines[:15]) + f"\n_... ({len(lines) - 15} more lines)_"
+            display_reasoning = "\n".join(lines[:15]) + t("gateway.reasoning.more_lines", count=len(lines) - 15)
         else:
             display_reasoning = last_reasoning.strip()
         # Per-platform render style: Discord defaults to "-# " subtext, others keep the code block.
@@ -173,12 +174,12 @@ class GatewayTurnPersistenceMixin:
             _reasoning_style = "code"
         _quote = self._REASONING_QUOTE_STYLES.get(_reasoning_style)
         if _quote:
-            header, prefix, empty = _quote
+            header_key, prefix, empty = _quote
             _quoted = "\n".join(f"{prefix}{ln}" if ln else empty for ln in display_reasoning.splitlines())
-            return f"{header}\n{_quoted}\n\n{response}"
+            return f"{t(header_key)}\n{_quoted}\n\n{response}"
         # Escape ``` inside reasoning so inner fences don't break the outer code block.
         display_reasoning = escape_code_fences_for_display(display_reasoning)
-        return f"💭 **Reasoning:**\n```\n{display_reasoning}\n```\n\n{response}"
+        return t("gateway.reasoning.block", reasoning=display_reasoning, response=response)
 
     def _hmwa_runtime_footer_line(self, agent_result, source, _turn_seconds):
         """Runtime-metadata footer for the FINAL message of the turn; off by default
@@ -339,10 +340,7 @@ class GatewayTurnPersistenceMixin:
                 await asyncio.to_thread(
                     self._sync_telegram_topic_binding, source, session_entry, reason="compression-exhausted-reset",
                 )
-            response = (response or "") + (
-                "\n\n🔄 Session auto-reset — the conversation exceeded the maximum context size and "
-                "could not be compressed further. Your next message will start a fresh session."
-            )
+            response = (response or "") + t("gateway.session.auto_reset_context_exhausted")
         return response, session_entry
 
     @staticmethod
@@ -510,11 +508,11 @@ class GatewayTurnPersistenceMixin:
 
     # Chat-side next steps keyed by HTTP status; Hermes commands only (/login is the gateway's own
     # sign-in, `{relogin}` the profile-aware host equivalent, filled from the turn's agent provider).
+    # Values are catalog keys (``gateway.errors.hint_*``); 401 carries a ``{relogin}`` placeholder.
     _STATUS_HINTS = {
-        401: (" Your sign-in to the AI model service has expired or the API key is wrong. "
-              "Use /login here, or run `{relogin}` on the host."),
-        402: " Your AI model service balance or quota is used up. Top it up on the service's website, or use /model to switch models.",
-        529: " The AI model service is temporarily overloaded. Wait a moment, then use /retry.",
+        401: "gateway.errors.hint_auth",
+        402: "gateway.errors.hint_quota",
+        529: "gateway.errors.hint_overloaded",
     }
 
     async def _hmwa_agent_error_reply(self, e, event, source, session_entry, session_key, prepared):
@@ -527,8 +525,8 @@ class GatewayTurnPersistenceMixin:
         if status_code in {400, 500} and len(prepared.history) > 50:
             # Context overflow / payload too large: a deterministic rejection (#107567), and the same
             # no-grow rule as the persist path (#1630) — nothing is written into an oversized session.
-            from gateway.run import _CONTEXT_OVERFLOW_REPLY
-            return _CONTEXT_OVERFLOW_REPLY
+            from gateway.run import _context_overflow_reply
+            return _context_overflow_reply()
         # Replay can coalesce inputs; only this input's durable marker establishes ownership.
         try:
             if prepared.message_text is not None and session_entry is not None:
@@ -544,12 +542,13 @@ class GatewayTurnPersistenceMixin:
         except Exception:
             logger.debug("Failed to persist inbound user message after agent exception", exc_info=True)
         # Never expose raw exception types/messages to end users (info-leakage risk).
-        status_hint = self._STATUS_HINTS.get(status_code, "")
+        _hint_key = self._STATUS_HINTS.get(status_code)
+        status_hint = t(_hint_key) if _hint_key and status_code != 401 else ""
         if status_code == 401:
             from agent.turn_failure_copy import relogin_command_hint
 
             _turn_agent = getattr(self._session_state(session_key).turn, "agent", None)
-            status_hint = status_hint.format(relogin=relogin_command_hint(getattr(_turn_agent, "provider", None)))
+            status_hint = t(_hint_key, relogin=relogin_command_hint(getattr(_turn_agent, "provider", None)))
         elif status_code == 429:
             # Plan usage limit (resets on a schedule) vs a transient rate limit
             _err_json = {}
@@ -559,19 +558,16 @@ class GatewayTurnPersistenceMixin:
                 _err_json = {}
             _resets_in = _err_json.get("resets_in_seconds")
             if _err_json.get("type") != "usage_limit_reached":
-                status_hint = " You are being rate-limited. Please wait a moment and try again."
+                status_hint = t("gateway.errors.hint_rate_limited")
             elif _resets_in and _resets_in > 0:
                 import math
-                status_hint = f" Your plan's usage limit has been reached. It resets in ~{math.ceil(_resets_in / 3600)}h."
+                status_hint = t("gateway.errors.hint_usage_limit_resets", hours=math.ceil(_resets_in / 3600))
             else:
-                status_hint = " Your plan's usage limit has been reached. Please wait until it resets."
+                status_hint = t("gateway.errors.hint_usage_limit")
         elif status_code == 400:
-            status_hint = " The AI model service rejected the request."
+            status_hint = t("gateway.errors.hint_rejected")
         return self._hmwa_add_failed_turn_notice(
-            f"⚠️ Something went wrong and I couldn't finish this reply.{status_hint}\n"
-            "Use /retry to try again, or /new to start a fresh conversation. "
-            "Technical details are in the gateway log (`hermes logs`).",
-            PARTIAL_FAILED_TURN_NOTICE,
+            t("gateway.errors.generic_failed_with_hint", hint=status_hint), PARTIAL_FAILED_TURN_NOTICE,
         )
 
     def _hmwa_discard_stale_result(self, source, _quick_key, run_generation):

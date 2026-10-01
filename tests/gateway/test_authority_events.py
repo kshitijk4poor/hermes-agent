@@ -116,7 +116,10 @@ async def test_replay_matches_subscription_watermark_or_requires_snapshot(tmp_pa
             await turn(6)
         raced = (await since(before_race['replay_epoch'], before_race['last_sequence']))['result']
         assert raced['snapshot_required'], 'eviction during stamp reused an old epoch/sequence'
-        assert raced['replay_epoch'] != before_race['replay_epoch']
+        # Ring eviction keeps the session's seq numbering (#100122), so the epoch may stay; what
+        # must hold is that no sequence the client already saw is reused under it.
+        assert (raced['replay_epoch'] != before_race['replay_epoch']
+                or raced['last_sequence'] > before_race['last_sequence'])
     finally:
         await a.close()
         await b.close()

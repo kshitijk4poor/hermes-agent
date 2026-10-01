@@ -1,13 +1,13 @@
 import { spawn } from 'node:child_process'
 import crypto from 'node:crypto'
 
-import { hiddenWindowsChildOptions } from './windows-child-options'
+import { hiddenWindowsChildOptions, windowsShellCommand } from './windows-child-options'
 
 export function runGatewayEnsure(
   backend, cwd: string, home: string, parentEnv: NodeJS.ProcessEnv = process.env
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(backend.command, backend.args, hiddenWindowsChildOptions({ cwd, env: { ...parentEnv, HERMES_HOME: home, ...backend.env }, shell: backend.shell, stdio: ['ignore', 'pipe', 'pipe'] }))
+    const child = spawn(windowsShellCommand(backend.command, Boolean(backend.shell)), backend.args, hiddenWindowsChildOptions({ cwd, env: { ...parentEnv, HERMES_HOME: home, ...backend.env }, shell: backend.shell, stdio: ['ignore', 'pipe', 'pipe'] }))
     let stdout = ''
     let stderr = ''
     // Only the bounded ensure client is ours. Never retain/kill its detached owner.

@@ -38,12 +38,14 @@ describe('createSlashHandler', () => {
     patchUiState({ sid: 'owner' })
     const ctx = buildCtx()
     let reject!: (error: unknown) => void
-    ctx.gateway.gw.request.mockReturnValueOnce(new Promise((_, fail) => { reject = fail }))
+    ctx.gateway.gw.request.mockImplementation((method: string) =>
+      method === 'slash.exec' ? new Promise((_, fail) => { reject = fail }) : Promise.resolve({})
+    )
     createSlashHandler(ctx)('/unknown-command')
     patchUiState({ sid: 'other' })
     reject(new Error('worker failed'))
     await new Promise(resolve => setImmediate(resolve))
-    expect(ctx.gateway.gw.request).toHaveBeenCalledTimes(1)
+    expect(gatewayWork(ctx).map(([method]) => method)).toEqual(['slash.exec'])
   })
 
   it('opens the unified sessions overlay for /resume', () => {

@@ -427,10 +427,13 @@ class AuthorityConnection:
                                             params["prompt_id"], {"choice": params["choice"]})
 
     async def respond_clarify(self, ref, params):
-        if set(params) != {"session_id", "execution_generation", "prompt_id", "answer"}:
+        """``answers`` ({qid: text | null}) submits, no ``answers`` cancels; ``answer`` is the
+        single-question form."""
+        identity = {"session_id", "execution_generation", "prompt_id"}
+        if not identity <= set(params) or len(set(params) - identity) > 1 or set(params) - identity - {"answer", "answers"}:
             raise RuntimeStoreError("invalid_params")
         return await self.authority.respond(self.actor, ref, params["execution_generation"],
-            params["prompt_id"], {"answer": params["answer"]}, kind="clarify")
+            params["prompt_id"], {k: v for k, v in params.items() if k not in identity}, kind="clarify")
 
     async def close(self):
         for sibling in self._siblings.values():

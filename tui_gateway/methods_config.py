@@ -436,13 +436,23 @@ def _(rid, params: dict) -> dict:
         requested = str(params.get("provider") or "").strip() or None
 
         def probe(profile, scoped):
+            startup_model, startup_provider = _resolve_startup_runtime()
+
             def resolve():
                 if requested:
                     from hermes_cli.runtime_provider import resolve_runtime_provider
-                    model, _startup_provider = _resolve_startup_runtime()
-                    return model, resolve_runtime_provider(requested=requested, target_model=model or None)
+                    return startup_model, resolve_runtime_provider(
+                        requested=requested, target_model=startup_model or None)
                 return _resolve_agent_model_runtime(None, None)
-            return {**check_runtime_readiness(requested, strict_profile_scope=bool(profile), resolve=resolve),
+            # Without an explicit ``provider`` this probe ran the startup pin and then the
+            # configured fallback chain; when the chain only resolves at its tail, the runtime
+            # stops there and the failure blames a provider the user never pinned (#124939).
+            # Attribute failures to the pin (startup pin, else the config model pin).
+            cfg_model = _load_cfg().get("model")
+            pinned = (requested or startup_provider
+                      or (str(cfg_model.get("provider") or "").strip() if isinstance(cfg_model, dict) else ""))
+            return {**check_runtime_readiness(requested, strict_profile_scope=bool(profile), resolve=resolve,
+                                              blame=pinned or None),
                     **scoped}
         return _readiness_check(rid, params, probe, probe_key=f"runtime:{requested or ''}",
                                 wait_seconds=_READINESS_SHARE_WAIT_SECONDS)

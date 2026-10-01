@@ -186,9 +186,10 @@ def _prompt_frame(authority, ref, row, worker, frame):
             raise RuntimeStoreError('invalid_worker_frame')
         prompt_id = data.get('request_id')
     else:
-        if (set(frame) != {'type', 'prompt_id', 'question', 'choices', 'multi_select'}
-                or not isinstance(frame['question'], str) or not isinstance(frame['choices'], list)
-                or any(not isinstance(c, str) for c in frame['choices']) or type(frame['multi_select']) is not bool):
+        questions = frame.get('questions')
+        if (set(frame) != {'type', 'prompt_id', 'questions'} or not isinstance(questions, list)
+                or not 1 <= len(questions) <= 5 or not all(_worker_question(q) for q in questions)
+                or len({q['qid'] for q in questions}) != len(questions)):
             raise RuntimeStoreError('invalid_worker_frame')
         prompt_id = frame['prompt_id']
     if not isinstance(prompt_id, str) or not prompt_id or prompt_id in controls.pending:
@@ -197,10 +198,16 @@ def _prompt_frame(authority, ref, row, worker, frame):
     if kind == 'approval':
         authority.register_approval(ref.session_id, row['generation'], live.route, data)
     else:
-        entry = SimpleNamespace(clarify_id=prompt_id, question=frame['question'], choices=frame['choices'],
-                                multi_select=frame['multi_select'], event=threading.Event())
-        authority.register_clarify(ref.session_id, row['generation'], entry)
+        entry = SimpleNamespace(clarify_id=prompt_id, event=threading.Event())
+        authority.register_clarify(ref.session_id, row['generation'], entry, questions)
     return True
+
+
+def _worker_question(question):
+    return (isinstance(question, dict) and set(question) == {'qid', 'question', 'choices', 'multi_select'}
+            and isinstance(question['qid'], str) and bool(question['qid']) and isinstance(question['question'], str)
+            and isinstance(question['choices'], list) and all(isinstance(c, str) for c in question['choices'])
+            and type(question['multi_select']) is bool)
 
 
 def _worker_env(authority):

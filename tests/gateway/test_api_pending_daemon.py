@@ -28,7 +28,7 @@ class PromptPeer(BaseHTTPRequestHandler):
             approval = 'ASK_APPROVAL' in text
             name = 'terminal' if approval else 'clarify'
             args = {'command': 'rm -rf ' + str(self.server.target)} if approval else {
-                'question': 'Choose the answer', 'choices': ['BLUE', 'GREEN']}
+                'questions': [{'question': 'Choose the answer', 'choices': ['BLUE', 'GREEN']}]}
             message = {'role': 'assistant', 'content': None, 'tool_calls': [{
                 'id': 'call_control', 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(args)}}]}
         finish = 'tool_calls' if 'tool_calls' in message else 'stop'

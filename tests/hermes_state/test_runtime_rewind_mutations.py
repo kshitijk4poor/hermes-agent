@@ -32,3 +32,24 @@ def test_rewind_refuses_queued_work(tmp_path):
             rt.mutate_runtime_session(db, epoch=epoch, principal_id='human', session_id='s', request_id='rewind',
                 expected_revision=0, expected_generation=0, operation='rewind', payload={'target_message_id': target})
         assert db.get_messages('s')[0]['content'] == 'keep'
+
+
+def test_runtime_composite_rewind_receipt_carries_the_replacement_rows_uid(tmp_path):
+    """The runtime mutation receipt exposes the replacement row's identity, not just its row id."""
+    from agent.context_compressor import HISTORICAL_TASK_HEADING, SUMMARY_PREFIX, _SUMMARY_END_MARKER
+
+    with SessionDB(db_path=tmp_path / 'state.db') as db:
+        db.create_session('s', source='test')
+        db.append_message(session_id='s', role='user', content='older ask')
+        db.append_message(session_id='s', role='assistant', content='done')
+        carrier = f"{SUMMARY_PREFIX}\n{HISTORICAL_TASK_HEADING}\nold task\n\n{_SUMMARY_END_MARKER}\n\nREAL ASK"
+        target = db.append_message(session_id='s', role='user', content=carrier)
+        db.append_message(session_id='s', role='assistant', content='failed')
+        epoch = rt.begin_runtime_epoch(db, instance_id='owner')
+        receipt = rt.mutate_runtime_session(
+            db, epoch=epoch, principal_id='human', session_id='s', request_id='rewind',
+            expected_revision=0, expected_generation=0, operation='rewind',
+            payload={'target_message_id': target, 'preserve_compaction_handoff': True})
+        head = db.get_messages_as_conversation('s', include_row_ids=True)[-1]
+        assert head['_row_id'] == receipt['replacement_message_id']
+        assert receipt['replacement_message_uid'] == head['message_uid']

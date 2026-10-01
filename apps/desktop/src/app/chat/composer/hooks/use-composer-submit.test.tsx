@@ -433,6 +433,21 @@ describe('useComposerSubmit busy-turn routing', () => {
     await waitFor(() => expect(loadIntoComposer).toHaveBeenCalledWith('keep me', []))
   })
 
+  it('keeps a refused steer in the fresh-draft bucket instead of submitting to it as a session', async () => {
+    const freshKey = '__new__:fresh-lifecycle'
+    const { hook, loadIntoComposer, onSteer, onSubmit, stashAt } = renderSubmitHook({ busy: true, sessionKey: freshKey, text: 'keep me fresh' })
+    onSteer.mockResolvedValueOnce(false)
+
+    act(() => {
+      hook.result.current.submitDraft()
+    })
+
+    await waitFor(() => expect(loadIntoComposer).toHaveBeenCalledWith('keep me fresh', []))
+    expect(stashAt).toHaveBeenCalledWith(freshKey, 'keep me fresh', [])
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(getQueuedPrompts(freshKey)).toEqual([])
+  })
+
   it('queues a steer whose redirect RPC fails instead of losing it', async () => {
     const { hook, onSteer } = renderSubmitHook({ busy: true, text: 'still here' })
     onSteer.mockRejectedValueOnce(new Error('request timed out: session.redirect'))

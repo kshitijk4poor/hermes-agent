@@ -40,7 +40,8 @@ function mount(canonical = false, extra: (method: string, params: any) => unknow
 
     if (method === 'image.detach') {
       images.set(params.session_id, (images.get(params.session_id) ?? []).filter(path => path !== params.path))
-    } else if (!method.startsWith('complete.')) {
+    } else if (!method.startsWith('complete.') && method !== 'shared_metrics.slash_command') {
+      // Every typed slash command also reports a fire-and-forget usage metric.
       throw new Error(`Unexpected RPC: ${method}`)
     }
 
