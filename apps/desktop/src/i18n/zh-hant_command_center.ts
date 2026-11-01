@@ -1,4 +1,5 @@
 import type { TranslationOverrides } from './define-locale'
+import { zhHantCronControl } from './zh-hant_cron_control'
 
 export const zhHantCommandCenter = {
   commandCenter: {
@@ -320,8 +321,10 @@ export const zhHantCommandCenter = {
     exported: '設定檔已匯出',
     failedImport: '匯入設定檔失敗',
     failedExport: '匯出設定檔失敗',
+    exportNeedsHost: name => `瀏覽器無法儲存設定檔封存。請在 Hermes 主機上執行：hermes profile export ${name}`,
     allProfiles: '全部設定檔',
     showAllProfiles: '顯示全部設定檔',
+    notServedHere: '此處未提供',
     switchToProfile: name => `切換至 ${name}`,
     switchToConnection: name => `切換至 ${name}`,
     switchConnectionFailed: name => `無法連線至 ${name}`,
@@ -441,6 +444,7 @@ export const zhHantCommandCenter = {
   },
 
   cron: {
+    control: zhHantCronControl,
     close: '關閉排程',
     title: '排程工作',
     count: count => `${count} 個工作`,
@@ -505,6 +509,7 @@ export const zhHantCommandCenter = {
     last: '上次：',
     next: '下次：',
     noRuns: '尚無執行',
+    queuedRun: '排隊中的執行',
     manage: '管理',
     showRuns: '顯示執行記錄',
     hideRuns: '隱藏執行記錄',
