@@ -139,10 +139,12 @@ async def test_device_flow_normalizes_issuer_and_asks_google_for_offline_access(
 
     httpx = sdk_httpx()
 
-    # Issuer check: the advertised host-only server arrives as ``str(AnyHttpUrl)`` with a trailing
-    # "/"; both slash forms match Google's slash-less document issuer, a different issuer still fails.
+    # Issuer check: a root issuer matches with or without its trailing slash (Google advertises
+    # "accounts.google.com/" and its document says "accounts.google.com"); a different issuer, a
+    # path-scoped slash variant or a doubled slash still fails, as in the browser flow.
     for document_issuer, advertised, accepted in (
-            (GOOGLE, f"{GOOGLE}/", True), (f"{GOOGLE}/", f"{GOOGLE}/", True), ("https://evil.example", f"{GOOGLE}/", False)):
+            (GOOGLE, f"{GOOGLE}/", True), (f"{GOOGLE}/", f"{GOOGLE}/", True), ("https://evil.example", f"{GOOGLE}/", False),
+            (f"{GOOGLE}/o", f"{GOOGLE}/o/", False), (f"{GOOGLE}//", GOOGLE, False)):
         def handler(request, document_issuer=document_issuer):
             doc = _asm_doc(document_issuer, device_authorization_endpoint=f"{GOOGLE}/device/code",
                            grant_types_supported=["authorization_code", "refresh_token",

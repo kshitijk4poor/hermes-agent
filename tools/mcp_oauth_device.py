@@ -61,7 +61,7 @@ async def _discover(client, provider):
 
 async def _device_metadata(client, server_url, auth_server_url):
     """Issuer-bound device metadata of one authorization server; raises when it is unusable."""
-    from mcp.client.auth.utils import build_oauth_authorization_server_metadata_discovery_urls
+    from mcp.client.auth.utils import build_oauth_authorization_server_metadata_discovery_urls, issuers_match
 
     from tools.mcp_oauth_provider import metadata_issued_by_origin
 
@@ -73,17 +73,15 @@ async def _device_metadata(client, server_url, auth_server_url):
         if not data.get("device_authorization_endpoint"):
             raise RuntimeError("Server does not advertise device authorization; use --flow browser if supported")
         metadata = DeviceOAuthMetadata.model_validate(data)
-        # The advertised identifier reaches here as str(AnyHttpUrl) with a trailing "/" (pydantic
-        # normalizes a host-only URL to its root path) while the document issuer keeps the advertised
-        # form, so the SDK's exact-string check (RFC 8414 §3.3) would reject Google's issuer
-        # ("https://accounts.google.com" != "https://accounts.google.com/"). Compare both sides
-        # root-slash-normalized, the same convention _metadata_issuer and the refresh-token issuer
-        # binding already use; any other mismatch is still rejected.
-        expected = auth_server_url.rstrip("/") if auth_server_url else auth_server_url
-        if expected and not metadata_issued_by_origin(metadata, expected, response):
-            if str(metadata.issuer).rstrip("/") != expected:
-                from mcp.client.auth.exceptions import OAuthFlowError
-                raise OAuthFlowError(f"Authorization server metadata issuer mismatch: {metadata.issuer} != {expected}")
+        # Google advertises "https://accounts.google.com/" while its document names
+        # "https://accounts.google.com": a root issuer with and without its trailing slash is one
+        # server (the SDK's issuers_match, the rule the browser flow applies). Path-scoped servers
+        # still need the exact issuer, or the origin-issued shape (Strava, metadata_issued_by_origin).
+        if auth_server_url and not (metadata_issued_by_origin(metadata, auth_server_url, response)
+                                    or issuers_match(str(metadata.issuer), auth_server_url)):
+            from mcp.client.auth.exceptions import OAuthFlowError
+            raise OAuthFlowError(
+                f"Authorization server metadata issuer mismatch: {metadata.issuer} != {auth_server_url}")
         grants = metadata.grant_types_supported
         if grants is not None and DEVICE_GRANT not in grants:
             raise RuntimeError("Server does not advertise the device_code grant")
