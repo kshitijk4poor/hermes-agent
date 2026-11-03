@@ -84,12 +84,13 @@ def _connect_local_default(port: int, system: str, announce) -> str | None:
     return None
 
 
-def _reap_profile_browsers() -> None:
+def _reap_profile_browsers(*, close_tabs: bool = True) -> None:
     """Close the current profile's browsers only: the live connection is per profile, so other
-    profiles' sessions on a multiplexed gateway keep theirs."""
+    profiles' sessions on a multiplexed gateway keep theirs. A swap reaps twice; only the first
+    (``close_tabs``) closes the agent's tabs, on the old endpoint, so a dead one is dialled once."""
     from hermes_constants import hermes_home_key
     from tools.browser_session_lifecycle import cleanup_profile_browsers
-    cleanup_profile_browsers(hermes_home_key())
+    cleanup_profile_browsers(hermes_home_key(), close_tabs=close_tabs)
 
 
 def _browser_connect(rid, params: dict) -> dict:
@@ -149,7 +150,7 @@ def _browser_connect(rid, params: dict) -> dict:
         # supervisor closed) and AFTER (the default task's cached supervisor drains against the new URL).
         _reap_profile_browsers()
         set_live_cdp_override(normalized)
-        _reap_profile_browsers()
+        _reap_profile_browsers(close_tabs=False)
     except Exception as e:
         return _err(rid, 5031, str(e))
     return _ok(rid, {"connected": True, "url": normalized,
@@ -160,14 +161,24 @@ def _browser_disconnect(rid) -> dict:
     # Reap, drop this profile's override, reap again — same swap window as ``_browser_connect``.
     from tools.browser_session_cdp import set_live_cdp_override
 
-    def reap() -> None:
+    def reap(close_tabs: bool) -> None:
         with contextlib.suppress(Exception):
-            _reap_profile_browsers()
+            _reap_profile_browsers(close_tabs=close_tabs)
 
-    reap()
+    reap(True)
     set_live_cdp_override(None)
-    reap()
+    reap(False)
     return _ok(rid, {"connected": False})
+
+
+def _cleanup_browsers_before_exit() -> None:
+    """Browser teardown at TUI/Desktop exit, before interpreter shutdown, as the gateway and classic CLI do:
+    from ``atexit`` asyncio cannot resolve a hostname CDP endpoint any more, so the agent's tabs there would
+    stay open. Later exit passes find no records left and dial nothing."""
+    from contextlib import suppress
+    with suppress(Exception):
+        from tools.browser_session_lifecycle import cleanup_all_browsers
+        cleanup_all_browsers()
 
 
 def register(server) -> None:

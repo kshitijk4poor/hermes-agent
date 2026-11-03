@@ -290,7 +290,7 @@ def _browser_connect(cli, cdp_url: str) -> None:
         return
     cdp_url, port = normalized
     # Clear any existing browser sessions so the next tool call uses the new backend
-    _probe("tools.browser_session_lifecycle", "cleanup_all_browsers", None)
+    _probe("tools.browser_session_lifecycle", "swap_browsers", None)
     print()
     # Already serving CDP? For the default-local URL probe both loopbacks: a squatter
     # on 127.0.0.1:<port> (e.g. an IDE debugger) can push the browser to bind [::1] only.
@@ -330,10 +330,8 @@ def _browser_disconnect(cli) -> None:
         return _say_block(_t("browser.already_default"))
     os.environ.pop("BROWSER_CDP_URL", None)
     with suppress(Exception):
-        from tools.browser_session_lifecycle import cleanup_all_browsers
-        from tools.browser_session_cdp import stop_cdp_supervisor
-        stop_cdp_supervisor("default")
-        cleanup_all_browsers()
+        from tools.browser_session_lifecycle import swap_browsers
+        swap_browsers()  # every CDP supervisor too, but a running call's
     _say_block(_t("browser.disconnected"), f"   {_t('browser.reverted')}")
     if hasattr(cli, '_pending_input'):
         cli._pending_input.put(

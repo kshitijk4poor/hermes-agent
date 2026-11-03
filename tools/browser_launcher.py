@@ -31,7 +31,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Collection, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -808,10 +808,10 @@ def _last_holder_out(record: Path, browser: LaunchedBrowser) -> bool:
     return browser.owned or data is not None
 
 
-def stop_all_browsers() -> None:
-    """Stop every browser this process launched. Idempotent."""
+def stop_all_browsers(keep: Collection[str] = ()) -> None:
+    """Stop every browser this process launched but ``keep``'s (a running browser_exec call's). Idempotent."""
     with _lock:
-        keys = list(_browsers)
+        keys = [key for key in _browsers if key not in keep]
     for key in keys:
         stop_browser(key)
 

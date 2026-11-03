@@ -118,7 +118,7 @@ def test_browser_manage_connect_sets_env_and_cleans_twice(monkeypatch):
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     cleanup_calls: list[str] = []
 
-    def _cleanup_all(_key):
+    def _cleanup_all(_key, **_kw):
         cleanup_calls.append(_live_cdp())
 
     fake = types.SimpleNamespace(
@@ -145,7 +145,7 @@ def test_browser_manage_connect_sets_env_and_cleans_twice(monkeypatch):
 def test_browser_manage_connect_defaults_to_loopback(monkeypatch):
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     with patch.dict(sys.modules, {"tools.browser_session_lifecycle": fake}):
@@ -172,7 +172,7 @@ def test_browser_manage_connect_default_local_reports_launch_hint(monkeypatch):
         lambda evt, sid, payload=None: emitted.append((evt, payload or {})),
     )
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     with patch.dict(sys.modules, {"tools.browser_session_lifecycle": fake}):
@@ -221,7 +221,7 @@ def test_browser_manage_connect_no_session_skips_progress_events(monkeypatch):
         lambda evt, sid, payload=None: emitted.append((evt, payload or {})),
     )
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     with patch.dict(sys.modules, {"tools.browser_session_lifecycle": fake}):
@@ -256,7 +256,7 @@ def test_browser_manage_connect_handles_null_url(monkeypatch):
     by the outer 5031 catch."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     with patch.dict(sys.modules, {"tools.browser_session_lifecycle": fake}):
@@ -291,7 +291,7 @@ def test_browser_manage_connect_default_local_retries_after_launch(monkeypatch):
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
 
@@ -343,7 +343,7 @@ def test_browser_manage_connect_finds_ipv6_only_browser(monkeypatch):
     endpoint instead of timing out against the squatter."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
 
@@ -381,7 +381,7 @@ def test_browser_manage_connect_squatted_port_launches_on_alternate(monkeypatch)
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     monkeypatch.setattr(server.time, "sleep", lambda _seconds: None)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
 
@@ -430,7 +430,7 @@ def test_browser_manage_connect_rejects_unreachable_endpoint(monkeypatch):
     set_live_cdp_override("http://existing:9222")
     cleanup_calls: list[str] = []
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: cleanup_calls.append(
+        cleanup_profile_browsers=lambda _key, **_kw: cleanup_calls.append(
             _live_cdp()
         ),
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
@@ -457,7 +457,7 @@ def test_browser_manage_connect_normalizes_bare_host_port(monkeypatch):
     tool calls (Copilot review on #17120)."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     with patch.dict(sys.modules, {"tools.browser_session_lifecycle": fake}):
@@ -483,7 +483,7 @@ def test_browser_manage_connect_strips_discovery_path(monkeypatch):
     produce a duplicate path (Copilot review round-2 on #17120)."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     with patch.dict(sys.modules, {"tools.browser_session_lifecycle": fake}):
@@ -506,7 +506,7 @@ def test_browser_manage_connect_preserves_devtools_browser_endpoint(monkeypatch)
     survive verbatim — we only collapse discovery-style paths."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     concrete = "ws://browserbase.example/devtools/browser/abc123"
@@ -545,7 +545,7 @@ def test_browser_manage_connect_local_devtools_ws_preserves_path(monkeypatch):
     ``/devtools/browser/...`` path or it breaks valid local CDP connects."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     concrete = "ws://127.0.0.1:9222/devtools/browser/abc123"
@@ -606,7 +606,7 @@ def test_browser_manage_connect_concrete_ws_skips_http_probe(monkeypatch):
     The HTTP probe used to reject these even though they're valid."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     concrete = "wss://chrome.browserless.io/devtools/browser/sess-1"
@@ -650,7 +650,7 @@ def test_browser_manage_connect_concrete_ws_tcp_unreachable(monkeypatch):
     can never succeed for these URLs anyway)."""
     monkeypatch.delenv("BROWSER_CDP_URL", raising=False)
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: None,
+        cleanup_profile_browsers=lambda _key, **_kw: None,
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
     )
     concrete = "ws://offline.example/devtools/browser/missing"
@@ -675,7 +675,7 @@ def test_browser_manage_disconnect_drops_env_and_cleans(monkeypatch):
     set_live_cdp_override("http://127.0.0.1:9222")
     cleanup_count = {"n": 0}
     fake = types.SimpleNamespace(
-        cleanup_profile_browsers=lambda _key: cleanup_count.__setitem__(
+        cleanup_profile_browsers=lambda _key, **_kw: cleanup_count.__setitem__(
             "n", cleanup_count["n"] + 1
         ),
         _get_cdp_override=lambda: os.environ.get("BROWSER_CDP_URL", ""),
