@@ -18,7 +18,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Collection, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from tools.browser_supervisor_dialogs import (
     DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S, RECENT_DIALOGS_MAX, _VALID_POLICIES, DialogRecord,
@@ -557,19 +557,21 @@ class _SupervisorRegistry:
         if supervisor is not None:
             supervisor.stop()
 
-    def stop_home(self, home_key: str) -> None:
-        """Stop the supervisors one profile home started (``/browser connect`` on a multiplexed gateway)."""
+    def stop_home(self, home_key: str, keep: Collection[str] = ()) -> None:
+        """Stop the supervisors one profile home started (``/browser connect`` on a multiplexed gateway),
+        except ``keep``'s (a running browser_exec call's)."""
         with self._lock:
-            tasks = [task for task, home in self._home_by_task.items() if home == home_key]
+            tasks = [task for task, home in self._home_by_task.items() if home == home_key and task not in keep]
         for task_id in tasks:
             self.stop(task_id)
 
-    def stop_all(self) -> None:
-        """Stop every running supervisor. For shutdown / test teardown."""
+    def stop_all(self, keep: Collection[str] = ()) -> None:
+        """Stop every running supervisor but ``keep``'s. For shutdown / test teardown / a backend swap."""
         with self._lock:
-            items = list(self._by_task.values())
-            self._by_task.clear()
-            self._home_by_task.clear()
+            tasks = [task for task in self._by_task if task not in keep]
+            items = [self._by_task.pop(task) for task in tasks]
+            for task in tasks:
+                self._home_by_task.pop(task, None)
         for supervisor in items:
             supervisor.stop()
 

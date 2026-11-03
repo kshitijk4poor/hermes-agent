@@ -195,6 +195,14 @@ async def standalone_lifespan(app: "FastAPI"):
             logger.warning("managed local runtime shutdown failed", exc_info=True)
         if desktop_owned:
             _terminate_desktop_managed_gateway()
+        # Browser teardown while asyncio can still resolve a hostname CDP endpoint (atexit cannot): the
+        # agent's tabs on a shared browser close, as on gateway and CLI exit.
+        try:
+            from tools.browser_session_lifecycle import cleanup_all_browsers
+
+            await asyncio.to_thread(cleanup_all_browsers)
+        except Exception:
+            logger.warning("browser cleanup at backend shutdown failed", exc_info=True)
 
 
 @asynccontextmanager

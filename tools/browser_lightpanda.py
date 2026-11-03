@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Collection, Dict, Optional, Tuple
 
 from utils import atomic_json_write
 
@@ -275,10 +275,10 @@ def stop_lightpanda(session_name: str) -> None:
         logger.debug("Stopped lightpanda serve for session %s", session_name)
 
 
-def stop_all_lightpanda() -> None:
-    """Stop every server this process started. Idempotent; safe from atexit."""
+def stop_all_lightpanda(keep: Collection[str] = ()) -> None:
+    """Stop every server this process started but ``keep``'s (a running call's). Idempotent; safe from atexit."""
     with _servers_lock:
-        names = list(_servers)
+        names = [name for name in _servers if name not in keep]
     for name in names:
         try:
             stop_lightpanda(name)

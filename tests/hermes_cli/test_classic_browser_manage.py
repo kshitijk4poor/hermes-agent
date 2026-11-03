@@ -109,8 +109,9 @@ def homes(tmp_path, monkeypatch):
     from tools import browser_session_cdp
     monkeypatch.setattr(browser_session_cdp, "_live_overrides", {})
     reaps = []
-    monkeypatch.setattr(lifecycle, "cleanup_profile_browsers", reaps.append)
-    monkeypatch.setattr(lifecycle, "cleanup_all_browsers", lambda: reaps.append("ALL"))
+    monkeypatch.setattr(lifecycle, "cleanup_profile_browsers", lambda key, **_kw: reaps.append(key))
+    monkeypatch.setattr(lifecycle, "cleanup_all_browsers", lambda **_kw: reaps.append("ALL"))
+    monkeypatch.setattr(lifecycle, "swap_browsers", lambda: reaps.append("ALL"))
     cdp = ThreadingHTTPServer(("127.0.0.1", 0), _Cdp)
     threading.Thread(target=cdp.serve_forever, daemon=True).start()
     yield server, launch, bee, f"http://127.0.0.1:{cdp.server_port}", reaps
