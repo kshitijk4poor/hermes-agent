@@ -1,8 +1,8 @@
 """Memory status rollup for ``/api/status``.
 
 Read side for signals the gateway already persists: the 30s ``state/gateway.heartbeat``
-(RSS + MemAvailable/MemTotal + swap) and the lifecycle sentinel's ``suspected_oom``
-flag — two small file reads, no IPC.  ``/api/status`` is unauthenticated, so only
+(RSS + MemAvailable/MemTotal + swap) and the lifecycle sentinel's prior-exit flags
+(``suspected_oom``, watchdog exit, memory starvation) — two small file reads, no IPC.  ``/api/status`` is unauthenticated, so only
 coarse numbers (MB), enums and booleans.  A missing/corrupt file degrades to
 ``pressure="unknown"`` rather than raising into the status endpoint.
 """
@@ -71,6 +71,16 @@ def _read_state_files(home: Optional[Path]) -> tuple:
         return None, None
 
 
+def _prior_watchdog_flags(sentinel: dict[str, Any]) -> tuple[bool, bool]:
+    """``(watchdog_exit, memory_starved)`` for the previous life, from the ``prior_exit_reason`` /
+    ``prior_host_memory_pressure`` keys the lifecycle ledger stamps at boot (#148527)."""
+    from gateway.status import WATCHDOG_EXIT_REASONS
+
+    reason = sentinel.get("prior_exit_reason")
+    watchdog = isinstance(reason, str) and reason in WATCHDOG_EXIT_REASONS
+    return watchdog, watchdog and sentinel.get("prior_host_memory_pressure") == "critical"
+
+
 def collect_memory_status(
     home: Optional[Path] = None,
     *,
@@ -83,6 +93,8 @@ def collect_memory_status(
     status: dict[str, Any] = {
         "pressure": "unknown", "gateway_rss_mb": None, "system_total_mb": None, "system_available_mb": None,
         "swap_used_mb": None, "sampled_at": None, "last_boot_unclean": False, "last_boot_suspected_oom": False,
+        # The previous life was killed by a watchdog / and the host was critically short of memory then.
+        "last_boot_watchdog_exit": False, "last_boot_memory_starved": False,
         # Identity of the CURRENT life (sentinel started_at): the dashboard keys
         # banner dismissal on it so acknowledging one OOM restart does not mute the NEXT.
         "boot_id": None,
@@ -106,6 +118,7 @@ def collect_memory_status(
     if sentinel:
         status["last_boot_unclean"] = bool(sentinel.get("prior_unclean_exit"))
         status["last_boot_suspected_oom"] = bool(sentinel.get("prior_suspected_oom"))
+        status["last_boot_watchdog_exit"], status["last_boot_memory_starved"] = _prior_watchdog_flags(sentinel)
         started_at = sentinel.get("started_at")
         status["boot_id"] = started_at if isinstance(started_at, str) and started_at else None
 

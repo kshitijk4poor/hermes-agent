@@ -74,6 +74,37 @@ def sample_memory() -> dict[str, Any]:
     return sample
 
 
+_PSI_ROOT = Path("/proc/pressure")
+
+
+def _psi_fields(path: Path) -> dict[str, float]:
+    """``{some_avg10, some_avg60, full_avg10, full_avg60}`` from one PSI file, whose lines read
+    ``some avg10=0.00 avg60=0.00 avg300=0.00 total=0``."""
+    fields: dict[str, float] = {}
+    with open(path, encoding="utf-8-sig") as fh:
+        for line in fh:
+            kind, *pairs = line.split() or [""]
+            for key, _, value in (pair.partition("=") for pair in pairs):
+                if kind in ("some", "full") and key in ("avg10", "avg60"):
+                    fields[f"{kind}_{key}"] = float(value)
+    return fields
+
+
+def sample_pressure_stall(root: Optional[Path] = None) -> dict[str, dict[str, float]]:
+    """Linux PSI stall percentages: ``{"memory": {...}, "io": {...}}`` from ``/proc/pressure``
+    (``root`` overrides it for tests).  A resource whose file is missing or unparsable is left
+    out, so off Linux the result is ``{}``.  Never raises."""
+    base = _PSI_ROOT if root is None else root
+    sample: dict[str, dict[str, float]] = {}
+    for resource in ("memory", "io"):
+        try:
+            if fields := _psi_fields(base / resource):
+                sample[resource] = fields
+        except (OSError, ValueError):
+            continue
+    return sample
+
+
 def _read_json(path: Path) -> Optional[dict[str, Any]]:
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -308,6 +339,29 @@ def _report_unclean_exit(evidence: dict[str, Any], home: Optional[Path], *, defe
     )
 
 
+def _report_watchdog_exit(home: Optional[Path]) -> Optional[dict[str, Any]]:
+    """``prior_*`` keys for the new claim when the previous life was killed by a watchdog
+    (``phase=exited`` with a ``WATCHDOG_EXIT_REASONS`` reason), after appending a
+    ``gateway.previous_watchdog_exit`` exit-diag record; ``None`` otherwise.  Without this the
+    next claim overwrites the only record of why the gateway restarted (#148527)."""
+    sentinel = _read_json(get_lifecycle_sentinel_path(home))
+    reason = (sentinel or {}).get("exit_reason")
+    if not sentinel or sentinel.get("phase") != "exited" or not isinstance(reason, str):
+        return None
+    from gateway.status import WATCHDOG_EXIT_REASONS
+
+    if reason not in WATCHDOG_EXIT_REASONS:
+        return None
+    carry: dict[str, Any] = {"prior_exit_reason": reason}
+    pressure = sentinel.get("host_memory_pressure")
+    if isinstance(pressure, str) and pressure:
+        carry["prior_host_memory_pressure"] = pressure
+    _append_exit_diag({"ts": _now_iso(), "tag": "gateway.previous_watchdog_exit", "pid": os.getpid(),
+                       "prior_pid": sentinel.get("pid"), "prior_exit_code": sentinel.get("exit_code"),
+                       "prior_exited_at": sentinel.get("exited_at"), **carry}, home)
+    return carry
+
+
 def record_startup(home: Optional[Path] = None, *, defer_integrity_check: bool = True) -> Optional[dict[str, Any]]:
     """Boot entry point: report any unclean previous exit (evidence dict, also persisted
     to ``gateway-exit-diag.log`` and logged at WARNING) then claim the sentinel.  Never raises.
@@ -319,10 +373,13 @@ def record_startup(home: Optional[Path] = None, *, defer_integrity_check: bool =
     :func:`run_deferred_integrity_check`.  Pass False for the historic INLINE scan.
     """
     evidence: Optional[dict[str, Any]] = None
+    watchdog_exit: Optional[dict[str, Any]] = None
     try:
         evidence = detect_unclean_exit(home)
         if evidence is not None:
             _report_unclean_exit(evidence, home, defer_integrity_check=defer_integrity_check)
+        else:
+            watchdog_exit = _report_watchdog_exit(home)
     except Exception:
         logger.debug("Unclean-exit detection failed", exc_info=True)
     try:
@@ -341,6 +398,7 @@ def record_startup(home: Optional[Path] = None, *, defer_integrity_check: bool =
             claim["prior_unclean_exit"] = True
             if evidence.get("suspected_oom"):
                 claim["prior_suspected_oom"] = True
+        claim.update(watchdog_exit or {})
         _write_sentinel(claim, home)
     except Exception:
         logger.debug("Failed to claim lifecycle sentinel", exc_info=True)
@@ -406,8 +464,10 @@ def run_deferred_integrity_check(
         return "check-failed: deferred scan raised"
 
 
-def mark_exited(exit_code: Optional[int] = None, reason: str = "graceful_shutdown", home: Optional[Path] = None) -> None:
-    """Mark the current life as cleanly exited.  Idempotent, never raises.
+def mark_exited(exit_code: Optional[int] = None, reason: str = "graceful_shutdown", home: Optional[Path] = None,
+                *, host_memory_pressure: Optional[str] = None) -> None:
+    """Mark the current life as cleanly exited.  Idempotent, never raises.  ``host_memory_pressure``
+    (the liveness watchdog's fire-time ``classify_pressure`` verdict) is stamped only when given.
 
     Only rewrites a sentinel provably owned by this process: during ``--replace``
     the replacement claims it before the old process finishes teardown and must not
@@ -419,6 +479,8 @@ def mark_exited(exit_code: Optional[int] = None, reason: str = "graceful_shutdow
             return
         exited: dict[str, Any] = {"phase": "exited", "pid": os.getpid(), "exit_code": exit_code, "exit_reason": reason,
                                   "exited_at": _now_iso()}
+        if host_memory_pressure:
+            exited["host_memory_pressure"] = host_memory_pressure
         # Carry the incarnation identity: the Windows start attestation matches a clean exit by
         # PID *and* start time so a reused PID's exit cannot vouch for a different life (#110020).
         for key in ("start_time", "create_time"):

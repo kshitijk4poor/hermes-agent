@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import pathlib
 import threading
 import time
@@ -360,3 +362,129 @@ def test_heartbeat_write_does_not_block_the_loop_it_monitors():
     assert ticks >= 5, (
         f'the loop made only {ticks:d} tick(s) while the heartbeat was writing — the write is blocking the loop again'
     )
+
+
+
+# --- Fire-time host-memory forensics (#148527) -------------------------------------------------
+
+_PSI_MEMORY = ("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"
+               "full avg10=41.00 avg60=30.12 avg300=10.00 total=123\n")
+_PSI_IO = ("some avg10=90.00 avg60=80.00 avg300=50.00 total=999\n"
+           "full avg10=83.00 avg60=70.50 avg300=40.00 total=888\n")
+_CRITICAL_MEM = {"rss_kib": 300 * 1024, "mem_total_kib": 2048 * 1024,
+                 "mem_available_kib": 40 * 1024, "swap_used_kib": 0}
+_STARVATION_LINE = "Host memory pressure is critical"
+
+
+def _fire_liveness_watchdog(tmp_path, monkeypatch, sample_memory) -> list[int]:
+    """Run the real watchdog thread to its (patched) hard exit with real tmp PSI files and a
+    sentinel claimed for this process; return the exit codes it asked for."""
+    from gateway.lifecycle_ledger import record_startup
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    psi_root = tmp_path / "pressure"
+    psi_root.mkdir()
+    (psi_root / "memory").write_text(_PSI_MEMORY, encoding="utf-8")
+    (psi_root / "io").write_text(_PSI_IO, encoding="utf-8")
+    monkeypatch.setattr("gateway.lifecycle_ledger._PSI_ROOT", psi_root)
+    monkeypatch.setattr("gateway.shutdown_watchdog.sample_memory", sample_memory)
+    record_startup(tmp_path)
+    exit_codes, ref, handle_ready = [], {}, threading.Event()
+
+    def exit_and_stop(code: int) -> None:  # a patched exit returns, so stop the loop like a real one
+        assert handle_ready.wait(timeout=5.0)
+        exit_codes.append(code)
+        ref["handle"].stop()
+
+    with patch("gateway.shutdown_watchdog._hard_exit", side_effect=exit_and_stop):
+        ref["handle"] = handle = start_loop_liveness_watchdog(
+            MagicMock(spec=asyncio.AbstractEventLoop), probe_interval=0.01, probe_timeout=0.01,
+            max_strikes=1)
+        assert handle is not None
+        handle_ready.set()
+        handle.join(timeout=5.0)
+    assert not handle.is_alive()
+    return exit_codes
+
+
+def _dump_snapshot(home) -> dict:
+    from gateway.shutdown_watchdog import get_shutdown_watchdog_dump_path
+    header = get_shutdown_watchdog_dump_path(home).read_text(encoding="utf-8").splitlines()[0]
+    return json.loads(header)["snapshot"]
+
+
+def _sentinel(home) -> dict:
+    from gateway.lifecycle_ledger import get_lifecycle_sentinel_path
+    return json.loads(get_lifecycle_sentinel_path(home).read_text(encoding="utf-8"))
+
+
+def _starvation_lines(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if _STARVATION_LINE in r.getMessage()]
+
+
+def test_liveness_kill_on_starved_host_records_memory_and_says_why(tmp_path, monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger="gateway.shutdown_watchdog")
+    exit_codes = _fire_liveness_watchdog(tmp_path, monkeypatch, lambda: dict(_CRITICAL_MEM))
+
+    assert exit_codes == [75]
+    snapshot = _dump_snapshot(tmp_path)
+    assert snapshot["strikes"] == 1
+    assert snapshot["host_memory_pressure"] == "critical"
+    assert snapshot["mem"]["mem_available_kib"] == 40 * 1024
+    assert snapshot["psi"]["memory"] == {"some_avg10": 0.0, "some_avg60": 0.0,
+                                         "full_avg10": 41.0, "full_avg60": 30.12}
+    assert snapshot["psi"]["io"]["full_avg10"] == 83.0
+    sentinel = _sentinel(tmp_path)
+    assert sentinel["exit_reason"] == "loop_liveness_watchdog"
+    assert sentinel["host_memory_pressure"] == "critical"
+    [line] = _starvation_lines(caplog)
+    for fragment in ("MemAvailable 40 MiB of 2048 MiB", "gateway RSS 300 MiB", "full avg10=41.0",
+                     "frees only the gateway's own memory"):
+        assert fragment in line
+
+
+def test_starvation_kill_surfaces_as_memory_starved_on_next_boot(tmp_path, monkeypatch):
+    from gateway.lifecycle_ledger import record_startup
+    from gateway.memory_status import collect_memory_status
+
+    _fire_liveness_watchdog(tmp_path, monkeypatch, lambda: dict(_CRITICAL_MEM))
+    record_startup(tmp_path)  # the supervisor's restart
+
+    status = collect_memory_status(tmp_path)
+    assert status["last_boot_watchdog_exit"] is True
+    assert status["last_boot_memory_starved"] is True
+    assert status["last_boot_unclean"] is False  # a watchdog exit is not an unclean death
+
+
+def _assert_quiet_kill(tmp_path, monkeypatch, caplog, sample: dict, expected: str) -> None:
+    caplog.set_level(logging.WARNING, logger="gateway.shutdown_watchdog")
+    exit_codes = _fire_liveness_watchdog(tmp_path, monkeypatch, lambda: dict(sample))
+
+    assert exit_codes == [75]
+    assert _dump_snapshot(tmp_path)["host_memory_pressure"] == expected
+    assert _sentinel(tmp_path)["host_memory_pressure"] == expected
+    assert _starvation_lines(caplog) == []
+
+
+def test_liveness_kill_with_plenty_of_memory_logs_no_starvation(tmp_path, monkeypatch, caplog):
+    _assert_quiet_kill(tmp_path, monkeypatch, caplog, {
+        "rss_kib": 300 * 1024, "mem_total_kib": 2048 * 1024, "mem_available_kib": 1536 * 1024}, "ok")
+
+
+def test_liveness_kill_without_a_memory_sample_logs_no_starvation(tmp_path, monkeypatch, caplog):
+    _assert_quiet_kill(tmp_path, monkeypatch, caplog, {}, "unknown")  # sample_memory off Linux
+
+
+def test_liveness_kill_survives_a_failing_memory_sampler(tmp_path, monkeypatch):
+    def broken_sampler() -> dict:
+        raise RuntimeError("procfs exploded")
+
+    exit_codes = _fire_liveness_watchdog(tmp_path, monkeypatch, broken_sampler)
+
+    assert exit_codes == [75]  # forensics must never block the restart
+    snapshot = _dump_snapshot(tmp_path)
+    assert snapshot["strikes"] == 1
+    assert "host_memory_pressure" not in snapshot
+    sentinel = _sentinel(tmp_path)
+    assert sentinel["exit_reason"] == "loop_liveness_watchdog"
+    assert "host_memory_pressure" not in sentinel
