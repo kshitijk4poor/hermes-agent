@@ -8,7 +8,7 @@
         "type": "string"
       },
       "session": {
-        "description": "Named isolated browser session — its own daemon and (on cloud backends) own browser, so concurrent tasks don't share tabs. Reuse the same name on every related call; omit for the shared default session.",
+        "description": "Named isolated browser session — its own daemon and (on cloud backends) own browser, so concurrent tasks don't share tabs. Reuse the same name on every related call; omit for the shared default session ('default' is reserved).",
         "type": "string"
       },
       "timeout_s": {
