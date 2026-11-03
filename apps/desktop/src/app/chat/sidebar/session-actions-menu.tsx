@@ -288,6 +288,13 @@ function useSessionActions({
   // the project menu's appearance-popover guard.
   const suppressCloseFocusRef = useRef(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  // Every sidebar row carries two of these menus, each with a rename and a
+  // delete dialog: closed Radix dialogs are still Presence/Portal/context
+  // subtrees that re-render with the row (~110 of them for 28 rows, on every
+  // boot-time sidebar update). Mount each dialog the first time it opens and
+  // keep it mounted after, so its close animation still plays.
+  const [renameMounted, setRenameMounted] = useState(false)
+  const [deleteMounted, setDeleteMounted] = useState(false)
   const tiles = useStore($sessionTiles)
   const selectedStoredSessionId = useStore($selectedStoredSessionId)
   const isRemote = useStore($connection)?.mode === 'remote'
@@ -374,6 +381,7 @@ function useSessionActions({
               triggerHaptic('selection')
               // Keep focus off the row trigger so it lands in the dialog input.
               suppressCloseFocusRef.current = true
+              setRenameMounted(true)
               setRenameOpen(true)
             }
           })
@@ -543,6 +551,7 @@ function useSessionActions({
         // through this menu (sidebar rows, tab menus, the chat header) gets the
         // guard for free.
         if (onDelete) {
+          setDeleteMounted(true)
           setDeleteOpen(true)
         }
       },
@@ -610,7 +619,7 @@ function useSessionActions({
     </>
   )
 
-  const renameDialog = renameable ? (
+  const renameDialog = renameable && renameMounted ? (
     <RenameSessionDialog
       currentTitle={title}
       onOpenChange={setRenameOpen}
@@ -629,7 +638,7 @@ function useSessionActions({
     }
   }
 
-  const deleteDialog = (
+  const deleteDialog = deleteMounted ? (
     <DeleteSessionDialog
       onConfirm={() => {
         onDelete?.()
@@ -638,7 +647,7 @@ function useSessionActions({
       open={deleteOpen}
       sessionTitle={title}
     />
-  )
+  ) : null
 
   return { deleteDialog, onCloseAutoFocus, renameDialog, renderItems }
 }
