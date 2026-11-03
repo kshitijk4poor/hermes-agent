@@ -170,6 +170,16 @@ def _browser_disconnect(rid) -> dict:
     return _ok(rid, {"connected": False})
 
 
+def _cleanup_browsers_before_exit() -> None:
+    """Browser teardown at TUI/Desktop exit, before interpreter shutdown, as the gateway and classic CLI do:
+    from ``atexit`` asyncio cannot resolve a hostname CDP endpoint any more, so the agent's tabs there would
+    stay open. Later exit passes find no records left and dial nothing."""
+    from contextlib import suppress
+    with suppress(Exception):
+        from tools.browser_session_lifecycle import cleanup_all_browsers
+        cleanup_all_browsers()
+
+
 def register(server) -> None:
     """Publish this module's helpers + handlers onto ``server``, rebound to its globals."""
     bind_module(globals(), server, skip=("_",))
