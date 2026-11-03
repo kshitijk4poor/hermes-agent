@@ -24,6 +24,7 @@ integration and explicitly configured Relay subscribers or exporters.
 | Gateway gauges | `/v1/metrics` | `hermes.gateway.up/state/busy/drainable/active_agents/background_work/background_delegations/restart_requested`, `hermes.platform.up/degraded` with bounded `error_code` attributes |
 | Health/lifecycle events | `/v1/traces` | `gateway.lifecycle` state transitions (`starting -> running -> draining -> stopped`, `startup_failed`, exit), `gateway.health_snapshot`, platform state changes |
 | Diagnostics | `/v1/logs` | Warning/error gateway events with a constant body and bounded subsystem, severity, error class, and error code attributes; rendered log messages are never exported |
+| Gateway memory gauges | `/v1/metrics` | `hermes.gateway.previous_exit` = 1 with `hermes.previous_exit` in `clean`, `watchdog`, `watchdog_memory_starved`, `oom_killed`, `suspected_oom`, `unclean`, `unknown` (how the previous gateway life ended; one series per boot); `hermes.gateway.memory_pressure` = 1 with `hermes.memory_pressure` in `ok`, `elevated`, `critical`, `unknown` (live host pressure from the 30 s heartbeat) |
 | Cron scheduler gauges | `/v1/metrics` | Ticker heartbeat and last-success age (omitted when unavailable), a monotonic catch-up-occurrence count from the scheduler's stale-window branch, enabled/running job counts, and overdue count derived from persisted `next_run_at` plus the scheduler's existing grace rule |
 | Cron execution lifecycle | `/v1/traces` | Durable `claimed/running/completed/failed/unknown` states, bounded source and error class, opaque hashed job key, elapsed duration when timestamps exist, and delivery outcome when the scheduler knows it; terminal states make a fail-open flush attempt that can delay completion by up to one second |
 
@@ -44,6 +45,21 @@ one), matching the async pool's capacity accounting; alert it against
 `delegation.max_concurrent_children` to see slot pressure. Sum `active_agents`
 and `background_work` for total live work per instance; use
 `background_delegations` for pool-saturation.
+
+`hermes.gateway.previous_exit` and `hermes.gateway.memory_pressure` come from
+the same lifecycle-ledger and heartbeat files as the `memory` block of
+`/api/status`. `previous_exit` names the most specific verdict on the previous
+life, in this order: `oom_killed` (a kernel OOM-kill counter grew between that
+life's last heartbeat and this boot: the gateway's cgroup v2 counter when
+there is one, otherwise the host-wide counter, which also counts other
+processes' OOM kills), `watchdog_memory_starved` (a watchdog killed it while
+host memory pressure was `critical`), `watchdog`, `suspected_oom` (an unclean
+death whose last heartbeat already showed critical pressure), `unclean`, then
+`clean`; `unknown` when this life has no ledger claim. The value only changes
+on the next boot. Nothing is exported when a watchdog fires: the process
+hard-exits right after and the emitter is asynchronous, so the record would
+never leave; the next boot's `previous_exit` carries it. `memory_pressure`
+reads `unknown` when the heartbeat is older than 150 s.
 
 ## Enabling
 
@@ -133,7 +149,15 @@ hermes_cron_jobs_overdue > 0
 # Catch-up counter increased, proving at least one stale occurrence was
 # collapsed and run once after a delay.
 increase(hermes_cron_scheduler_catch_up_occurrences[15m]) > 0
+
+# The previous gateway life was killed by the kernel OOM killer, or by a
+# watchdog while the host was out of memory.
+hermes_gateway_previous_exit{hermes_previous_exit=~"oom_killed|watchdog_memory_starved"} == 1
 ```
+
+Collectors that front the exporter with a metric-name allowlist must add
+`hermes.gateway.previous_exit` and `hermes.gateway.memory_pressure` (see step 4
+of "Adding a new gauge/metric" below).
 
 Cron execution lifecycle records arrive as `hermes.cron_execution` spans.
 Alert or derive events from bounded attributes such as:
