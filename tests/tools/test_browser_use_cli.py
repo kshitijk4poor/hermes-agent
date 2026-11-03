@@ -515,8 +515,9 @@ class TestBackendCdpResolution:
 
 
 class TestOwnTabPreamble:
-    """Named sessions on SHARED browsers (a /browser connect CDP override) get the own-tab preamble
-    prepended; private per-name browsers (packaged Chromium, provider) and unnamed sessions do not."""
+    """No own-tab preamble on any route: the harness gives a named daemon its own tab and closes it on
+    shutdown, and the tabs a call opens on a shared browser are recorded and closed at cleanup
+    (test_browser_session_owned_tabs.py)."""
 
     def _run(self, tmp_path, monkeypatch, *, session="", private=False, provider=False, shared_cdp=""):
 
@@ -534,12 +535,10 @@ class TestOwnTabPreamble:
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
         return json.loads(bu_cli.browser_exec("print('payload')", session=session))
 
-    def test_named_shared_browser_gets_preamble(self, tmp_path, monkeypatch):
+    def test_named_shared_browser_gets_no_preamble(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, monkeypatch, session="r7k2", shared_cdp="http://127.0.0.1:9222")
         assert result["success"] is True
-        assert "_hermes_ensure_own_tab" in result["output"]
-        # model code still present, after the preamble
-        assert result["output"].index("_hermes_ensure_own_tab") < result["output"].index("print('payload')")
+        assert result["output"] == "print('payload')"
 
     def test_named_packaged_chromium_skips_preamble(self, tmp_path, monkeypatch):
         """Each named session launches its own packaged Chromium — nothing to share a tab with."""
@@ -570,13 +569,6 @@ class TestOwnTabPreamble:
         monkeypatch.setattr(bu_cli, "_find_cli", lambda: [cli])
         result = json.loads(bu_cli.browser_exec("print(1)", session="r7k2"))
         assert "sentinel:unset" in result["output"]
-
-    def test_preamble_is_valid_python(self):
-        import ast
-
-        ast.parse(bu_cli._OWN_TAB_PREAMBLE)
-        # and composes with model code
-        ast.parse(bu_cli._OWN_TAB_PREAMBLE + "print('x')")
 
 
 class TestProviderPickerIntegration:
