@@ -143,6 +143,47 @@ export async function browserFetch(
   bootstrap: BrowserBootstrap,
   request: BrowserFetchRequest
 ): Promise<{ response: Response; text: string }> {
+  const method = (request.method || 'GET').toUpperCase()
+
+  // Boot fires the same reads from many owners at once (config ×9, status ×5,
+  // profiles ×5 on one cold load): a GET identical to one still in flight joins
+  // it instead of paying another request and response read. Only in-flight
+  // requests are shared (nothing is cached), and each caller parses the text
+  // itself, so no two callers ever hold the same object.
+  if (method !== 'GET' || request.body !== undefined) {
+    return browserFetchOnce(bootstrap, request)
+  }
+
+  const key = inFlightKey(bootstrap, request)
+  const pending = inFlightGets.get(key)
+
+  if (pending) {
+    return pending
+  }
+
+  const started = browserFetchOnce(bootstrap, request).finally(() => inFlightGets.delete(key))
+  inFlightGets.set(key, started)
+
+  return started
+}
+
+const inFlightGets = new Map<string, Promise<{ response: Response; text: string }>>()
+
+function inFlightKey(bootstrap: BrowserBootstrap, request: BrowserFetchRequest): string {
+  const headers = [...new Headers(request.headers).entries()].sort(([a], [b]) => a.localeCompare(b))
+
+  return JSON.stringify([
+    endpointUrl(request.path, bootstrap.basePath, request.profile),
+    bootstrap.token ?? '',
+    request.timeoutMs ?? null,
+    headers
+  ])
+}
+
+async function browserFetchOnce(
+  bootstrap: BrowserBootstrap,
+  request: BrowserFetchRequest
+): Promise<{ response: Response; text: string }> {
   if (!bootstrap.authRequired && !bootstrap.token) {throw webappSignInRequired()}
 
   const controller = request.timeoutMs === undefined ? null : new AbortController()
