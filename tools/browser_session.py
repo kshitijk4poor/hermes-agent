@@ -46,6 +46,10 @@ _session_last_activity: dict[str, float] = {}
 # OWNING profile's scope (#86402).
 _session_owner_homes: dict[str, str] = {}
 _cleanup_failures: dict[str, int] = {}  # consecutive janitor failures (#100738)
+# Route key -> {"home_key", "targets": {endpoint: {targetId}}, "unreachable": {endpoint: misses}}: tabs
+# browser_exec opened on a shared browser, closed when the route is cleaned up (browser_session_owned_tabs).
+_owned_cdp_targets: dict[str, dict[str, Any]] = {}
+_routes_in_flight: dict[str, int] = {}  # route key -> browser_exec calls running on it: not cleaned up meanwhile
 _cleanup_lock = threading.Lock()  # protects every dict above
 _cleanup_thread: Optional[threading.Thread] = None
 _cleanup_running = False

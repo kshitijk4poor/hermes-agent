@@ -514,6 +514,8 @@ A dedicated profile starts out signed out of everything. If you want the agent t
 
 When connected, `browser_exec`, `browser_cdp`, `browser_dialog` and `browser_vault` all drive your live browser instead of launching their own. The endpoint can also be set persistently with `browser.cdp_url` in `config.yaml` or the `BROWSER_CDP_URL` environment variable.
 
+Hermes never closes your browser, but it does close the tabs `browser_exec` opened in it: an unnamed session's tabs at the end of each turn, a named session's after `browser.inactivity_timeout`, and all of them on `/browser connect` to another browser or when Hermes exits. A session's tabs are never closed while one of its `browser_exec` calls is still running. A tab that will not close is retried at the next cleanup; if the browser cannot be reached for three cleanups in a row, Hermes forgets its tabs. Only tabs Hermes created are closed; tabs you opened, or ones the agent merely switched to, stay. Set `browser.cdp_close_agent_tabs: false` to keep the agent's tabs open.
+
 ### WSL2 + Windows Chrome: prefer MCP over `/browser connect`
 
 If Hermes runs inside WSL2 but the Chrome window you want to control runs on the Windows host, `/browser connect` is often not the best path.

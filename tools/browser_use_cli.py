@@ -36,11 +36,13 @@ _BROWSER_USE_PROVIDER = "browser-use"
 # The one credential the harness itself reads (BU_AUTOSPAWN of a Browser Use cloud browser).
 _HARNESS_PASSTHROUGH_KEYS: tuple[str, ...] = ("BROWSER_USE_API_KEY",)
 
-# Cloud daemon names become the BU_NAME env var
-_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+# Cloud daemon names become the BU_NAME env var. "default" is the harness's UNNAMED daemon, which attaches to
+# the browser's first page instead of a tab of its own, so it is not a session name.
+_SESSION_RE = re.compile(r"^(?!default$)[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
-# Set on the env dict by the CDP resolvers when the resolved browser is EXCLUSIVE to this named session
-# (per-name provider / named BU cloud / Lightpanda). Popped before the subprocess launches — never exported.
+# Set on the env dict by the CDP resolvers when the resolved browser is EXCLUSIVE to this route (a provider
+# session, named BU cloud, a per-key local browser, Lightpanda): no tab recording, the whole browser goes at
+# cleanup. Popped before the subprocess launches — never exported.
 _PRIVATE_BROWSER_SENTINEL = "_HERMES_BU_PRIVATE_BROWSER"
 # Internal route provenance: this exec resolved to a browser on the Bot Desktop display and must use
 # the same human-control lease fence as the built-in browser tools. Popped before launching the CLI.
@@ -51,45 +53,6 @@ _REAL_PROFILE_FALLBACK_SENTINEL = "_HERMES_BU_REAL_PROFILE_FALLBACK"
 _LOCAL_FALLBACK_SENTINEL = "_HERMES_BU_LOCAL_FALLBACK"
 # Where new/hidden tabs may be brought to the front: a browser_use_shot.ACTIVATE_* mode. Popped before launch.
 _CLOUD_BROWSER_SENTINEL = "_HERMES_BU_CLOUD_BROWSER"
-
-# Prepended to the model's code for named sessions on SHARED browsers (a /browser connect CDP override): the
-# harness daemon attaches to the first existing page at startup, so two fresh named daemons can land on the
-# SAME tab. Steering each onto a tab it created prevents clobbering. Runs once per daemon (marker keyed by
-# BU_NAME + daemon pid).
-_OWN_TAB_PREAMBLE = """\
-# hermes: pin this named session to its own tab (once per daemon process)
-def _hermes_ensure_own_tab():
-    import os as _os, tempfile as _tf
-    _name = _os.environ.get("BU_NAME", "default")
-    try:
-        # Key the marker by the daemon's pid so a daemon restart (which
-        # re-attaches to the first shared page) re-pins automatically,
-        # while agent-driven tab switches mid-session are left alone.
-        from browser_harness import _ipc as _bipc
-        _dpid = _bipc.pid_path(_name).read_text().strip() or "0"
-    except Exception:
-        _dpid = "0"
-    _uid = _os.getuid() if hasattr(_os, "getuid") else 0
-    _marker = _os.path.join(
-        _tf.gettempdir(), "hermes-bu-owntab-%s-%s-%s" % (_uid, _name, _dpid)
-    )
-    if _os.path.exists(_marker):
-        return
-    try:
-        # Force a fresh target: new_tab() would REUSE a blank current tab,
-        # which is exactly the tab a sibling daemon may also hold.
-        _tid = cdp("Target.createTarget", url="about:blank").get("targetId")
-        if _tid:
-            switch_tab(_tid)
-    except Exception:
-        pass  # best-effort: worst case is pre-fix behavior
-    try:
-        open(_marker, "w").close()
-    except OSError:
-        pass
-_hermes_ensure_own_tab()
-del _hermes_ensure_own_tab
-"""
 
 _DEFAULT_TIMEOUT_S = 300
 _MIN_TIMEOUT_S = 5
@@ -130,8 +93,13 @@ def _set_cdp_env(env: dict, cdp: str) -> None:
     env["BU_CDP_URL" if cdp.startswith(("http://", "https://")) else "BU_CDP_WS"] = cdp
 
 
+def _cdp_env_endpoint(env: dict) -> str:
+    """The endpoint exported under the BU_CDP_* contract, or ""."""
+    return env.get("BU_CDP_WS") or env.get("BU_CDP_URL") or ""
+
+
 def _has_cdp_env(env: dict) -> bool:
-    return bool(env.get("BU_CDP_WS") or env.get("BU_CDP_URL"))
+    return bool(_cdp_env_endpoint(env))
 
 
 def _export_session_cdp(env: dict, get_session_info: Callable[[str], Any], cache_key: str,
@@ -361,8 +329,8 @@ def _export_real_profile_note(env: dict, key: str) -> None:
 
 def _mark_local_browser(env: dict, session: dict, key: str) -> None:
     """Flags for a LOCAL session browser: it runs on the Bot Desktop display (lease fence), and unless a
-    persistent profile / the real-profile browser is shared by every key, it is exclusive to this key (no
-    own-tab preamble: nothing to share a tab with)."""
+    persistent profile / the real-profile browser is shared by every key, it is exclusive to this key (its
+    tabs go with it, so none are recorded)."""
     features = session.get("features") or {}
     env[_BOT_DESKTOP_BROWSER_SENTINEL] = "lightpanda" if features.get("lightpanda") else "local"
     if not session.get("shared_profile") and not features.get("real_profile"):
@@ -470,9 +438,8 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     if err is None:
         from tools.browser_use_shot import ACTIVATE_ALWAYS
         env[_CLOUD_BROWSER_SENTINEL] = ACTIVATE_ALWAYS  # the provider's own session: the harness connects only there
-    # A provider browser keyed bu-named-<name> is exclusive to this session — the
-    # own-tab preamble would just leak a blank tab into it.
-    if err is None and session_name:
+    # A provider browser is exclusive to its cache key and closed with it: no tabs to record.
+    if err is None:
         env[_PRIVATE_BROWSER_SENTINEL] = "1"
     return err
 
@@ -507,7 +474,7 @@ def _attach_vault_supervisor(env: dict, task_id: Optional[str]) -> None:
     """Attach the per-task CDP supervisor to the browser this exec drives so ``browser_vault`` fill has
     a secret-capable WebSocket (never argv) into the SAME browser. Only CDP-routed backends expose an
     endpoint; BU direct-cloud (BU_AUTOSPAWN) does not, and the vault tools report ``supervisor_required``."""
-    cdp = env.get("BU_CDP_WS") or env.get("BU_CDP_URL")
+    cdp = _cdp_env_endpoint(env)
     if not cdp:
         return
     try:
@@ -798,7 +765,8 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     if session:
         if not _SESSION_RE.match(session):
             return tool_error(f"Invalid session name {session!r}: use 1-64 letters, digits, "
-                              "dashes, or underscores (e.g. 'r7k2').")
+                              "dashes, or underscores (e.g. 'r7k2'); 'default' is reserved, omit "
+                              "session for the shared default session.")
         env["BU_NAME"] = session
     env, route_err, local_sidecar, generation = _route_exec_current(
         env, session, task_id, bool(local), local_sidecar, route_key)
@@ -812,11 +780,16 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
     bot_desktop_browser = bool(local_engine)
     _exec_local_engine.set(local_engine)  # only local browsers carry the sentinel
 
-    # SHARED browser (/browser connect CDP override): pin each named session to its own tab (see
-    # _OWN_TAB_PREAMBLE). Private per-name browsers skip this — nothing to collide with.
-    private_browser = env.pop(_PRIVATE_BROWSER_SENTINEL, None)  # always pop: never exported to the CLI
-    if session and not private_browser:
-        code = _OWN_TAB_PREAMBLE + code
+    # A SHARED browser (/browser connect, BU_CDP_*, real or persistent profile) outlives the session: record
+    # the tabs this call opens so the session's cleanup closes exactly those (#21532). The harness gives a
+    # named daemon its own tab and closes it when the daemon stops.
+    from tools.browser_session_owned_tabs import record_tab_report, route_call, tab_report_path
+    from tools.browser_use_tab_recorder import REPORT_ENV
+    endpoint = _cdp_env_endpoint(env)
+    tab_report = tab_report_path(endpoint, bool(env.pop(_PRIVATE_BROWSER_SENTINEL, None)))  # never exported
+    env.pop(REPORT_ENV, None)  # only this call's own report, never one inherited from Hermes's environment
+    if tab_report:
+        env[REPORT_ENV] = tab_report
     # Every backend: capture_screenshot() falls back to jpeg instead of hanging on a png a hidden tab never
     # renders; only on a cloud browser does it (and new_tab) bring the tab to the front (tools/browser_use_shot.py).
     from tools.browser_use_shot import ACTIVATE_NEVER, harness_command
@@ -856,11 +829,15 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         finally:
             owning.cancel(wait=5)  # an in-flight check finishes before the post-call one runs
 
-    if bot_desktop_browser:
-        from tools.browser_session import run_fenced
-        dispatched = run_fenced({"features": {"local": True}}, dispatch)
-    else:
-        dispatched = dispatch()
+    with route_call(route_key):  # no cleanup closes this route's tabs while the call drives them
+        try:
+            if bot_desktop_browser:
+                from tools.browser_session import run_fenced
+                dispatched = run_fenced({"features": {"local": True}}, dispatch)
+            else:
+                dispatched = dispatch()
+        finally:  # a timed-out or killed call still reports the tabs it opened
+            record_tab_report(route_key, endpoint, tab_report)
     _reload_if_republished(env, generation)
     _own_harness_daemon(env)
     if "proc" not in dispatched:
@@ -995,7 +972,7 @@ BROWSER_EXEC_SCHEMA = {
         "type": "object",
         "properties": {
             "code": {"type": "string", "description": "Python code to execute using the pre-imported browser helpers. Use print(...) for any data you need back."},
-            "session": {"type": "string", "description": "Named isolated browser session — its own daemon and (on cloud backends) own browser, so concurrent tasks don't share tabs. Reuse the same name on every related call; omit for the shared default session."},
+            "session": {"type": "string", "description": "Named isolated browser session — its own daemon and (on cloud backends) own browser, so concurrent tasks don't share tabs. Reuse the same name on every related call; omit for the shared default session ('default' is reserved)."},
             "timeout_s": {"type": "integer", "default": _DEFAULT_TIMEOUT_S,
                           "description": f"Max seconds to wait for the code to finish (default {_DEFAULT_TIMEOUT_S}, max {_MAX_TIMEOUT_S})."},
         },
