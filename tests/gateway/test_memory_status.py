@@ -182,3 +182,40 @@ class TestCollectMemoryStatus:
         status = collect_memory_status(tmp_path, now=_NOW)
         assert status["pressure"] == "unknown"
         assert status["gateway_rss_mb"] is None
+
+
+    def test_watchdog_starvation_kill_surfaces(self, tmp_path: Path) -> None:
+        _write_sentinel(tmp_path, {
+            "phase": "running", "pid": 999, "started_at": "2026-11-03T09:19:00+00:00",
+            "prior_exit_reason": "loop_liveness_watchdog", "prior_host_memory_pressure": "critical",
+        })
+        status = collect_memory_status(tmp_path, now=_NOW)
+        assert status["last_boot_watchdog_exit"] is True
+        assert status["last_boot_memory_starved"] is True
+        assert status["last_boot_suspected_oom"] is False
+
+    def test_watchdog_kill_without_critical_pressure_is_not_starved(self, tmp_path: Path) -> None:
+        _write_sentinel(tmp_path, {"phase": "running", "pid": 999,
+                                   "prior_exit_reason": "loop_liveness_watchdog",
+                                   "prior_host_memory_pressure": "elevated"})
+        status = collect_memory_status(tmp_path, now=_NOW)
+        assert status["last_boot_watchdog_exit"] is True
+        assert status["last_boot_memory_starved"] is False
+
+    def test_non_watchdog_prior_exit_raises_no_watchdog_flags(self, tmp_path: Path) -> None:
+        # A forward-carried graceful reason (another feature may stamp every exit) is not a kill.
+        _write_sentinel(tmp_path, {"phase": "running", "pid": 999,
+                                   "prior_exit_reason": "graceful_shutdown",
+                                   "prior_host_memory_pressure": "critical"})
+        status = collect_memory_status(tmp_path, now=_NOW)
+        assert status["last_boot_watchdog_exit"] is False
+        assert status["last_boot_memory_starved"] is False
+
+    def test_watchdog_flags_default_false(self, tmp_path: Path) -> None:
+        missing = collect_memory_status(tmp_path / "nohome", now=_NOW)
+        _write_sentinel(tmp_path, {"phase": "running", "pid": 999,
+                                   "prior_exit_reason": ["not", "hashable"]})
+        malformed = collect_memory_status(tmp_path, now=_NOW)
+        for status in (missing, malformed):
+            assert status["last_boot_watchdog_exit"] is False
+            assert status["last_boot_memory_starved"] is False

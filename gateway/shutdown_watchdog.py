@@ -22,6 +22,9 @@ from datetime import datetime, timezone, UTC
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+# Top-level, not lazy: at fire time the host may be thrashing, and a first import reads disk.
+from gateway.lifecycle_ledger import sample_memory, sample_pressure_stall
+from gateway.memory_status import _mb, classify_pressure
 from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE
 from hermes_constants import get_hermes_home, get_process_hermes_home
 from utils import atomic_json_write
@@ -41,6 +44,11 @@ DEFAULT_LOOP_WATCHDOG_TIMEOUT_S = 10.0
 # the loop it monitors) is fixed at the root by the off-loop heartbeat write + two-witness probe (#90502),
 # so the default stays tight for genuine wedges.
 DEFAULT_LOOP_WATCHDOG_MAX_STRIKES = 3
+# Fire-time forensics (memory sample + starvation log) run in a worker the kill waits on for at most
+# this long: a stalled procfs read or a blocking log handler must not stop the hard exit (#148527).
+_FIRE_SAMPLE_BUDGET_S = 2.0
+# Same bound as the shutdown-watchdog path's drain: queued log lines reach the file before os._exit.
+_FIRE_LOG_DRAIN_S = 1.0
 _HEARTBEAT_RELATIVE = ("state", "gateway.heartbeat")
 _WATCHDOG_DUMP_RELATIVE = ("logs", "gateway-shutdown-watchdog.log")
 
@@ -123,20 +131,23 @@ def start_loop_liveness_watchdog(
                 continue
             if stop_event.is_set():
                 return
-            with contextlib.suppress(Exception):
+            with contextlib.suppress(Exception):  # logged before anything below that could stall
                 logger.critical(
                     "Gateway event loop missed %d consecutive liveness probes; dumping all thread "
                     "stacks and exiting with code %d so the service supervisor can restart it.",
                     strikes, exit_code)
+            memory = _sample_fire_memory()  # bounded, never raises; {} when sampling failed or stalled
             # File + stderr: a console-less launcher (Windows .vbs login item) discards stderr, so a
             # liveness death used to leave no stack anywhere (#120356, #91097).
             _write_watchdog_dump(
                 get_shutdown_watchdog_dump_path(), delay_s=probe_timeout * strikes,
-                snapshot={"strikes": strikes, "probe_interval_s": probe_interval},
+                snapshot={"strikes": strikes, "probe_interval_s": probe_interval, **memory},
                 event="loop_liveness_watchdog_fired")
             if stop_event.is_set():
                 return
-            _mark_exited_quietly(exit_code, "loop_liveness_watchdog")
+            _drain_log_queue_quietly()
+            _mark_exited_quietly(exit_code, "loop_liveness_watchdog",
+                                 host_memory_pressure=memory.get("host_memory_pressure"))
             _hard_exit(exit_code)
     thread = threading.Thread(target=_watchdog, daemon=True, name="gateway-loop-liveness-watchdog")
     try:
@@ -145,6 +156,56 @@ def start_loop_liveness_watchdog(
         logger.debug("Failed to start gateway loop liveness watchdog", exc_info=True)
         return None
     return _LoopLivenessWatchdogHandle(stop_event, thread)
+
+
+def _sample_fire_memory() -> dict[str, Any]:
+    """Run :func:`_liveness_memory_snapshot` in a short-lived daemon worker and wait at most
+    ``_FIRE_SAMPLE_BUDGET_S``; return whatever snapshot it published by then (``{}`` if none), so
+    the kill proceeds even when procfs or a log handler stalls.  Never raises."""
+    out: dict[str, Any] = {}
+    worker = threading.Thread(target=_liveness_memory_snapshot, args=(out,), daemon=True,
+                              name="gateway-liveness-memory-sample")
+    try:
+        worker.start()
+        worker.join(_FIRE_SAMPLE_BUDGET_S)
+    except Exception:
+        with contextlib.suppress(Exception):
+            logger.debug("Fire-time memory sample worker failed to start", exc_info=True)
+    return dict(out.get("snapshot") or {})
+
+
+def _liveness_memory_snapshot(out: dict[str, Any]) -> None:
+    """Publish fresh host-memory evidence ``{mem, psi, host_memory_pressure}`` as
+    ``out["snapshot"]``, then, at critical pressure only, log one ERROR line saying a restart may
+    not help.  Sampled in the watchdog's worker from procfs, not read from the heartbeat, which the
+    wedged loop has left stale by at least the strike window.  The line prints the gateway's own
+    RSS because the gateway itself may be the hog.  Never raises (#148527)."""
+    try:
+        mem = sample_memory()
+        psi = sample_pressure_stall()
+        pressure = classify_pressure(mem.get("mem_available_kib"), mem.get("mem_total_kib"))
+        out["snapshot"] = {"mem": mem, "psi": psi, "host_memory_pressure": pressure}
+        if pressure != "critical":
+            return
+        mib = [_mb(mem.get(key)) for key in ("mem_available_kib", "mem_total_kib", "rss_kib")]
+        logger.error(  # ERROR, not CRITICAL: the kill itself is the one CRITICAL line
+            "Host memory pressure is critical at the liveness-watchdog kill (MemAvailable %s MiB "
+            "of %s MiB, gateway RSS %s MiB, PSI memory full avg10=%s): a restart frees only the "
+            "gateway's own memory; if other processes hold the rest, the next gateway will be "
+            "starved the same way.",
+            *("n/a" if value is None else value for value in mib),
+            psi.get("memory", {}).get("full_avg10", "n/a"))
+    except Exception:
+        with contextlib.suppress(Exception):
+            logger.debug("Fire-time memory snapshot failed", exc_info=True)
+
+
+def _drain_log_queue_quietly() -> None:
+    """Bounded flush of the async file-log queue so the CRITICAL/ERROR lines above land before
+    ``os._exit`` skips atexit (mirrors the shutdown-watchdog path).  Never raises."""
+    with contextlib.suppress(Exception):
+        from hermes_logging import drain_log_queue
+        drain_log_queue(timeout=_FIRE_LOG_DRAIN_S)
 
 
 def _hard_exit(exit_code: int) -> None:
@@ -156,7 +217,7 @@ def _hard_exit(exit_code: int) -> None:
     os._exit(exit_code)
 
 
-def _mark_exited_quietly(exit_code: int, reason: str) -> None:
+def _mark_exited_quietly(exit_code: int, reason: str, *, host_memory_pressure: Optional[str] = None) -> None:
     """Best-effort terminal stamp on BOTH lifecycle records before ``os._exit`` skips teardown:
     the lifecycle ledger (so the next boot names the watchdog, not SIGKILL/OOM) and
     ``gateway_state.json`` (so ``hermes gateway status`` and every other reader of that file stop
@@ -164,7 +225,7 @@ def _mark_exited_quietly(exit_code: int, reason: str) -> None:
     LAST: it is the record housekeeping refreshes, so nothing may overwrite it after we stamp it."""
     with contextlib.suppress(Exception):
         from gateway.lifecycle_ledger import mark_exited
-        mark_exited(exit_code, reason=reason)
+        mark_exited(exit_code, reason=reason, host_memory_pressure=host_memory_pressure)
     with contextlib.suppress(Exception):  # os._exit skips atexit: stamp the exit-metrics marker now
         from hermes_cli.observability.shared_metrics_process import stamp_exit
         stamp_exit("watchdog")
@@ -219,7 +280,6 @@ def write_loop_heartbeat(
     if start_time is not None:
         payload["start_time"] = float(start_time)
     with contextlib.suppress(Exception):  # after an unclean death this is the last memory record
-        from gateway.lifecycle_ledger import sample_memory
         if mem := sample_memory():
             payload["mem"] = mem
     if extra:
