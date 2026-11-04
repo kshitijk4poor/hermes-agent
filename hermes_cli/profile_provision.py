@@ -12,8 +12,9 @@ do not mirror launch credentials, the RPC does), so routing a surface through he
 it does. Unifying those defaults is a later, separate change.
 
 Every step after the core create is best-effort: the profile already exists, so a failing step never
-undoes the create. A step that fails outright is listed in ``warnings``; credential mirroring and the
-Honcho clone report per item (``mirrored``, ``honcho_*``) instead, as they did before.
+undoes the create. A step that fails outright is listed in ``warnings``; credential mirroring reports per item
+(``mirrored``) instead, as it did before. Memory-provider plugins (Honcho, …) are not core's to
+configure here: a clone copies their files like any other.
 """
 from __future__ import annotations
 
@@ -52,7 +53,6 @@ class ProfileCreateRequest:
     model_validate_in: Optional[Path] = None  # home whose catalog vouches for the pick (default: the profile)
     mcp_servers: tuple = ()            # hermes_cli.web_models.MCPServerCreate entries
     keep_skills: tuple = ()            # non-empty: disable every installed skill not listed
-    clone_honcho: bool = False         # clone the Honcho memory config (the CLI asks for it on clones)
     # Seed bundled skills after the create. None = when the profile has no source (fresh); surfaces pass
     # their historical rule explicitly until the defaults are unified.
     seed_skills: Optional[bool] = None
@@ -81,8 +81,6 @@ class ProvisionResult:
     model_error: str = ""
     mcp_written: int = 0
     skills_disabled: int = 0
-    honcho_cloned: bool = False
-    honcho_refused: Optional[str] = None
     warnings: list[str] = field(default_factory=list)
 
 def provision_profile(request: ProfileCreateRequest) -> ProvisionResult:
@@ -128,8 +126,6 @@ def provision_profile(request: ProfileCreateRequest) -> ProvisionResult:
     if request.keep_skills:
         result.skills_disabled = step("skill selection", lambda: disable_unselected_skills(path, request.keep_skills),
                                       default=0)
-    if request.clone_honcho:
-        step("Honcho config", lambda: _clone_honcho(request.name, result))
     return result
 
 
@@ -154,23 +150,6 @@ def _pin_model(path: Path, request: ProfileCreateRequest, result: ProvisionResul
         result.model_error = str(exc.detail)
         return False
     return True
-
-
-def _clone_honcho(name: str, result: ProvisionResult) -> None:
-    try:
-        from plugins.memory import import_provider_module
-        honcho_cli = import_provider_module("honcho", "cli")
-    except Exception:
-        logger.debug("Honcho plugin unavailable; skipping its profile clone", exc_info=True)
-        return
-    if honcho_cli is None:
-        return
-    try:
-        result.honcho_cloned = bool(honcho_cli.clone_honcho_for_profile(name))
-    except honcho_cli.ConfigWriteRefused as exc:
-        result.honcho_refused = str(exc)
-    except Exception:
-        logger.debug("Honcho clone skipped for profile %s (not configured)", name, exc_info=True)
 
 
 def disable_unselected_skills(profile_dir: Path, keep) -> int:

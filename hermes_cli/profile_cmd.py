@@ -202,7 +202,7 @@ def _profile_create(args):
         name=name, clone_from=clone_from, clone_all=clone_all, clone_config=clone_config,
         no_skills=getattr(args, "no_skills", False), description=getattr(args, "description", None),
         clone_channels=clone_channels, sync_imports=sync_imports,
-        alias=not no_alias, quiet=False, clone_honcho=cloned)
+        alias=not no_alias, quiet=False)
     try:
         result = provision_profile(request)
     except (ValueError, FileExistsError, FileNotFoundError) as e:
@@ -226,10 +226,6 @@ def _profile_create(args):
             print(f"Import sources carried over — `hermes -p {name} import-agent --sync` "
                   "keeps pulling the same Claude Code / Codex trees.")
         _print_channel_clone_notice(name, source_label, clone_channels, "--clone-all" if clone_all else "--clone")
-        if result.honcho_cloned:
-            print(f"Honcho config cloned (peer: {name})")
-        elif result.honcho_refused:
-            print(f"Honcho config not cloned: {result.honcho_refused}")
     else:
         # Fresh profiles only: clones already carry the source's (user-curated) skills.
         seeded = result.skills_seeded
