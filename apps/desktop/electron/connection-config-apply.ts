@@ -32,10 +32,7 @@ export async function applyConnectionConfigAtomically<TConfig, TRegistry>({
 }: ApplyConnectionConfigAtomicallyOptions<TConfig, TRegistry>): Promise<void> {
   // Outside the try: a preflight failure has written nothing, so there is
   // nothing to roll back and no reason to touch either store.
-  // Storage-only callers must not yield between reading and committing snapshots.
-  if (preflight) {
-    await preflight()
-  }
+  await preflight?.()
 
   try {
     writeConfig(nextConfig)

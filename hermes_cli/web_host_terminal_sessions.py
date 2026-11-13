@@ -78,10 +78,6 @@ class HostOwner:
         """Blocking filesystem reads (home, tombstone): call off-loop."""
         return _home_live(self.home)
 
-    def matches(self, ws: WebSocket) -> bool:
-        return (getattr(ws.state, "ssh_terminal", None) is None
-                and _request_home(ws.query_params.get("profile")) == self.home)
-
     def admit(self, write):
         """Run ``write`` while this owner's profile home is live, or raise ``TerminalExpired``.
 
@@ -94,7 +90,8 @@ class HostOwner:
 
 
 def _request_identity(ws: WebSocket) -> tuple[str, str]:
-    """``(provider, user)`` from the admitted host-terminal ticket, or relay ticket for SSH."""
+    """``(provider, user)`` of the terminal ticket that admitted *ws*; ``_ws_gate`` admits no other
+    credential to the host terminal."""
     identity = getattr(ws, "_hermes_auth_identity", None) or {}
     user, provider = identity.get("user_id"), identity.get("provider")
     if not isinstance(user, str) or not user or not isinstance(provider, str) or not provider:
@@ -141,24 +138,17 @@ class HostTerminalRegistry(PtySessionRegistry):
 
         def spawn():
             nonlocal owner
-            if getattr(ws.state, "ssh_terminal", None) is not None:
-                from hermes_cli.web_host_terminal_ssh import prepare_shell
-                owner, argv, cwd, env = prepare_shell(ws, identity)
-            else:
-                home = _request_home(ws.query_params.get("profile"))
-                if not _home_live(home):
-                    raise TerminalExpired()
-                argv, cwd, env, shell = resolve_argv(home=home, requested_cwd=ws.query_params.get("cwd"))
-                owner = HostOwner(identity, home, shell, cwd)
+            home = _request_home(ws.query_params.get("profile"))
+            if not _home_live(home):
+                raise TerminalExpired()
+            argv, cwd, env, shell = resolve_argv(home=home, requested_cwd=ws.query_params.get("cwd"))
             bridge = PtyBridge.spawn(
                 argv, cwd=cwd, env=env,
                 cols=query_dimension(ws.query_params.get("cols"), 80, 2000),
                 rows=query_dimension(ws.query_params.get("rows"), 24, 1000))
+            owner = HostOwner(identity, home, shell, cwd)
             return bridge
 
-        if getattr(ws.state, "ssh_terminal", None) is not None:
-            from hermes_cli.web_host_terminal_ssh import warm_tunnel
-            await asyncio.to_thread(warm_tunnel, ws)
         session, _ = await self.attach_or_spawn(token, spawn=spawn)
         assert owner is not None  # spawn completed
         self.owners[token] = owner
@@ -176,7 +166,7 @@ class HostTerminalRegistry(PtySessionRegistry):
             raise TerminalDenied()
 
         def validate():
-            if not owner.matches(ws):
+            if _request_home(ws.query_params.get("profile")) != owner.home:
                 raise TerminalDenied()
             owner.admit(lambda: None)
 

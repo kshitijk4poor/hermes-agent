@@ -41,6 +41,12 @@ def get_pending(session_key: str) -> Optional[dict[str, Any]]:
         return dict(entry) if entry else None
 
 
+def any_pending() -> bool:
+    """True when any session has a pending confirm."""
+    with _lock:
+        return bool(_pending)
+
+
 def clear(session_key: str) -> None:
     """Drop the pending confirm for ``session_key`` without running it."""
     with _lock:
