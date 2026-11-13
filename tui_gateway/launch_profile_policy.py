@@ -223,11 +223,12 @@ def profile_config_scope(home: str | Path, *, launch_home: str | Path | None = N
     hosting every credential read raised ``UnscopedSecretError``, which a best-effort catch turned
     into a plausible wrong answer (#120726).
 
-    The launch home keeps the launch rules: its frozen launch secret scope is always bound, and its
-    home override + terminal policy (over the frozen ``TERMINAL_*`` overlay) only once the process
-    multiplexes, so a single-profile host stays as it was. Any other home gets its own files only,
-    stamped as foreign. No external-source hydration (``op run`` / ``bws``): these bodies persist
-    config, never call a provider. ``launch_home`` defaults to the process home.
+    The launch home keeps the launch rules: its launch secret scope (the live env while single-profile,
+    the frozen snapshot once multiplexing) is always bound; once the process multiplexes it gets the
+    full :func:`launch_profile_runtime_scope` instead, so a single-profile host stays as it was. Any
+    other home gets its own files only, stamped as foreign. No external-source hydration (``op run`` /
+    ``bws``): these bodies persist config, never call a provider. ``launch_home`` defaults to the
+    process home (``get_process_hermes_home``); the RPC passes the server's ``_launch_home()``.
     """
     from agent.secret_scope import build_profile_secret_scope, is_multiplex_active, reset_secret_scope, set_secret_scope
     from hermes_constants import get_process_hermes_home, reset_hermes_home_override, set_hermes_home_override
@@ -238,11 +239,10 @@ def profile_config_scope(home: str | Path, *, launch_home: str | Path | None = N
     # Each step is entered inside the stack, so one that raises unwinds the ones already bound.
     with contextlib.ExitStack() as stack:
         if home.resolve() == launch.resolve():
-            stack.callback(reset_secret_scope, set_secret_scope(launch_secret_scope(launch)))
             if is_multiplex_active():
-                stack.callback(reset_hermes_home_override, set_hermes_home_override(str(launch)))
-                stack.callback(reset_terminal_scope,
-                               install_profile_terminal_scope(launch, env_overlay=launch_terminal_env()))
+                stack.enter_context(launch_profile_runtime_scope(launch))
+            else:
+                stack.callback(reset_secret_scope, set_secret_scope(launch_secret_scope(launch)))
         else:
             secrets = build_profile_secret_scope(home)
             stack.callback(reset_hermes_home_override, set_hermes_home_override(str(home)))

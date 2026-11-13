@@ -764,7 +764,8 @@ async def create_profile_endpoint(body: ProfileCreate):
         # Validate against THIS dashboard's home (the catalog the picker offered), not the empty new
         # profile; the write still lands in the new profile.
         model=model, provider=provider, model_validate_in=get_process_hermes_home(),
-        mcp_servers=tuple(body.mcp_servers), keep_skills=tuple(body.keep_skills))
+        mcp_servers=tuple(body.mcp_servers), keep_skills=tuple(body.keep_skills),
+        mirror_credentials=body.mirror_credentials, share_auth=body.share_auth)
     with _profile_errors("POST /api/profiles failed", not_found=(),
                          bad_request=(ValueError, FileExistsError, FileNotFoundError)):
         # On the loop, as before: a worker thread would let two same-name creates race on the shared
