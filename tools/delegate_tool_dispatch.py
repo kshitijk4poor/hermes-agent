@@ -15,7 +15,9 @@ from typing import Any, Dict, List, Optional
 
 from hermes_cli.observability.shared_metrics_loop import begin_delegation_run, finish_delegation_unit
 from tools.async_delegation import _new_delegation_id, record_unit_child
-from tools.delegate_tool_child_run import _attach_child, _detach_child, _fabricated_entry, _signal_child_stop
+from tools.delegate_tool_child_run import (
+    _DELEGATION_ENDED, _attach_child, _detach_child, _fabricated_entry, _signal_child_stop,
+)
 from tools.delegate_tool_progress import (
     SUBAGENT_FAILURE_STATUSES, _print_completion_line, _quiet, describe_subagent_failure, format_batch_tag,
 )
@@ -403,7 +405,7 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
     child_agents = [c for (_, _, c) in unit.children]
 
     def _interrupt(user_stop: bool = False):
-        tool_reason = None if user_stop else "parent delegation ended"
+        tool_reason = None if user_stop else _DELEGATION_ENDED
         for c in child_agents:
             _signal_child_stop(c, "Async delegation cancelled", tool_reason=tool_reason)
 

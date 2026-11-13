@@ -813,7 +813,7 @@ def _dispatch_admitted(
     *, delegation_id: str, goal: str, goals: Optional[list[str]], context: Optional[str],
     toolsets: Optional[list[str]], role: str, model: Optional[str], session_key: str,
     parent_session_id: Optional[str], runner: Callable[[], dict[str, Any]], origin_ui_session_id: str,
-    origin_session_id: str, interrupt_fn: Optional[Callable[[], None]], max_async_children: int,
+    origin_session_id: str, interrupt_fn: Optional[Callable[..., None]], max_async_children: int,
     progress_fn: Optional[Callable[[], tuple]], capacity_error: str, slot_key: Optional[str] = None,
     task_indexes: Optional[list[int]] = None,
     task_transcripts: Optional[dict[str, str]] = None,
@@ -903,7 +903,7 @@ def _dispatch_admitted(
 def dispatch_async_delegation(
     *, goal: str, context: Optional[str], toolsets: Optional[list[str]], role: str, model: Optional[str],
     session_key: str, parent_session_id: Optional[str] = None, runner: Callable[[], dict[str, Any]],
-    origin_ui_session_id: str = "", origin_session_id: str = "", interrupt_fn: Optional[Callable[[], None]] = None,
+    origin_ui_session_id: str = "", origin_session_id: str = "", interrupt_fn: Optional[Callable[..., None]] = None,
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN, progress_fn: Optional[Callable[[], tuple]] = None,
 ) -> dict[str, Any]:
     """Spawn ``runner`` on the daemon executor and return a handle immediately.
@@ -931,7 +931,7 @@ def dispatch_async_delegation(
 def dispatch_async_delegation_batch(
     *, goals: list[str], context: Optional[str], toolsets: Optional[list[str]], role: str, model: Optional[str],
     session_key: str, parent_session_id: Optional[str] = None, runner: Callable[[], dict[str, Any]],
-    origin_ui_session_id: str = "", origin_session_id: str = "", interrupt_fn: Optional[Callable[[], None]] = None,
+    origin_ui_session_id: str = "", origin_session_id: str = "", interrupt_fn: Optional[Callable[..., None]] = None,
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN, delegation_id: Optional[str] = None,
     progress_fn: Optional[Callable[[], tuple]] = None, slot_key: Optional[str] = None,
     task_indexes: Optional[list[int]] = None,

@@ -53,6 +53,7 @@ class _ControlledChild(_Parent):
         self.close_count = 0
         self.closed_while_running = False
         self.observed_interrupt = None
+        self.observed_exit_reason = None
 
     def interrupt(self, message=None, **kwargs):
         accepted = super().interrupt(message, **kwargs)
@@ -313,6 +314,7 @@ def test_accepted_background_child_keeps_registry_cancellation_ownership(registr
     ("stop_command_chat_scope", "user_cancelled"),
     ("/stop", "user_cancelled"),
     ("session_reset", "user_cancelled"),
+    ("new_command", "user_cancelled"),
     # Session teardown and shutdown are not the user cancelling the child's work.
     ("session_end", "system_aborted"),
     ("CLI shutdown", "system_aborted"),
@@ -327,6 +329,9 @@ def test_background_child_stop_keeps_who_asked_for_it(registry_state, reason, ex
         assert child.unwinding.wait(5)
         terminal = task_terminal_state({"interrupted": True, "turn_exit_reason": child.observed_exit_reason})
         assert terminal[1] == expected_end_reason
-    finally:
         child.allow_finish.set()
         registry_state.get(timeout=5)
+    finally:
+        if not child.finished.is_set():
+            child.hard_interrupt("test teardown")
+        child.allow_finish.set()
