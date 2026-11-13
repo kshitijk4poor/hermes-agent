@@ -225,6 +225,68 @@ method("profiles.create", params=ProfilesCreateParams, result=ProfilesCreateResu
        doc="Create a profile (ws twin of POST /api/profiles), mirroring launch credentials by default.")
 
 
+class ProfilesProvisionParams(ProfileParams):
+    """A ``hermes_cli.profile_provision.ProfileCreateRequest`` (minus in-process-only fields); omitted
+    fields take the request's defaults."""
+
+    name: str
+    clone_from: str | None = None
+    clone_all: bool = False
+    clone_config: bool = False
+    clone_channels: bool = False
+    no_skills: bool = False
+    sync_imports: bool = False
+    description: str | None = None
+    soul: str | None = None
+    alias: bool = True
+    quiet: bool = True
+    mirror_credentials: bool = False
+    share_auth: bool = False
+    model: str = ""
+    provider: str = ""
+    keep_skills: list[str] = Field(default_factory=list)
+    clone_honcho: bool = False
+    seed_skills: bool | None = None
+    report: bool = False
+
+
+class ProvisionMirrored(Result):
+    env: bool = False
+    auth: bool | Literal["shared"] = False
+    model_inherited: bool = False
+    voice: bool = False
+
+
+class ProfilesProvisionResult(Result):
+    """A ``hermes_cli.profile_provision.ProvisionResult``: what the create did, read where it ran."""
+
+    path: str
+    skills_seeded: dict[str, JsonValue] | None = None
+    skills_seed_attempted: bool = False
+    alias_path: str | None = None
+    alias_collision: str | None = None
+    mirrored: ProvisionMirrored
+    model_set: bool = False
+    model_error: str = ""
+    mcp_written: int = 0
+    skills_disabled: int = 0
+    honcho_cloned: bool = False
+    honcho_refused: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+    source_label: str | None = None
+    display_path: str = ""
+    cloned_plugins: list[str] = Field(default_factory=list)
+    memory_provider: str | None = None
+    channels_left_behind: list[str] = Field(default_factory=list)
+    shared_channels: list[str] = Field(default_factory=list)
+    served_now: bool | None = None
+    created_by: str = "local"
+
+
+method("profiles.provision", params=ProfilesProvisionParams, result=ProfilesProvisionResult,
+       doc="Create a profile through the one provisioning entry point; the result is the full receipt.")
+
+
 class ProfileNameParams(ProfileParams):
     name: str | None = None
 

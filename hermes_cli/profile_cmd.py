@@ -158,125 +158,89 @@ def _profile_use(args):
         _die(f"Error: {e}")
 
 
-def _source_profile_dir(source_label: str) -> Path:
-    from hermes_cli.profiles import get_profile_dir
-    source_dir = get_profile_dir(source_label)
-    if not source_dir.is_dir():
-        raise FileNotFoundError(source_dir)
-    return source_dir
-
-
-def _print_channel_clone_notice(name: str, source_label: str, clone_channels: bool, clone_flag: str) -> None:
-    from hermes_cli.profile_channels import (
-        channel_platforms_configured, format_stripped_notice, shared_channel_credentials,
-        shared_credential_warning,
-    )
-    from hermes_cli.profiles import get_profile_dir
-    try:
-        source_dir = _source_profile_dir(source_label)
-    except FileNotFoundError:
-        return
+def _print_channel_clone_notice(name: str, result, clone_channels: bool, clone_flag: str) -> None:
+    from hermes_cli.profile_channels import format_stripped_notice, shared_credential_warning
     if not clone_channels:
-        for line in format_stripped_notice(name, channel_platforms_configured(source_dir), clone_flag):
+        for line in format_stripped_notice(name, result.channels_left_behind, clone_flag):
             print(line)
         return
-    shared = shared_channel_credentials(get_profile_dir(name), source_dir)
-    if shared:
-        print(shared_credential_warning(name, shared, source_label))
+    if result.shared_channels:
+        print(shared_credential_warning(name, result.shared_channels, result.source_label))
 
 
 def _profile_create(args):
-    from hermes_cli.profiles import (
-        _get_wrapper_dir, _is_wrapper_dir_in_path, check_alias_collision, create_profile,
-        create_wrapper_script, get_active_profile_name, seed_profile_skills,
+    from hermes_cli.profile_provision import (
+        GatewayProvisionError, ProfileCreateRequest, provision_profile, provision_through_gateway,
     )
+    from hermes_cli.profiles import _get_wrapper_dir, _is_wrapper_dir_in_path
     name = args.profile_name
     clone = getattr(args, "clone", False)
     clone_all = getattr(args, "clone_all", False)
     no_alias = getattr(args, "no_alias", False)
-    no_skills = getattr(args, "no_skills", False)
     clone_from = getattr(args, "clone_from", None)
     clone_channels = getattr(args, "clone_channels", False)
     sync_imports = getattr(args, "sync_imports", False)
     clone_config = clone or clone_from is not None
     cloned = clone_config or clone_all
-    source_label = clone_from or get_active_profile_name()
+    request = ProfileCreateRequest(
+        name=name, clone_from=clone_from, clone_all=clone_all, clone_config=clone_config,
+        no_skills=getattr(args, "no_skills", False), description=getattr(args, "description", None),
+        clone_channels=clone_channels, sync_imports=sync_imports,
+        alias=not no_alias, quiet=False, clone_honcho=cloned, report=True)
     try:
-        profile_dir = create_profile(
-            name=name, clone_from=clone_from, clone_all=clone_all, clone_config=clone_config,
-            no_alias=no_alias, no_skills=no_skills, description=getattr(args, "description", None),
-            clone_channels=clone_channels, sync_imports=sync_imports,
-        )
-    except (ValueError, FileExistsError, FileNotFoundError) as e:
+        # A live gateway makes the profile (one named by HERMES_TUI_GATEWAY_URL always does); with no
+        # gateway it is made here.
+        result = provision_through_gateway(request) or provision_profile(request)
+    except (ValueError, FileExistsError, FileNotFoundError, GatewayProvisionError) as e:
         _die(f"Error: {e}")
+    profile_dir = result.path
     print(f"\nProfile '{name}' created at {profile_dir}")
     if cloned:
         if clone_all:
-            print(f"Full copy from {source_label} (excluding session history, cron jobs, backups, and snapshots).")
+            print(f"Full copy from {result.source_label} (excluding session history, cron jobs, backups, and snapshots).")
         else:
-            print(f"Cloned config, .env, SOUL.md, and skills from {source_label}.")
-            from hermes_cli.profiles import cloned_plugin_names
-            plugin_names = cloned_plugin_names(profile_dir)
-            if plugin_names:
-                print(f"Cloned installed plugins too: {', '.join(plugin_names)}.")
-            from hermes_cli.profile_memory_config import cloned_memory_provider
-            memory_provider = cloned_memory_provider(profile_dir)
-            if memory_provider:
-                print(f"Cloned memory provider config ({memory_provider}) too.")
+            print(f"Cloned config, .env, SOUL.md, and skills from {result.source_label}.")
+            if result.cloned_plugins:
+                print(f"Cloned installed plugins too: {', '.join(result.cloned_plugins)}.")
+            if result.memory_provider:
+                print(f"Cloned memory provider config ({result.memory_provider}) too.")
         if sync_imports:
             print(f"Import sources carried over — `hermes -p {name} import-agent --sync` "
                   "keeps pulling the same Claude Code / Codex trees.")
-        _print_channel_clone_notice(name, source_label, clone_channels, "--clone-all" if clone_all else "--clone")
-        # Auto-clone Honcho config for the new profile (only with clone operations)
-        try:
-            from plugins.memory import import_provider_module
-            honcho_cli = import_provider_module("honcho", "cli")
-        except Exception:
-            honcho_cli = None  # Honcho plugin not installed
-        if honcho_cli is not None:
-            try:
-                if honcho_cli.clone_honcho_for_profile(name):
-                    print(f"Honcho config cloned (peer: {name})")
-            except honcho_cli.ConfigWriteRefused as e:
-                print(f"Honcho config not cloned: {e}")
-            except Exception:
-                pass  # Honcho not configured
+        _print_channel_clone_notice(name, result, clone_channels, "--clone-all" if clone_all else "--clone")
+        if result.honcho_cloned:
+            print(f"Honcho config cloned (peer: {name})")
+        elif result.honcho_refused:
+            print(f"Honcho config not cloned: {result.honcho_refused}")
     else:
         # Fresh profiles only: clones already carry the source's (user-curated) skills.
-        result = seed_profile_skills(profile_dir)
-        if result and result.get("skipped_opt_out"):
+        seeded = result.skills_seeded
+        if seeded and seeded.get("skipped_opt_out"):
             print("No bundled skills seeded (--no-skills). Delete .no-bundled-skills in the profile to opt back in.")
-        elif result:
-            print(f"{len(result.get('copied', []))} bundled skills synced.")
+        elif seeded:
+            print(f"{len(seeded.get('copied', []))} bundled skills synced.")
         else:
             print(f"⚠ Skills could not be seeded. Run `{name} update` to retry.")
     if not no_alias:
-        collision = check_alias_collision(name)
-        if collision:
-            print(f"\n⚠ Cannot create alias '{name}' — {collision}")
+        if result.alias_collision:
+            print(f"\n⚠ Cannot create alias '{name}' — {result.alias_collision}")
             print(f"  Choose a custom alias:  hermes profile alias {name} --name <custom>")
             print(f"  Or access via flag:     hermes -p {name} chat")
-        else:
-            wrapper_path = create_wrapper_script(name)
-            if wrapper_path:
-                print(f"Wrapper created: {wrapper_path}")
-                if not _is_wrapper_dir_in_path():
-                    print(f"\n⚠ {_get_wrapper_dir()} is not in your PATH.")
-                    print("  Add to your shell config (~/.bashrc or ~/.zshrc):")
-                    print('    export PATH="$HOME/.local/bin:$PATH"')
-    try:
-        profile_dir_display = "~/" + profile_dir.relative_to(Path.home()).as_posix()
-    except ValueError:
-        profile_dir_display = str(profile_dir)
+        elif result.alias_path:
+            print(f"Wrapper created: {result.alias_path}")
+            if not _is_wrapper_dir_in_path():
+                print(f"\n⚠ {_get_wrapper_dir()} is not in your PATH.")
+                print("  Add to your shell config (~/.bashrc or ~/.zshrc):")
+                print('    export PATH="$HOME/.local/bin:$PATH"')
+    for warning in result.warnings:
+        print(f"⚠ {warning}")
+    profile_dir_display = result.display_path
     print("\nNext steps:")
     print(f"  {name} setup              Configure API keys and model")
     print(f"  {name} chat               Start chatting")
-    from hermes_cli.gateway_multiplex_served import live_default_gateway_pid, recorded_served_profiles
-    from hermes_cli.profiles import normalize_profile_name
-    served = recorded_served_profiles() if live_default_gateway_pid() is not None else None
-    if served is not None and normalize_profile_name(name) in {normalize_profile_name(p) for p in served}:
+    if result.served_now:
         print("  (served now by the running multiplexed gateway — add its bot token and it connects)")
-    elif served is not None:
+    elif result.served_now is False:
         # The multiplexer did not pick the profile up (older gateway or the signal failed): a restart serves it.
         print("  hermes gateway restart    Serve this profile from the running multiplexed gateway")
     else:

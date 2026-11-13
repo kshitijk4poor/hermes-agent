@@ -165,6 +165,10 @@ def validate_env_var_name_for_write(key: str) -> None:
 # read_user_config_raw() + save_config()). save_config itself no longer re-enters via
 # read_raw_config; it takes its raw mapping from require_readable_config_before_write.
 _CONFIG_LOCK = threading.RLock()
+# Serializes a config.yaml read-modify-write SPAN across writers on worker threads (``_CONFIG_LOCK``
+# covers each load/save call, not the span between them). The dashboard's ``_CONFIG_MUTATION_LOCK``
+# is this lock, so profile provisioning and dashboard handlers never drop each other's writes.
+CONFIG_MUTATION_LOCK = threading.RLock()
 # path -> last successfully loaded (expanded) config; served after a parse failure so a
 # mid-edit broken YAML never silently drops user overrides (e.g. approvals.deny rules).
 _LAST_EXPANDED_CONFIG_BY_PATH: dict[str, Any] = {}

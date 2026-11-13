@@ -2132,6 +2132,59 @@ export interface ProfileMirrored {
   model_inherited?: boolean
   voice?: boolean
 }
+/** A ``hermes_cli.profile_provision.ProfileCreateRequest`` (minus in-process-only fields); omitted fields take the request's defaults. */
+export interface ProfilesProvisionParams {
+  profile?: string | null
+  name: string
+  clone_from?: string | null
+  clone_all?: boolean
+  clone_config?: boolean
+  clone_channels?: boolean
+  no_skills?: boolean
+  sync_imports?: boolean
+  description?: string | null
+  soul?: string | null
+  alias?: boolean
+  quiet?: boolean
+  mirror_credentials?: boolean
+  share_auth?: boolean
+  model?: string
+  provider?: string
+  keep_skills?: string[]
+  clone_honcho?: boolean
+  seed_skills?: boolean | null
+  report?: boolean
+}
+/** A ``hermes_cli.profile_provision.ProvisionResult``: what the create did, read where it ran. */
+export interface ProfilesProvisionResult {
+  path: string
+  skills_seeded?: Record<string, unknown> | null
+  skills_seed_attempted?: boolean
+  alias_path?: string | null
+  alias_collision?: string | null
+  mirrored: ProvisionMirrored
+  model_set?: boolean
+  model_error?: string
+  mcp_written?: number
+  skills_disabled?: number
+  honcho_cloned?: boolean
+  honcho_refused?: string | null
+  warnings?: string[]
+  source_label?: string | null
+  display_path?: string
+  cloned_plugins?: string[]
+  memory_provider?: string | null
+  channels_left_behind?: string[]
+  shared_channels?: string[]
+  served_now?: boolean | null
+  created_by?: string
+}
+export interface ProvisionMirrored {
+  env?: boolean
+  auth?: boolean | 'shared'
+  model_inherited?: boolean
+  voice?: boolean
+}
 export interface ProfileNameParams {
   profile?: string | null
   name?: string | null
@@ -6373,6 +6426,8 @@ export interface RpcMethods {
   'profiles.get_asset': { params: ProfilesGetAssetParams; result: ProfilesGetAssetResult }
   /** Roster of profiles with previews so a client paints without N follow-up calls. */
   'profiles.list': { params: ProfilesListParams; result: ProfilesListResult }
+  /** Create a profile through the one provisioning entry point; the result is the full receipt. */
+  'profiles.provision': { params: ProfilesProvisionParams; result: ProfilesProvisionResult }
   /** Store or clear a profile asset (avatar) atomically. */
   'profiles.set_asset': { params: ProfilesSetAssetParams; result: ProfilesSetAssetResult }
   /** Structured project facts for a cwd so UIs don't re-sniff the workspace. */
@@ -6747,6 +6802,7 @@ export const RPC_METHODS = [
   'profiles.describe',
   'profiles.get_asset',
   'profiles.list',
+  'profiles.provision',
   'profiles.set_asset',
   'project.facts',
   'projects.add_folder',

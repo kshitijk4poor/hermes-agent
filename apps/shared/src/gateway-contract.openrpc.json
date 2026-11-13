@@ -2653,6 +2653,24 @@
       }
     },
     {
+      "name": "profiles.provision",
+      "summary": "Create a profile through the one provisioning entry point; the result is the full receipt.",
+      "params": [
+        {
+          "name": "params",
+          "schema": {
+            "$ref": "#/components/schemas/ProfilesProvisionParams"
+          }
+        }
+      ],
+      "result": {
+        "name": "result",
+        "schema": {
+          "$ref": "#/components/schemas/ProfilesProvisionResult"
+        }
+      }
+    },
+    {
       "name": "profiles.set_asset",
       "summary": "Store or clear a profile asset (avatar) atomically.",
       "params": [
@@ -30479,6 +30497,325 @@
         "title": "ProfilesListResult",
         "type": "object"
       },
+      "ProfilesProvisionParams": {
+        "additionalProperties": false,
+        "description": "A ``hermes_cli.profile_provision.ProfileCreateRequest`` (minus in-process-only fields); omitted\nfields take the request's defaults.",
+        "properties": {
+          "profile": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Profile"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "clone_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Clone From"
+          },
+          "clone_all": {
+            "default": false,
+            "title": "Clone All",
+            "type": "boolean"
+          },
+          "clone_config": {
+            "default": false,
+            "title": "Clone Config",
+            "type": "boolean"
+          },
+          "clone_channels": {
+            "default": false,
+            "title": "Clone Channels",
+            "type": "boolean"
+          },
+          "no_skills": {
+            "default": false,
+            "title": "No Skills",
+            "type": "boolean"
+          },
+          "sync_imports": {
+            "default": false,
+            "title": "Sync Imports",
+            "type": "boolean"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Description"
+          },
+          "soul": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Soul"
+          },
+          "alias": {
+            "default": true,
+            "title": "Alias",
+            "type": "boolean"
+          },
+          "quiet": {
+            "default": true,
+            "title": "Quiet",
+            "type": "boolean"
+          },
+          "mirror_credentials": {
+            "default": false,
+            "title": "Mirror Credentials",
+            "type": "boolean"
+          },
+          "share_auth": {
+            "default": false,
+            "title": "Share Auth",
+            "type": "boolean"
+          },
+          "model": {
+            "default": "",
+            "title": "Model",
+            "type": "string"
+          },
+          "provider": {
+            "default": "",
+            "title": "Provider",
+            "type": "string"
+          },
+          "keep_skills": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Keep Skills",
+            "type": "array"
+          },
+          "clone_honcho": {
+            "default": false,
+            "title": "Clone Honcho",
+            "type": "boolean"
+          },
+          "seed_skills": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Seed Skills"
+          },
+          "report": {
+            "default": false,
+            "title": "Report",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ProfilesProvisionParams",
+        "type": "object"
+      },
+      "ProfilesProvisionResult": {
+        "additionalProperties": false,
+        "description": "A ``hermes_cli.profile_provision.ProvisionResult``: what the create did, read where it ran.",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "skills_seeded": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Skills Seeded"
+          },
+          "skills_seed_attempted": {
+            "default": false,
+            "title": "Skills Seed Attempted",
+            "type": "boolean"
+          },
+          "alias_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Alias Path"
+          },
+          "alias_collision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Alias Collision"
+          },
+          "mirrored": {
+            "$ref": "#/components/schemas/ProvisionMirrored"
+          },
+          "model_set": {
+            "default": false,
+            "title": "Model Set",
+            "type": "boolean"
+          },
+          "model_error": {
+            "default": "",
+            "title": "Model Error",
+            "type": "string"
+          },
+          "mcp_written": {
+            "default": 0,
+            "title": "Mcp Written",
+            "type": "integer"
+          },
+          "skills_disabled": {
+            "default": 0,
+            "title": "Skills Disabled",
+            "type": "integer"
+          },
+          "honcho_cloned": {
+            "default": false,
+            "title": "Honcho Cloned",
+            "type": "boolean"
+          },
+          "honcho_refused": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Honcho Refused"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          },
+          "source_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Source Label"
+          },
+          "display_path": {
+            "default": "",
+            "title": "Display Path",
+            "type": "string"
+          },
+          "cloned_plugins": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cloned Plugins",
+            "type": "array"
+          },
+          "memory_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Memory Provider"
+          },
+          "channels_left_behind": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Channels Left Behind",
+            "type": "array"
+          },
+          "shared_channels": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Shared Channels",
+            "type": "array"
+          },
+          "served_now": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Served Now"
+          },
+          "created_by": {
+            "default": "local",
+            "title": "Created By",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "mirrored"
+        ],
+        "title": "ProfilesProvisionResult",
+        "type": "object"
+      },
       "ProfilesSetAssetParams": {
         "additionalProperties": false,
         "description": "``data`` is a data URL or bare base64 (PNG/JPEG/WebP, sniffed); ``clear`` deletes instead.",
@@ -32815,6 +33152,41 @@
           "used_percent"
         ],
         "title": "ProviderUsageWindow",
+        "type": "object"
+      },
+      "ProvisionMirrored": {
+        "additionalProperties": false,
+        "properties": {
+          "env": {
+            "default": false,
+            "title": "Env",
+            "type": "boolean"
+          },
+          "auth": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "const": "shared",
+                "type": "string"
+              }
+            ],
+            "default": false,
+            "title": "Auth"
+          },
+          "model_inherited": {
+            "default": false,
+            "title": "Model Inherited",
+            "type": "boolean"
+          },
+          "voice": {
+            "default": false,
+            "title": "Voice",
+            "type": "boolean"
+          }
+        },
+        "title": "ProvisionMirrored",
         "type": "object"
       },
       "QueuedPrompt": {

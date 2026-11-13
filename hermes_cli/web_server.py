@@ -678,7 +678,7 @@ def get_install_id() -> Optional[str]:
 # (asyncio.to_thread): config.py's _CONFIG_LOCK covers each load/save call, not
 # the span between them, so two off-loop updates could drop each other's writes.
 # RLock so nested helpers that also take it can't self-deadlock.
-_CONFIG_MUTATION_LOCK = threading.RLock()
+from hermes_cli.config import CONFIG_MUTATION_LOCK as _CONFIG_MUTATION_LOCK  # one lock with provisioning
 
 # A finished ``gateway-restart`` child does not mean the gateway is back (it
 # exits once the restart is handed off), so in-flight reuse stops coalescing
